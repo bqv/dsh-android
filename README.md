@@ -8,6 +8,31 @@ against the host's own public HTTP + WebSocket API.
 The wire protocol, not the DOM, is the interface. Nothing is injected into the
 host and no host-side plugin is required.
 
+<p align="center">
+  <img src="docs/images/transcript.png" width="330"
+       alt="A session: the Chat tab, the prompt, its context rows, one tool call folded under a summary line, the answer, and the composer with its statistic pills">
+</p>
+
+A conversation. The agent's process folds under one summary line (`1 tool call · 1
+message`), the prompt's context travels with it as its own rows, and the session's
+own statistics sit under the composer. The Trajectory tab beside Chat shows the
+same turn as the model saw it — input, tool use, result.
+
+<p align="center">
+  <img src="docs/images/drawer.png" width="288"
+       alt="The sessions drawer: New Session, the search box, the Archived filter, Group by Workspace or List, Order by Manual or Updated, and a Settings | About footer. The session list itself is blurred out.">
+  &nbsp;&nbsp;
+  <img src="docs/images/about.png" width="288"
+       alt="The About sheet: app version, Android version and package, the host it is pointed at and how it is signed in, and the open session's route">
+</p>
+
+The drawer groups sessions by the host's own Workspace registry rather than by
+guessing from paths, and its footer pairs **Settings** — which holds only things
+that are actually settable — with **About**, which holds everything that is a fact
+about the app instead: the host, the sign-in mode, the version, the platform, and
+the open session's route. (The session list is blurred in that shot; it is
+someone's, and not this repository's.)
+
 ## Requirements
 
 - **Android 8.0 (API 26) or newer.** `minSdk` is 26; `compileSdk` and `targetSdk`
@@ -259,7 +284,9 @@ app/src/main/java/uk/xa0/dsh/
 docs/      HANDOFF.md (working state), PARITY.md (parity ledger), research/ (reverse-engineered spec)
 tools/     install.sh, device.sh, adb/emulator init scripts and helpers
 build.sh   Gradle entry point; pins the toolchain, the caches and the build lock
-.github/   the Build workflow: an installable debug APK per push and per PR
+docs/images/  the screenshots above
+.github/   Build and Release workflows: an installable APK per push, and a
+           published release per version tag
 app/build.gradle.kts, settings.gradle.kts, gradle.properties, local.properties   Gradle and SDK config
 ```
 
