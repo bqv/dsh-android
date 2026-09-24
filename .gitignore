@@ -1,4 +1,4 @@
-# Build toolchain + caches (downloaded by build.sh)
+# Build toolchain + caches (downloaded by build.sh, or laid out by CI)
 .toolchain/
 
 # Throwaway protocol probes. Deliberately not tracked: the durable record of what

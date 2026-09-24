@@ -32,6 +32,19 @@ bash build.sh :app:assembleDebug
 # -> app/build/outputs/apk/debug/app-debug.apk
 ```
 
+CI builds the same thing on every push to `main` and every pull request, so an
+APK can be had without the local toolchain at all:
+
+- the **Actions** tab → the *Build* workflow → the run for your commit →
+  **Artifacts** → `dsh-android-debug-<sha>`, or
+- the run's summary, which names the file and its size.
+
+That APK is signed with the standard **debug** key, so it installs over an
+existing debug build (`uk.xa0.dsh.debug`) without uninstalling it — the same
+package the local build produces. `.github/workflows/build.yml` only reproduces
+the `.toolchain/` layout and then calls `build.sh`, so local and CI builds cannot
+drift apart.
+
 Install it to one device:
 
 ```sh
@@ -246,6 +259,7 @@ app/src/main/java/uk/xa0/dsh/
 docs/      HANDOFF.md (working state), PARITY.md (parity ledger), research/ (reverse-engineered spec)
 tools/     install.sh, device.sh, adb/emulator init scripts and helpers
 build.sh   Gradle entry point; pins the toolchain, the caches and the build lock
+.github/   the Build workflow: an installable debug APK per push and per PR
 app/build.gradle.kts, settings.gradle.kts, gradle.properties, local.properties   Gradle and SDK config
 ```
 

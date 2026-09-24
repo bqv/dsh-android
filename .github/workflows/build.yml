@@ -1,0 +1,108 @@
+name: Build
+
+# Produces an installable debug APK for every push to main and for pull requests,
+# so a build can be had without the local toolchain at all.
+#
+# The checkout has no Gradle wrapper and `build.sh` requires JDK 17 and Gradle 8.7
+# to already exist under `.toolchain/`, so this job reproduces that layout with
+# the runner's own tooling before calling the same entry point a developer uses.
+# Nothing here is a separate build definition: if `build.sh` works locally, this
+# works, and a change that breaks one breaks both.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      # Documentation alone cannot change the APK.
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One build per ref: a newer push supersedes an in-flight one.
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version the JDK/Gradle pair is pinned to, for both the setup actions
+      # and the `.toolchain/` layout below. Kept here rather than in three places
+      # so bumping a tool is one edit.
+      - name: Toolchain versions
+        id: toolchain
+        run: |
+          echo "jdk=17" >> "$GITHUB_OUTPUT"
+          echo "gradle=8.7" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ steps.toolchain.outputs.jdk }}
+
+      # build.sh execs `.toolchain/gradle-<v>/bin/gradle` and sets JAVA_HOME to
+      # `.toolchain/jdk-17.0.20.1+1`, so both paths have to exist. The JDK is
+      # symlinked rather than copied: build.sh only needs a valid JAVA_HOME, and
+      # a copy would double the job's disk for nothing.
+      - name: Lay out .toolchain for build.sh
+        run: |
+          set -euo pipefail
+          jdk_home="${JAVA_HOME:?setup-java should have set JAVA_HOME}"
+          ln -s "$jdk_home" .toolchain/jdk-17.0.20.1+1
+
+          version='${{ steps.toolchain.outputs.gradle }}'
+          curl -fsSL --retry 3 \
+            "https://services.gradle.org/distributions/gradle-${version}-bin.zip" \
+            -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d .toolchain
+          mv ".toolchain/gradle-${version}" .toolchain/gradle-8.7
+
+          mkdir -p .toolchain/android-home .toolchain/xdg-data
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
+
+      - name: Build
+        run: bash build.sh :app:assembleDebug
+
+      - name: Rename artifact for the release name
+        id: apk
+        run: |
+          set -euo pipefail
+          src=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$src"
+          out="dsh-android-${GITHUB_SHA::7}-debug.apk"
+          cp "$src" "$out"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "size=$(du -h "$out" | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-android-debug-${{ github.sha }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          {
+            echo "### Debug APK"
+            echo
+            echo "\`${{ steps.apk.outputs.path }}\` (${{ steps.apk.outputs.size }})"
+            echo
+            echo "Signed with the debug key, so it installs over an existing"
+            echo "debug build (\`uk.xa0.dsh.debug\`) without uninstalling it."
+            echo "Download it from the Artifacts section of this run."
+          } >> "$GITHUB_STEP_SUMMARY"
