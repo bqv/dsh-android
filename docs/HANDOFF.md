@@ -9,7 +9,7 @@
 | `app/src/main/java/uk/xa0/dsh/net/` | `DshClient.kt` (RPC + auth), `RemoteMux.kt` (the `/api/remote.mux` stream mux) |
 | `app/src/main/java/uk/xa0/dsh/data/` | `ConfigStore.kt`, the Keystore-backed config |
 | `app/src/main/java/uk/xa0/dsh/DshViewModel.kt` | Every RPC call site, the mux wiring and the UI state |
-| `tools/` | Device plumbing: `adb.initd`/`adb.confd`/`adb-keepalive` (execline supervisor) + `adb-keepalive-pass` (its bash worker), `emulator.initd`/`emulator.confd`/`emulator-run`, `adb-discover.py`, `device.sh`, `install.sh`, `dsh-api.mjs` |
+| `tools/` | Device plumbing: `adb.initd`/`adb.confd`/`adb-keepalive` (execline supervisor) + `adb-keepalive-pass` (its bash worker), `emulator.initd`/`emulator.confd`/`emulator-run`, `adb-discover.py`, `device`, `install.sh`, `dsh-api.mjs` |
 | `build.sh` | The whole build; owns the build lock |
 | `docs/PARITY.md` | The ledger of what the web does vs what this app does. It is the file a future reader trusts most, so a row there must match code |
 | `docs/research/*.md` | Two kinds. A web reference (`protocol`, `design-system`, `chrome-ui`, `transcript-ui`, `panels-settings`, `mobile-remote`, `composer-menu-and-tools`, `notices-and-fold`, `journal-compaction`) whose wire contracts and reverse-engineered design are the durable value; and app notes (`trajectory`, `goal-chip`, `files-and-deliverables`, `sidebar-workspace-groups`) |
@@ -24,10 +24,10 @@ monospace.
 ./build.sh :app:assembleDebug                     # lock is INSIDE build.sh now
 tools/install.sh 127.0.0.1:5555                   # lock is INSIDE the script
 tools/install.sh <phone serial>                   # install to the phone every time too
-tools/device.sh 127.0.0.1:5555 .probe/verify.sh   # lease the whole verification block
+tools/device 127.0.0.1:5555 .probe/verify.sh   # lease the whole verification block
 ```
 
-`tools/device.sh` holds one lease for the whole sequence. A per-command lock lets
+`tools/device` holds one lease for the whole sequence. A per-command lock lets
 another agent's install land between two of your steps, and an install
 force-stops the app — a check of the lineage sheet once came back as a bare
 "Loading sessions…" screen exactly that way. The box hosts one emulator (4

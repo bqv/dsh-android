@@ -115,7 +115,7 @@ reverse_carrier() {
 
 # `emulator-<console>` implies its adb transport on the odd port beside it
 # (5554 -> 5555). Modern adb no longer scans localhost for emulator ports, so that
-# port has to be attached explicitly — tools/device.sh and tools/install.sh pin
+# port has to be attached explicitly — tools/device and tools/install.sh pin
 # `127.0.0.1:5555` rather than the `emulator-` name.
 #
 # This used to be a background waiter at the bottom of tools/emulator-run.sh. That

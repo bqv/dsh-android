@@ -82,13 +82,13 @@ tools/install.sh <serial> <apk>        # or an explicit APK
   not a mutex here. A second caller waits rather than interleaving.
 - Debug builds carry the `.debug` application id suffix
   (`uk.xa0.dsh.debug`).
-- `tools/device.sh <serial> <command...>` runs a whole device sequence — install,
+- `tools/device <serial> <command...>` runs a whole device sequence — install,
   launch, tap, screencap — under one per-device lease, so two verification runs
   cannot split each other halfway. `$SERIAL` and `$ADB` are exported to the
   command:
 
   ```sh
-  tools/device.sh 127.0.0.1:5555 sh -c 'adb -s $SERIAL shell input tap 48 128'
+  tools/device 127.0.0.1:5555 sh -c 'adb -s $SERIAL shell input tap 48 128'
   ```
 
 ## Point it at a host and sign in
@@ -282,7 +282,7 @@ app/src/main/java/uk/xa0/dsh/
   model/   Journal → renderable rows: transcript reducer, trajectory, files, search, stats, tool tree
   ui/      Compose screens and components: chat, drawer, settings, setup, trajectory, theme, markdown
 docs/      HANDOFF.md (working state), PARITY.md (parity ledger), research/ (reverse-engineered spec)
-tools/     install.sh, device.sh, adb/emulator init scripts and helpers
+tools/     install.sh, device, adb/emulator init scripts and helpers
 build.sh   Gradle entry point; pins the toolchain, the caches and the build lock
 docs/images/  the screenshots above
 .github/   Build and Release workflows: an installable APK per push, and a
