@@ -1,0 +1,138 @@
+name: Release
+
+# Publishes an installable APK on a GitHub Release, on a version tag.
+#
+# A release artifact is a permanent, linkable download, which an Actions artifact
+# is not: artifacts expire, and they are only reachable by someone who can see the
+# repository. The APK this attaches is the *release* build (id `uk.xa0.dsh`, no
+# `.debug` suffix), signed with a real release key when one is supplied.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Keystore, if you want a properly signed release rather than a debug-key one:
+# base64 a keystore and set repository secrets
+#   RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD,
+#   RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD
+# Without them the build falls back to the debug key so the job still produces
+# something installable — but a debug-key release cannot be upgraded in place by
+# a later release-key build, so set them before the first public release if you
+# care about that.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.1.0); must already exist'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Same layout build.sh expects; see .github/workflows/build.yml for why.
+      - name: Lay out .toolchain for build.sh
+        run: |
+          set -euo pipefail
+          # `.toolchain/` is gitignored, so a fresh clone does not have it.
+          mkdir -p .toolchain/android-home .toolchain/xdg-data
+          ln -s "${JAVA_HOME:?setup-java should have set JAVA_HOME}" .toolchain/jdk-17.0.20.1+1
+          curl -fsSL --retry 3 \
+            "https://services.gradle.org/distributions/gradle-8.7-bin.zip" \
+            -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d .toolchain
+          test -x .toolchain/gradle-8.7/bin/gradle
+          test -n "${ANDROID_SDK_ROOT:-}" || { echo "ANDROID_SDK_ROOT is unset"; exit 1; }
+          echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
+          cat local.properties
+
+      - name: Decode release keystore
+        id: signing
+        env:
+          KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE:-}" ]; then
+            echo "No release keystore configured; the APK will carry the debug key."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          {
+            echo "configured=true"
+            echo "storeFile=$RUNNER_TEMP/release.keystore"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build release APK
+        env:
+          SIGNING_STORE_FILE: ${{ steps.signing.outputs.storeFile }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          bash build.sh :app:assembleRelease
+          ls -la app/build/outputs/apk/release/
+
+      - name: Name the artifacts
+        id: apk
+        run: |
+          set -euo pipefail
+          tag='${{ github.event.inputs.tag || github.ref_name }}'
+          version=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          src=app/build/outputs/apk/release/app-release.apk
+          test -f "$src" || { echo "no release APK produced"; exit 1; }
+          out="dsh-android-${tag}-release.apk"
+          cp "$src" "$out"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "path=$out"
+            echo "size=$(du -h "$out" | cut -f1)"
+            echo "sha256=$(sha256sum "$out" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.apk.outputs.tag }}'
+          notes=$(cat <<EOF
+          Native Android client for DeepSeek Harness.
+
+          **Download:** \`${{ steps.apk.outputs.path }}\` (${{ steps.apk.outputs.size }})
+
+          - Version \`${{ steps.apk.outputs.version }}\`, minSdk 26, built from \`${GITHUB_SHA::7}\`.
+          - Package \`uk.xa0.dsh\` — a release build, so it installs alongside a
+            debug build rather than over it.
+          - SHA-256: \`${{ steps.apk.outputs.sha256 }}\`
+
+          See the README for how to point it at a host and sign in.
+          EOF
+          )
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${{ steps.apk.outputs.path }}" --clobber
+            gh release edit "$tag" --notes "$notes"
+          else
+            gh release create "$tag" "${{ steps.apk.outputs.path }}" \
+              --title "DSH for Android $tag" --notes "$notes"
+          fi

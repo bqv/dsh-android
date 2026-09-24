@@ -7,6 +7,26 @@ android {
     namespace = "uk.xa0.dsh"
     compileSdk = 34
 
+    // A release key can be supplied entirely through the environment, which is how
+    // CI signs without a keystore in the repository:
+    //   SIGNING_STORE_FILE, SIGNING_STORE_PASSWORD, SIGNING_KEY_ALIAS,
+    //   SIGNING_KEY_PASSWORD
+    // With none of them set — the normal local case — nothing is configured and
+    // Gradle signs the release build with the debug key, so `assembleRelease`
+    // still produces something installable instead of failing.
+    val releaseStore = System.getenv("SIGNING_STORE_FILE")
+    val releaseStoreFile = releaseStore?.takeIf { it.isNotBlank() }?.let { file(it) }
+    if (releaseStoreFile?.exists() == true) {
+        signingConfigs {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+            }
+        }
+    }
+
     // This box ships build-tools 35.0.0/36.0.0 but not AGP's default 34.0.0,
     // and there is no writable SDK root to auto-download into.
     buildToolsVersion = "35.0.0"
@@ -45,6 +65,9 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Null unless a key was supplied above, in which case this leaves
+            // Gradle's own debug-key default in place.
+            signingConfig = signingConfigs.findByName("release")
         }
         debug {
             applicationIdSuffix = ".debug"

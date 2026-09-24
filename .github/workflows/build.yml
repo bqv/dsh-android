@@ -60,6 +60,10 @@ jobs:
       - name: Lay out .toolchain for build.sh
         run: |
           set -euo pipefail
+          # `.toolchain/` is gitignored, so a fresh clone does not have it and
+          # every path below depends on it existing first.
+          mkdir -p .toolchain/android-home .toolchain/xdg-data
+
           jdk_home="${JAVA_HOME:?setup-java should have set JAVA_HOME}"
           ln -s "$jdk_home" .toolchain/jdk-17.0.20.1+1
 
@@ -68,10 +72,12 @@ jobs:
             "https://services.gradle.org/distributions/gradle-${version}-bin.zip" \
             -o /tmp/gradle.zip
           unzip -q /tmp/gradle.zip -d .toolchain
-          mv ".toolchain/gradle-${version}" .toolchain/gradle-8.7
+          # Already named gradle-<version>; build.sh looks for gradle-8.7.
+          test -x ".toolchain/gradle-${version}/bin/gradle"
 
-          mkdir -p .toolchain/android-home .toolchain/xdg-data
+          test -n "${ANDROID_SDK_ROOT:-}" || { echo "ANDROID_SDK_ROOT is unset"; exit 1; }
           echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
+          cat local.properties
 
       - name: Build
         run: bash build.sh :app:assembleDebug
