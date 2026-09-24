@@ -98,8 +98,19 @@ jobs:
           set -euo pipefail
           tag='${{ github.event.inputs.tag || github.ref_name }}'
           version=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+
+          # AGP names the artifact `-unsigned` exactly when it did not sign it, so
+          # this is also the check that the signing secrets were actually used. A
+          # `-unsigned` APK installs nowhere: Android refuses it outright.
           src=app/build/outputs/apk/release/app-release.apk
-          test -f "$src" || { echo "no release APK produced"; exit 1; }
+          if [ ! -f "$src" ]; then
+            if [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+              echo "::error::the release APK is unsigned — the RELEASE_KEYSTORE_BASE64 / password / alias secrets are missing or wrong"
+              exit 1
+            fi
+            echo "::error::no release APK produced at all"
+            exit 1
+          fi
           out="dsh-android-${tag}-release.apk"
           cp "$src" "$out"
           {
