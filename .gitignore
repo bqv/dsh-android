@@ -1,0 +1,29 @@
+# Build toolchain + caches (downloaded by build.sh)
+.toolchain/
+
+# Throwaway protocol probes. Deliberately not tracked: the durable record of what
+# was verified, and how, belongs in docs/ — this directory is screenshots, UI
+# dumps and one-off RPC probes that are worth exactly one debugging session.
+.probe/
+
+# Per-agent checkouts, each a copy of this tree with its own build/ output.
+.work/
+
+# Build serialisation. Held by flock, so the inode must survive; a tracked lock
+# file would be rewritten by every checkout of it.
+.build.lock
+.install.lock
+.device*.lock
+
+# Gradle / Android
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
+*.keystore
+
+# Editor
+.idea/
+*.iml
+.DS_Store

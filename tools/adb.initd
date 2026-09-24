@@ -1,0 +1,40 @@
+#!/sbin/openrc-run
+# OpenRC *user* service: keep one adb server and the phone's wireless transport
+# alive independently of any shell or agent session.
+#
+#   rc-service --user adb start|stop|status
+#   rc-update  --user add adb default
+#
+# Install (from the dsh-android checkout):
+#   install -m 0755 tools/adb.initd  ~/.config/rc/init.d/adb
+#   install -m 0644 tools/adb.confd  ~/.config/rc/conf.d/adb
+#   rc-update --user add adb default
+#   rc-service --user adb start
+#
+# Why this exists: adb's server is normally a child of whatever shell started it,
+# so it dies with that shell and the wireless transport drops. Under a supervisor
+# it survives, and `adb ...` works from any context.
+#
+# NOTE: when Wireless debugging is toggled off/on, Android picks a NEW random
+# port. Update ADB_PHONE in conf.d and `rc-service --user adb restart`.
+
+description="Persistent adb server + wireless transport for the DSH Android client"
+
+supervisor="supervise-daemon"
+
+# The keepalive script loops forever and reconnects on drop; supervise-daemon
+# restarts it if it ever exits.
+command="/home/user/var/work/dsh-android/tools/adb-keepalive.sh"
+directory="/home/user/var/work/dsh-android"
+
+pidfile="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/adb-keepalive.pid"
+
+output_log="/home/user/.dsh/logs/adb-keepalive.log"
+error_log="/home/user/.dsh/logs/adb-keepalive.log"
+
+respawn_delay=5
+respawn_max=0
+
+depend() {
+	use net
+}

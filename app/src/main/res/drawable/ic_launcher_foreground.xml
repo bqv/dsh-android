@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  App mark: a double chevron ("streaming forward") inside the adaptive-icon safe zone.
+  Drawn for this client rather than reusing the DeepSeek whale: a third-party
+  client is not the first-party product, and the brand guidelines' actual
+  restriction is on *naming* (do not use the "DeepSeek Harness" trademark in a
+  project name), not a clause about the mark. So this is an original choice, not a
+  required one.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:pathData="M38,37 L56,54 L38,71"
+        android:strokeColor="#E8ECF1"
+        android:strokeWidth="7.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <path
+        android:pathData="M56,37 L74,54 L56,71"
+        android:strokeColor="#4D6BFE"
+        android:strokeWidth="7.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+</vector>

@@ -1,0 +1,19 @@
+# ~/.config/rc/conf.d/adb — settings for the user service in ~/.config/rc/init.d/adb.
+#
+# The phone's LAN address. Only the port is unknown: Android randomises it every
+# time Wireless debugging is toggled, so tools/adb-discover.py finds it (mDNS
+# first, TCP-scan fallback). Update this if the phone's DHCP lease moves.
+export ADB_HOST="192.168.1.100"
+
+# Optional: pin a known endpoint and skip discovery entirely.
+# Useful if discovery is slow or the phone is on another subnet.
+# export ADB_PHONE="192.168.1.100:39783"
+
+# adb keeps its auth keys and known-hosts here. The toolchain copy is used rather
+# than ~/.android so the service matches what the build scripts expect.
+export ANDROID_USER_HOME="/home/user/var/work/dsh-android/.toolchain/android-home"
+
+# Do NOT replace PATH here: OpenRC resolves its own helpers as binaries using the
+# PATH it builds in /usr/libexec/rc/sh/functions.sh, and this file is sourced
+# *after* that. Replacing it breaks every later rc step. Extend it or leave it.
+export PATH="/home/user/.local/bin:$PATH"

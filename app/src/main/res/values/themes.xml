@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Deliberately not an AppCompat/Material XML theme: all real theming is done in
+      Compose (see ui/theme/Theme.kt). This only needs to give the window a sane
+      background before the first frame and drop the system action bar.
+    -->
+    <style name="Theme.DSH" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/dsh_window_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

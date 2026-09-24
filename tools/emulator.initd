@@ -1,0 +1,44 @@
+#!/sbin/openrc-run
+# OpenRC *user* service: exactly one headless Android emulator, kept up
+# independently of any shell or agent session.
+#
+#   rc-service  --user emulator start|stop|status|restart
+#   rc-update   --user add emulator default
+#
+# Install (from the dsh-android checkout):
+#   install -m 0755 tools/emulator.initd  ~/.config/rc/init.d/emulator
+#   install -m 0644 tools/emulator.confd  ~/.config/rc/conf.d/emulator
+#   rc-update --user add emulator default
+#   rc-service --user emulator start
+#
+# Why a service rather than a background job: a job's process group is torn down
+# when the job is reaped, which took the emulator with it and left a half-booted
+# device that looked like it had "died on its own". supervise-daemon also keeps
+# it to a single instance and restarts it if the emulator process ever exits.
+#
+# `stop` asks the emulator to exit through its own console before supervise-daemon
+# escalates, so the AVD is left in a clean state.
+
+description="Headless x86_64 Android emulator for the DSH Android client"
+
+supervisor="supervise-daemon"
+
+command="/home/user/var/work/dsh-android/tools/emulator-run.sh"
+directory="/home/user/var/work/android-x86-emulator"
+
+pidfile="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dsh-emulator.pid"
+
+output_log="/home/user/.dsh/logs/emulator.log"
+error_log="/home/user/.dsh/logs/emulator.log"
+
+# A boot takes ~90s; do not restart-storm while it is still coming up.
+respawn_delay=10
+respawn_max=0
+
+stop_pre() {
+	"${ADB:-/opt/android-sdk/platform-tools/adb}" -s "emulator-${DSH_EMULATOR_PORT:-5554}" emu kill >/dev/null 2>&1
+}
+
+depend() {
+	use net
+}

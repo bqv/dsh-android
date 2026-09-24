@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DSH hosts are commonly reached over plain HTTP on a private LAN
+  (e.g. http://192.168.1.110/ behind the auth proxy). Cleartext is therefore
+  permitted, but only as an explicit opt-in the user makes by typing an
+  http:// URL into setup.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
