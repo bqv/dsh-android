@@ -9,7 +9,7 @@
 | `app/src/main/java/uk/xa0/dsh/net/` | `DshClient.kt` (RPC + auth), `RemoteMux.kt` (the `/api/remote.mux` stream mux) |
 | `app/src/main/java/uk/xa0/dsh/data/` | `ConfigStore.kt`, the Keystore-backed config |
 | `app/src/main/java/uk/xa0/dsh/DshViewModel.kt` | Every RPC call site, the mux wiring and the UI state |
-| `tools/` | Device plumbing: `adb.initd`/`adb.confd`/`adb-keepalive.sh`, `emulator.initd`/`emulator.confd`/`emulator-run.sh`, `adb-discover.py`, `device.sh`, `install.sh`, `dsh-api.mjs` |
+| `tools/` | Device plumbing: `adb.initd`/`adb.confd`/`adb-keepalive` (execline supervisor) + `adb-keepalive-pass` (its bash worker), `emulator.initd`/`emulator.confd`/`emulator-run`, `adb-discover.py`, `device.sh`, `install.sh`, `dsh-api.mjs` |
 | `build.sh` | The whole build; owns the build lock |
 | `docs/PARITY.md` | The ledger of what the web does vs what this app does. It is the file a future reader trusts most, so a row there must match code |
 | `docs/research/*.md` | Two kinds. A web reference (`protocol`, `design-system`, `chrome-ui`, `transcript-ui`, `panels-settings`, `mobile-remote`, `composer-menu-and-tools`, `notices-and-fold`, `journal-compaction`) whose wire contracts and reverse-engineered design are the durable value; and app notes (`trajectory`, `goal-chip`, `files-and-deliverables`, `sidebar-workspace-groups`) |
@@ -51,8 +51,9 @@ rc-service --user emulator status|restart     # one headless x86_64 emulator
 ```
 
 - Emulator serial: **`127.0.0.1:5555`** — the odd port beside console 5554, which
-  `emulator-run.sh` attaches explicitly because modern adb no longer scans for
-  emulator ports. Use that serial, not `emulator-5554`.
+  `tools/adb-keepalive` attaches explicitly (from the `emulator-5554` transport)
+  because modern adb no longer scans for emulator ports. Use that serial, not
+  `emulator-5554`.
 - Phone: the LAN host is `192.168.1.100` and the port is random per Wireless
   debugging session, so `tools/adb-discover.py --host 192.168.1.100` finds it
   (mDNS `_adb-tls-connect._tcp`, TCP-scan fallback). Re-pair with

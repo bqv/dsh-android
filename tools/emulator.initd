@@ -11,6 +11,9 @@
 #   rc-update --user add emulator default
 #   rc-service --user emulator start
 #
+# Re-run the `install -m 0755 tools/emulator.initd ...` line after this file
+# changes: the installed copy, not this one, is what OpenRC actually runs.
+#
 # Why a service rather than a background job: a job's process group is torn down
 # when the job is reaped, which took the emulator with it and left a half-booted
 # device that looked like it had "died on its own". supervise-daemon also keeps
@@ -23,7 +26,9 @@ description="Headless x86_64 Android emulator for the DSH Android client"
 
 supervisor="supervise-daemon"
 
-command="/home/user/var/work/dsh-android/tools/emulator-run.sh"
+# tools/emulator-run is a bare exec of the emulator; the transport work that used
+# to sit behind it now belongs to tools/adb-keepalive.
+command="/home/user/var/work/dsh-android/tools/emulator-run"
 directory="/home/user/var/work/android-x86-emulator"
 
 pidfile="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dsh-emulator.pid"

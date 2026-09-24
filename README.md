@@ -122,7 +122,7 @@ credential refusal, and only that offers sign-in again.
 nothing until the carrier port is reversed with
 `adb reverse tcp:8081 tcp:8081` (the emulator's `10.0.2.2` is the other route to
 the host's loopback). Either way, paste the carrier cookie — the loopback
-carrier has no login form. `tools/adb-keepalive.sh` re-applies the reverse for
+carrier has no login form. `tools/adb-keepalive` re-applies the reverse for
 this box's own emulator whenever it registers.
 
 ## Wire protocol

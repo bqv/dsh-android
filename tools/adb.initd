@@ -11,6 +11,9 @@
 #   rc-update --user add adb default
 #   rc-service --user adb start
 #
+# Re-run the `install -m 0755 tools/adb.initd ...` line after this file changes:
+# the installed copy, not this one, is what OpenRC actually runs.
+#
 # Why this exists: adb's server is normally a child of whatever shell started it,
 # so it dies with that shell and the wireless transport drops. Under a supervisor
 # it survives, and `adb ...` works from any context.
@@ -22,9 +25,10 @@ description="Persistent adb server + wireless transport for the DSH Android clie
 
 supervisor="supervise-daemon"
 
-# The keepalive script loops forever and reconnects on drop; supervise-daemon
-# restarts it if it ever exits.
-command="/home/user/var/work/dsh-android/tools/adb-keepalive.sh"
+# tools/adb-keepalive is an execline script: it loops tools/adb-keepalive-pass
+# (which reconnects on drop) and never exits by itself. supervise-daemon is the
+# backstop for the cases where it can still die, e.g. a failed sleep.
+command="/home/user/var/work/dsh-android/tools/adb-keepalive"
 directory="/home/user/var/work/dsh-android"
 
 pidfile="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/adb-keepalive.pid"

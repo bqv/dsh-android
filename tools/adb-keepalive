@@ -1,0 +1,63 @@
+#!/bin/execlineb -P
+# Keep one adb server + the phone's wireless transport alive, discovering the
+# endpoint automatically.
+#
+# This file is the *supervisor*: an execline script (see the user rule of thumb:
+# if you reach for a loop with a `sleep` in it, reach for execline instead). It
+# owns no state and forks nothing of its own — it runs one pass of
+#
+#     tools/adb-keepalive-pass
+#
+# and waits before running the next one. All of the adb work, and all of the
+# state, lives in that pass script.
+#
+# Why it is split this way — this is what stopped it being hideous in htop:
+#
+#  1. The old file was a `/bin/sh` script with `while true; do ...; sleep 2; done`.
+#     Every `$( ... )` in it (dd, date, adb devices) forks *the shell itself*, so
+#     htop showed three or more entries all named `adb-keepalive.sh` at all times,
+#     with the real supervisor indistinguishable from its own transient forks.
+#     Here, execlineb execs into loopwhilex: exactly one long-lived process.
+#
+#  2. The pass script does not loop and contains no `sleep`; its EXIT CODE is the
+#     whole protocol between the two files: it exits with the number of SECONDS
+#     the driver should wait before the next pass. That is why the driver can
+#     sequence a retry without a single conditional of its own.
+#
+# Install / supervise exactly as before — tools/adb.initd points `command=` at
+# this file and is unchanged.
+
+# The checkout root, so the driver finds its pass script. Overridable, and NOT
+# unexported: the pass script reads DSH_ANDROID_ROOT itself.
+importas -D /home/user/var/work/dsh-android root DSH_ANDROID_ROOT
+
+# Teardown. supervise-daemon signals only its direct child, and OpenRC starts that
+# child in its own process group+session (verified: the driver, the pass script and
+# adb all share one PGID, while supervise-daemon's differs). So killing this
+# process alone would orphan a *working* pass script, which then fights the next
+# one after a restart. trap stays alive as the signal handler and `kill -TERM 0`
+# signals the whole group — this tree only.
+#
+# (The old bash version leaked here too: every restart left an `adb track-devices`
+# reparented to init. This is where that leak is actually closed.)
+trap
+{
+	SIGTERM { /bin/kill -TERM 0 }
+	SIGINT  { /bin/kill -TERM 0 }
+	SIGQUIT { /bin/kill -TERM 0 }
+	SIGHUP  { /bin/kill -TERM 0 }
+}
+
+loopwhilex
+  foreground { ${root}/tools/adb-keepalive-pass }
+
+  # The pass script's exit status, as seconds to wait. `-D 2` covers the case
+  # where it died without setting `?` at all. A pass killed by a signal reports
+  # 256+signum, which is not a sane delay, so anything over two minutes is
+  # clamped back to the normal 2s rather than stalling the service for minutes.
+  importas -D 2 -u wait ?
+
+  ifte
+    { foreground { /bin/sleep ${wait} } }
+    { foreground { /bin/sleep 2 } }
+    /usr/bin/test ${wait} -le 120
