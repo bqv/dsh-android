@@ -237,6 +237,25 @@ fun ChatScreen(vm: DshViewModel) {
     var frozenLive by remember { mutableStateOf<LiveAttempt?>(null) }
     val currentLive by rememberUpdatedState(live)
 
+    // ...and hold the *shape* of the ended-turn fold for the same reason.
+    //
+    // Folding is what a just-finished turn does to rows that a moment earlier were
+    // the running turn's rows, and when the reader is inside them it rewrites the
+    // whole viewport under them. Measured on a parked reader: at the instant of a
+    // fold 79% of the transcript rows in view were replaced, taking the reader
+    // from the middle of the turn to the beginning of the session.
+    //
+    // Re-pinning the reader's item cannot save that one: every row they can see is
+    // a fold member, so there is no surviving key to pin and Compose falls back to
+    // the raw index. The fix at this level is not to rewrite rows the reader is
+    // reading. The web client folds immediately because its reader is parked at the
+    // end; holding the set while they are away, and applying it in one step when
+    // they return, is the same rule as the live row above.
+    var foldedTurns by remember { mutableStateOf(endedTurns) }
+    LaunchedEffect(stickToBottom, endedTurns) {
+        if (stickToBottom) foldedTurns = endedTurns
+    }
+
     // A session switch is not a scroll. `listState` and the freeze are remembered
     // across sessions on purpose (the list must not be rebuilt per session), so
     // without this an opened session inherits the *previous* one's position and
@@ -278,15 +297,19 @@ fun ChatScreen(vm: DshViewModel) {
             }
         }
     }
-    // A turn that has ENDED has no live row to hold still: keeping the snapshot
-    // would leave the frozen text on screen until the reader happened to return to
-    // the bottom. The gate is the *turn*, not the attempt: a live attempt goes null
-    // between two steps of the same turn (the model calls a tool, then thinks
-    // again), and dropping the freeze on that instant let the row reflow under a
-    // reader who was still in history — a regression this test caught.
-    LaunchedEffect(ui.ownTurnInFlight, live) {
-        if (!ui.ownTurnInFlight && live == null) frozenLive = null
-    }
+    // There is deliberately no "the turn is over, drop the freeze" rule, and
+    // putting one back is the bug this replaces.
+    //
+    // That rule cleared the snapshot on the app's *belief* that the turn had
+    // ended, and the belief flaps: `ownTurnInFlight` is `running && !ownTurnClosed`,
+    // `running` is denied by the roster pull, and a live attempt is legitimately
+    // absent between two steps of the same turn. Measured mid-turn: two "turn
+    // over" instants (00:27:15, 00:27:19) while that same turn ran on to step 6.
+    // Each one dropped the freeze under a reader who was in history, and the next
+    // attempt's reasoning replaced the text they were reading. The freeze now ends
+    // only when a *position* says the reader is done with it — reaching the end,
+    // above. `ownTurnInFlight` itself is untouched, so the seats that read it (the
+    // elapsed clock and the bottom "Deep diving…" status row) are unchanged.
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect { interaction ->
             // The position rule above covers this, but only once the drag has
@@ -747,8 +770,8 @@ fun ChatScreen(vm: DshViewModel) {
                 // `frozenLive` while the reader is in history, so the streaming row
                 // cannot grow and reflow the list under them.
                 val shownLive = frozenLive ?: live
-                val rows = remember(entries, endedTurns, expandedTurns, shownLive) {
-                    buildDisplayRows(entries, endedTurns, expandedTurns, shownLive).asReversed()
+                val rows = remember(entries, foldedTurns, expandedTurns, shownLive) {
+                    buildDisplayRows(entries, foldedTurns, expandedTurns, shownLive).asReversed()
                 }
 
                 // The tool-call forest, keyed by call id so a row can find its own
