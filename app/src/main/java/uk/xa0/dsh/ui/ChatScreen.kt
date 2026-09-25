@@ -294,15 +294,19 @@ fun ChatScreen(vm: DshViewModel) {
             }
         }
     }
-    // A turn that has ENDED has no live row to hold still: keeping the snapshot
-    // would leave the frozen text on screen until the reader happened to return to
-    // the bottom. The gate is the *turn*, not the attempt: a live attempt goes null
-    // between two steps of the same turn (the model calls a tool, then thinks
-    // again), and dropping the freeze on that instant let the row reflow under a
-    // reader who was still in history — a regression this test caught.
-    LaunchedEffect(ui.ownTurnInFlight, live) {
-        if (!ui.ownTurnInFlight && live == null) frozenLive = null
-    }
+    // There is deliberately no "the turn is over, drop the freeze" rule, and
+    // putting one back is the bug this replaces.
+    //
+    // That rule cleared the snapshot on the app's *belief* that the turn had
+    // ended, and the belief flaps: `ownTurnInFlight` is `running && !ownTurnClosed`,
+    // `running` is denied by the roster pull, and a live attempt is legitimately
+    // absent between two steps of the same turn. Measured mid-turn: two "turn
+    // over" instants (00:27:15, 00:27:19) while that same turn ran on to step 6.
+    // Each one dropped the freeze under a reader who was in history, and the next
+    // attempt's reasoning replaced the text they were reading. The freeze now ends
+    // only when a *position* says the reader is done with it — reaching the end,
+    // above. `ownTurnInFlight` itself is untouched, so the seats that read it (the
+    // elapsed clock and the bottom "Deep diving…" status row) are unchanged.
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect { interaction ->
             // The position rule above covers this, but only once the drag has
