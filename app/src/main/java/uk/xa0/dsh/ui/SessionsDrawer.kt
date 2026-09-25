@@ -68,6 +68,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import uk.xa0.dsh.PendingKind
 import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
 import uk.xa0.dsh.model.SessionSearchHit
@@ -117,6 +118,13 @@ fun SessionsDrawer(
     workspaces: List<WorkspaceItem>,
     archivedSessionIds: Set<String>,
     completedSessionIds: Set<String>,
+    /**
+     * Which blocking interaction each session holds (`AttentionCenter`). A
+     * session parked on an approval or a question is neither idle nor ordinary
+     * work, and the drawer paints every row at once, so this is a per-session map
+     * rather than the single card the chat screen shows.
+     */
+    pendingInteractions: Map<String, PendingKind> = emptyMap(),
     currentId: String?,
     drawerOpen: Boolean,
     loading: Boolean,
@@ -616,6 +624,7 @@ fun SessionsDrawer(
                             selected = row.session.id == currentId,
                             archived = row.session.id in archivedSessionIds,
                             completedSessionIds = completedSessionIds,
+                            pending = pendingInteractions[row.session.id],
                             rollup = rollups[row.session.id],
                             expanded = row.session.id in expandedSessions,
                             onToggleSubagents = {
@@ -829,6 +838,8 @@ private fun SessionRow(
     selected: Boolean,
     archived: Boolean,
     completedSessionIds: Set<String>,
+    /** The blocking interaction this session holds, if any; see [PendingKind]. */
+    pending: PendingKind?,
     /** Subagent descendants of this session; null when it has none. */
     rollup: SubagentRollup?,
     expanded: Boolean,
@@ -853,7 +864,20 @@ private fun SessionRow(
             .padding(horizontal = DshSpacing.md),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(16.dp)
+                // The web puts each label on the dot as screen-reader text
+                // (`SessionStatusDots`, `rows/Rows.tsx:271-281`); there is no hover
+                // card here to reveal it, so the spoken label is the only place the
+                // kind is nameable. The amber itself is the actionable half — it says
+                // "open this row" — and the row is too tight for a visible chip.
+                .then(
+                    if (pending == null) Modifier
+                    else Modifier.semantics { contentDescription = pending.label },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
             // The dot is gated exactly like the web row:
             // `showStatus = primaryStatus.state !== 'done' || row.completed`.
             // A plain idle session therefore shows no dot at all — only running
@@ -867,7 +891,12 @@ private fun SessionRow(
             // the dot is this client's rendering of that second status (a phone has no
             // hover or aria label to carry it), so descendant activity stays reported
             // and the own-turn dot stays honest.
+            //
+            // Pending outranks running, exactly as the web's precedence does
+            // (`rows/Rows.tsx:261-264`): a session blocked on a human is *waiting*,
+            // whatever the agent registry still reports about its turn.
             val dot = when {
+                pending != null -> DotState.WARNING
                 session.running -> DotState.ONGOING
                 session.id in completedSessionIds -> DotState.DONE
                 else -> null

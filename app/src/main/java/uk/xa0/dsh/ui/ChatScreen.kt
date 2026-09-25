@@ -474,6 +474,7 @@ fun ChatScreen(vm: DshViewModel) {
                     workspaces = ui.workspaces,
                     archivedSessionIds = ui.archivedSessionIds,
                     completedSessionIds = ui.completedSessionIds,
+                    pendingInteractions = ui.pendingInteractions,
                     currentId = ui.currentSessionId,
                     drawerOpen = drawerState.isOpen,
                     loading = ui.sessionsLoading,

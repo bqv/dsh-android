@@ -24,6 +24,29 @@ import uk.xa0.dsh.net.StreamEvent
 import java.util.concurrent.ConcurrentHashMap
 
 /**
+ * The three ways an agent can be blocked on a human, as the web discriminates
+ * them (`ui-workspace/src/client/rows/Rows.tsx` `sessionStatuses`). [label] is
+ * the web's own `status.*` copy (`ui-workspace/src/client/locales.ts:127-129`);
+ * [precedence] is the cross-domain ranking the web registers per domain
+ * (`ui-approval/src/client/index.ts:77-79` = 0,
+ * `ui-user-questions/src/client/index.ts:91-93` = 1 or 2), applied at
+ * `ui-session/src/client/index.ts:375` where the larger value wins a session.
+ */
+enum class PendingKind(val precedence: Int, val label: String) {
+    /** An `approval/request` waterfall; `ui-approval` registers it at 0. */
+    APPROVAL(0, "Waiting for approval"),
+
+    /** A `user-questions/request` with no plan intent; `ui-user-questions` at 1. */
+    QUESTION(1, "Waiting for answer"),
+
+    /**
+     * The same question waterfall with `intent.kind == 'plan-review'`, ranked 2
+     * by `ui-user-questions` so a plan beats an ordinary question.
+     */
+    PLAN_REVIEW(2, "Plan awaiting review"),
+}
+
+/**
  * Everything that asks the human for something, owned by the process rather than
  * by a screen.
  *
@@ -63,6 +86,15 @@ class AttentionCenter(private val context: Context) {
 
     private val _questions = MutableStateFlow<PendingQuestionSet?>(null)
     val questions: StateFlow<PendingQuestionSet?> = _questions.asStateFlow()
+
+    /**
+     * Which blocking interaction each session is parked on, for the drawer's
+     * status dot — a session-scoped projection, not the single visible card
+     * above, because the drawer paints every row at once. Sessions whose
+     * waterfall carried no id are absent: nothing in the list can name them.
+     */
+    private val _pendingBySession = MutableStateFlow<Map<String, PendingKind>>(emptyMap())
+    val pendingBySession: StateFlow<Map<String, PendingKind>> = _pendingBySession.asStateFlow()
 
     /**
      * Set by the UI so an alert already on screen does not also buzz the phone,
@@ -152,6 +184,7 @@ class AttentionCenter(private val context: Context) {
         questionSets.clear()
         _approval.value = null
         _questions.value = null
+        _pendingBySession.value = emptyMap()
     }
 
     /** Re-created after a config change, so the new mux carries the stream. */
@@ -204,10 +237,10 @@ class AttentionCenter(private val context: Context) {
     }
 
     /**
-     * Re-projects the per-session maps onto the single visible card. Only the
-     * on-screen session's item is offered, so a background waterfall cannot
-     * replace it; a waterfall with no session at all is the fallback, because
-     * nothing else can select it.
+     * Re-projects the per-session maps onto the single visible card and onto the
+     * drawer's per-session kinds. Only the on-screen session's item is offered to
+     * the card, so a background waterfall cannot replace it; a waterfall with no
+     * session at all is the fallback, because nothing else can select it.
      */
     private fun publishVisible() {
         val visible = visibleSessionId
@@ -215,6 +248,28 @@ class AttentionCenter(private val context: Context) {
             (visible?.let { approvals[it] }) ?: approvals.values.firstOrNull { it.sessionId == null }
         _questions.value =
             (visible?.let { questionSets[it] }) ?: questionSets.values.firstOrNull { it.sessionId == null }
+
+        // One kind per session, at the web's cross-domain precedence
+        // (`ui-session/src/client/index.ts:366-386`: larger wins), so an approval
+        // and a question raised on the same session cannot flap between colours.
+        // Re-offering at the same rank replaces, mirroring the web's `>=` tie.
+        val perSession = HashMap<String, PendingKind>()
+        fun offer(sessionId: String?, kind: PendingKind) {
+            val id = sessionId ?: return
+            val held = perSession[id]
+            if (held == null || kind.precedence >= held.precedence) perSession[id] = kind
+        }
+        approvals.values.forEach { offer(it.sessionId, PendingKind.APPROVAL) }
+        questionSets.values.forEach { set ->
+            offer(
+                set.sessionId,
+                // `plan-review` is not a separate waterfall: it is the same
+                // `user-questions/request` whose intent the card already reads.
+                if (set.questions.any { it.isPlanReview }) PendingKind.PLAN_REVIEW
+                else PendingKind.QUESTION,
+            )
+        }
+        _pendingBySession.value = perSession
     }
 
     private fun keyFor(sessionId: String?, eventId: String): String = sessionId ?: eventId
