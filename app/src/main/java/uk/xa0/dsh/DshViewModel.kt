@@ -495,6 +495,14 @@ data class UiState(
     val baseUrl: String = "",
     val username: String = "",
     val socketConnected: Boolean = false,
+    /**
+     * The mux's real four-state value, carried beside [socketConnected] so every
+     * existing caller that only wants OPEN/not-OPEN keeps working while the
+     * conversation can still tell CONNECTING from CLOSED — collapsing the two
+     * into one Boolean is what left a re-dialling socket with no on-screen
+     * wording at all.
+     */
+    val muxState: MuxState = MuxState.IDLE,
     val approval: PendingApproval? = null,
     /** An agent is waiting on an answer; the app must answer or the call fails. */
     val questions: PendingQuestionSet? = null,
@@ -533,6 +541,29 @@ data class UiState(
      * a row that over-reports.
      */
     val ownTurnInFlight: Boolean get() = running && !ownTurnClosed
+
+    /**
+     * What the conversation's connection pill says, or null when there is
+     * nothing honest to say.
+     *
+     * The shell's model is three states (`ConnectionState` in
+     * `packages/client/connection/src/client/connection.ts`): `connecting` while
+     * its recovery loop runs, `connected`, and `disconnected` — which is emitted
+     * only when the *browser* reports no network. The retry backoff happens after
+     * the state has already become `connecting`, so a socket that dropped is
+     * `connection.connecting` = 'Reconnecting' for the whole episode, and
+     * 'Disconnected' (`connection.error`) is the no-network state this client has
+     * no signal for. That makes CLOSED — the backoff wait before the supervisor
+     * redials — a 'Reconnecting' too, not the web's offline word.
+     *
+     * IDLE claims nothing: it is the mux before an attempt has an outcome, which
+     * the web also renders as no indicator at all.
+     */
+    val connectionLabel: String?
+        get() = when (muxState) {
+            MuxState.CONNECTING, MuxState.CLOSED -> "Reconnecting"
+            MuxState.OPEN, MuxState.IDLE -> null
+        }
 }
 
 /**
@@ -826,9 +857,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             while (true) {
-                val open = runCatching { client.mux().state.value == MuxState.OPEN }.getOrDefault(false)
-                if (_ui.value.socketConnected != open) {
-                    _ui.value = _ui.value.copy(socketConnected = open)
+                val state = runCatching { client.mux().state.value }.getOrDefault(MuxState.IDLE)
+                val open = state == MuxState.OPEN
+                // Both fields move together: a CONNECTING -> CLOSED step leaves
+                // `socketConnected` false either way but changes the word the
+                // pill shows, so the guard is on the four-state value.
+                if (_ui.value.muxState != state) {
+                    _ui.value = _ui.value.copy(muxState = state, socketConnected = open)
                 }
                 delay(1000)
             }
