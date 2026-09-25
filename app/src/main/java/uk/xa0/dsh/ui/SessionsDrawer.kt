@@ -157,9 +157,19 @@ fun SessionsDrawer(
      * restart, unlike Group and Order beside it in the same row.
      */
     showArchived: Boolean,
+    /**
+     * The Workspace sections the user collapsed, by [Section.key]. Owned by the
+     * caller for the same reason as [showArchived]: as a local `remember` it was
+     * forgotten on every cold start, so the drawer reopened with every Workspace
+     * expanded. Only this collapse state is persisted — the "Show N more" paging
+     * and per-session subagent disclosures below stay ephemeral, because they are
+     * navigation within one visit rather than a view the user chose to keep.
+     */
+    collapsedSections: Set<String>,
     onGroupByWorkspace: (Boolean) -> Unit,
     onOrderByUpdated: (Boolean) -> Unit,
     onShowArchived: (Boolean) -> Unit,
+    onCollapsedSections: (Set<String>) -> Unit,
     onRename: (String, String) -> Unit = { _, _ -> },
     onFork: (String) -> Unit = {},
     onArchive: (String) -> Unit = {},
@@ -187,9 +197,10 @@ fun SessionsDrawer(
 ) {
     val colors = DshTheme.colors
     var query by rememberSaveable { mutableStateOf("") }
-    var collapsed by remember { mutableStateOf(emptySet<String>()) }
     // Section paging ("Show N more") and the per-session subagent disclosure are
-    // different namespaces, so they get different sets.
+    // different namespaces, so they get different sets — and both stay local, as
+    // per-visit navigation rather than a persisted preference. The Workspace
+    // collapse set beside them is hoisted for exactly that reason.
     var expandedSections by remember { mutableStateOf(emptySet<String>()) }
     var expandedSessions by remember { mutableStateOf(emptySet<String>()) }
 
@@ -602,7 +613,7 @@ fun SessionsDrawer(
                 return@LazyColumn
             }
             sections.forEach { section ->
-                val isCollapsed = section.key in collapsed
+                val isCollapsed = section.key in collapsedSections
                 val isExpanded = section.key in expandedSections
                 val shown = when {
                     isExpanded -> section.rows
@@ -624,7 +635,13 @@ fun SessionsDrawer(
                         count = section.rows.count { it.depth == 0 },
                         collapsed = isCollapsed,
                         onClick = {
-                            collapsed = if (isCollapsed) collapsed - section.key else collapsed + section.key
+                            onCollapsedSections(
+                                if (isCollapsed) {
+                                    collapsedSections - section.key
+                                } else {
+                                    collapsedSections + section.key
+                                },
+                            )
                         },
                         onCreate = section.key
                             .takeIf { it != FLAT && it != UNGROUPED }
