@@ -122,6 +122,13 @@ fun SessionsDrawer(
     loading: Boolean,
     onSelect: (String) -> Unit,
     onNew: () -> Unit,
+    /**
+     * Start a session inside one Workspace. The web puts this control on the
+     * Workspace row itself (`actions.newSession.aria` = "New session in {name}")
+     * rather than offering a bare "new session" and asking where afterwards —
+     * which is also what stops a blank being stranded in the Workspace you left.
+     */
+    onNewInWorkspace: (String) -> Unit = {},
     onRefresh: () -> Unit,
     onSettings: () -> Unit,
     /**
@@ -432,7 +439,13 @@ fun SessionsDrawer(
         }
 
         // New Session — 38dp, hairline border, r12.
+        //
+        // Only where the per-Workspace `+` cannot do the job: in the flat list
+        // there are no Workspace rows to hang it on, and a host with no Workspaces
+        // registered has no group at all. Left visible in the grouped case it was
+        // the button that created a blank first and asked "where?" second.
         val newShape = RoundedCornerShape(DshRadius.card)
+        if (!groupByWorkspace || workspaces.isEmpty()) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -447,6 +460,7 @@ fun SessionsDrawer(
             Icon(Icons.Rounded.Add, contentDescription = null, tint = colors.labelPrimary, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(DshSpacing.sm))
             Text("New Session", style = DshType.labelLarge, color = colors.labelPrimary)
+        }
         }
 
         Spacer(Modifier.height(DshSpacing.lg))
@@ -604,6 +618,9 @@ fun SessionsDrawer(
                         onClick = {
                             collapsed = if (isCollapsed) collapsed - section.key else collapsed + section.key
                         },
+                        onCreate = section.key
+                            .takeIf { it != FLAT && it != UNGROUPED }
+                            ?.let { workspaceId -> { onNewInWorkspace(workspaceId) } },
                     )
                 }
 
@@ -676,13 +693,15 @@ fun SessionsDrawer(
                 icon = Icons.Rounded.Settings,
                 label = "Settings",
                 onClick = onSettings,
-                modifier = Modifier.weight(1f),
             )
+            // Flush to the drawer's right edge rather than centred in its own half:
+            // a centred pair left both labels floating a third of the way in, which
+            // read as two stray items instead of a footer with two ends.
+            Spacer(Modifier.weight(1f))
             FooterAction(
                 icon = Icons.Rounded.Info,
                 label = "About",
                 onClick = onAbout,
-                modifier = Modifier.weight(1f),
             )
         }
     }
@@ -770,6 +789,8 @@ private fun ProjectRow(
     collapsed: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Null for the buckets with no Workspace behind them: the flat list and Ungrouped. */
+    onCreate: (() -> Unit)? = null,
 ) {
     val colors = DshTheme.colors
     Row(
@@ -801,6 +822,22 @@ private fun ProjectRow(
             style = DshType.micro,
             color = colors.labelCaption,
         )
+        if (onCreate != null) {
+            Spacer(Modifier.width(DshSpacing.sm))
+            // Always drawn, not hover-revealed: the web shows this on hover, and a
+            // phone has no hover — the same reason the group's own disclosure is
+            // the folder rather than a chevron that only appears under a pointer.
+            Icon(
+                Icons.Rounded.Add,
+                contentDescription = "New session in $title",
+                tint = colors.labelSecondary,
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .clickableNoRipple(onClick = onCreate)
+                    .padding(DshSpacing.xs),
+            )
+        }
     }
 }
 

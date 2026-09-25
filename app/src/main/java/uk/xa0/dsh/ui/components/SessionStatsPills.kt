@@ -88,11 +88,16 @@ fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
     // because a desktop dock is wide enough for "661M tok · Cache hit 97%", and a
     // phone is not — as a `Row` the second chip was simply clipped at the screen
     // edge and its cache-hit figure was unreachable. Wrapping keeps both whole.
+    // Start-aligned, not centred: centring the wrapped lines left them floating
+    // with about 103dp of dead space on each side while sitting 12-16dp from the
+    // composer above and the navigation bar below — measured on a 411dp screen, so
+    // the block read as unbalanced rather than as part of the composer's stack.
+    // Aligned to the composer card's own edge, all four margins are of a size.
     FlowRow(
         modifier
             .fillMaxWidth()
             .padding(top = DshSpacing.xs),
-        horizontalArrangement = Arrangement.spacedBy(DshSpacing.lg, Alignment.CenterHorizontally),
+        horizontalArrangement = Arrangement.spacedBy(DshSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(DshSpacing.xs),
     ) {
         if (stats.steps > 0) {

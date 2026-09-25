@@ -488,6 +488,10 @@ fun ChatScreen(vm: DshViewModel) {
                         vm.startSession(current?.cwd ?: header?.cwd)
                         scope.launch { drawerState.close() }
                     },
+                    onNewInWorkspace = { workspaceId ->
+                        vm.startSessionInWorkspace(workspaceId)
+                        scope.launch { drawerState.close() }
+                    },
                     onRefresh = { vm.refreshSidebar() },
                     groupByWorkspace = ui.drawerGroupByWorkspace,
                     orderByUpdated = ui.drawerOrderByUpdated,
@@ -1013,6 +1017,10 @@ fun ChatScreen(vm: DshViewModel) {
                     modifier = Modifier.padding(
                         start = DshSpacing.xl,
                         end = DshSpacing.xl,
+                        // The block is the last thing in the column, so it owns the
+                        // gap to the navigation inset; without it the pills sat on
+                        // whatever the inset happened to be on that device.
+                        bottom = DshSpacing.sm,
                     ),
                 )
             }

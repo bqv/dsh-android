@@ -2140,24 +2140,32 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // turns an explicit JSON null into the string "null".
             val blank = item.optBoolean("blank")
             val stored = projections.str("title")
-            val subagent = catalog[item.str("sessionId")]
+            val id = item.str("sessionId")
+            val cwd = item.str("cwd").takeIf { it.isNotEmpty() }
+            val subagent = catalog[id]
             val parentSessionId = item.str("parentSessionId").takeIf { it.isNotEmpty() }
             // Where a catalog this client already holds names this child, its row
             // wins the label and the mode: see [applyCatalogLabels] for why the
             // read-time sample outranks the projection.
-            val held = parentSessionId?.let { subagentCatalogs[it]?.child(item.str("sessionId")) }
+            val held = parentSessionId?.let { subagentCatalogs[it]?.child(id) }
             result += SessionItem(
-                id = item.str("sessionId"),
-                // Blank rows carry `title: null`; the web UI substitutes its
-                // localized "New Session" label for them. A non-blank row whose
-                // projection has not landed yet is just untitled.
+                id = id,
+                // Blank rows carry `title: null`; the web substitutes its
+                // localized "New Session" label for them. For the rest this is the
+                // web's own `displayTitleOf` (session-controller's
+                // `client/sessions/service.ts`): the durable title, else the project
+                // directory's basename, else the session id. Without the middle step
+                // every session the host never titled — anything created by a script,
+                // an automation or a fork — read as "Untitled session" in the drawer
+                // while the web named it after its directory.
                 title = when {
                     subagent != null && subagent.first.isNotBlank() -> subagent.first
                     blank -> "New Session"
                     stored.isNotBlank() -> stored
-                    else -> "Untitled session"
+                    basename(cwd)?.isNotEmpty() == true -> basename(cwd)!!
+                    else -> id
                 },
-                cwd = item.str("cwd").takeIf { it.isNotEmpty() },
+                cwd = cwd,
                 updatedAt = item.optLong("updatedAt"),
                 running = item.optBoolean("running"),
                 isSubagent = item.str("origin") == "subagent",
@@ -4151,6 +4159,16 @@ private fun SessionItem.withCatalog(child: SubagentCatalogEntry.Child?): Session
 }
 
 /** Host-side preset keys mapped to their canonical copy (see `ui-permission-presets`). */
+/**
+ * A directory's display name, the way the web's `workspaceTitleOf` takes it: the
+ * last path segment, tolerating a trailing separator and either platform's.
+ *
+ * Null when there is no directory to name, which is what lets the caller fall
+ * through to the session id instead of printing an empty row.
+ */
+private fun basename(path: String?): String? =
+    path?.trimEnd('/', '\\')?.substringAfterLast('/')?.substringAfterLast('\\')?.takeIf { it.isNotEmpty() }
+
 private fun permissionLabel(preset: String): String = when (preset) {
     "read-only" -> "Read Only"
     "workspace-write" -> "Workspace Write"
