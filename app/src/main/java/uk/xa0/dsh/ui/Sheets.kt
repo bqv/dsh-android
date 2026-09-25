@@ -246,13 +246,23 @@ fun ModelSheet(
                     }
                     items(options, key = { it.provider + "/" + it.model }) { option ->
                         val isSelected = selected?.provider == option.provider && selected.model == option.model
-                        Column {
+                        // The selected route's card owns both its row and its
+                        // effort chips: the hover surface wraps the chips too, so
+                        // they read as that model's own settings rather than as a
+                        // detached strip under it. Only the Row stays clickable —
+                        // the card's slack must not fall through to
+                        // `onSelect(..., defaultEffort)` and silently reset an
+                        // effort the tap was aiming at.
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = DshSpacing.lg)
+                                .clip(RoundedCornerShape(DshRadius.md))
+                                .background(if (isSelected) colors.hover else colors.bgBase),
+                        ) {
                             Row(
                                 Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = DshSpacing.lg)
-                                    .clip(RoundedCornerShape(DshRadius.md))
-                                    .background(if (isSelected) colors.hover else colors.bgBase)
                                     .clickableNoRipple { onSelect(option, option.defaultEffort) }
                                     .padding(horizontal = DshSpacing.lg, vertical = DshSpacing.lg),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -290,33 +300,28 @@ fun ModelSheet(
                             // and the effort ride `session/selectModel`.
                             if (isSelected && option.efforts.isNotEmpty()) {
                                 // Insets match the model row's own content box: the
-                                // 24dp lead lines the chips up under the model's name
-                                // (12dp row + 12dp inner padding) and the trailing
-                                // side matches it instead of stopping at the row's
-                                // edge — 24dp against 12dp is what read as a
-                                // lopsided row. Vertically the same 12dp sits above
-                                // and below the chips: the selected row's own box
-                                // edge is 12dp above their tops (this `top`) and the
-                                // next row's box starts 12dp below their bottoms
-                                // (`bottom`), so the effort row is spaced like every
-                                // other row boundary instead of being taped flush to
-                                // the row it belongs to. Keeping the chips' name
-                                // alignment: their tops also land 38dp below the
-                                // model name's text, the same name-to-name cadence
-                                // two collapsed rows have (14dp model-id line + 12dp
-                                // inner padding + 12dp here). A route can carry four
-                                // levels (Off/Low/High/Max is ~262dp of chips), so
-                                // this wraps rather than running the last one off a
-                                // phone's edge; the wrapped lines keep the tighter
-                                // 6dp `verticalArrangement`, intra-group spacing
-                                // rather than the 12dp group margin above.
+                                // 24dp lead lines the chips up under the model's
+                                // name (12dp card + 12dp inner padding) and the
+                                // trailing side matches it instead of stopping at
+                                // the card's edge — 24dp against 12dp is what read
+                                // as a lopsided row. Vertically the 12dp above the
+                                // chips is the row's own bottom inner padding and
+                                // the 12dp below them is this `bottom`, both inside
+                                // the one card, so the gap that used to fall between
+                                // two separate surfaces now sits inside the surface
+                                // the chips belong to and they hug their own model.
+                                // A route can carry four levels (Off/Low/High/Max is
+                                // ~262dp of chips), so this wraps rather than
+                                // running the last one off a phone's edge; the
+                                // wrapped lines keep the tighter 6dp
+                                // `verticalArrangement` — intra-group spacing —
+                                // while 12dp stays the group margin above and below.
                                 FlowRow(
                                     Modifier
                                         .fillMaxWidth()
                                         .padding(
-                                            start = DshSpacing.xxl,
-                                            end = DshSpacing.xxl,
-                                            top = DshSpacing.lg,
+                                            start = DshSpacing.lg,
+                                            end = DshSpacing.lg,
                                             bottom = DshSpacing.lg,
                                         ),
                                     horizontalArrangement = Arrangement.spacedBy(DshSpacing.md),
