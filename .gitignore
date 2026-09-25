@@ -28,3 +28,5 @@ local.properties
 *.iml
 .DS_Store
 .secrets/
+__pycache__/
+*.pyc

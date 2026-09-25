@@ -5,6 +5,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -55,7 +57,7 @@ import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsSheet(
     themeMode: String,
@@ -181,7 +183,7 @@ fun AboutSheet(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ModelSheet(
     models: List<ModelOption>,
@@ -287,15 +289,25 @@ fun ModelSheet(
                             // appear under the selected model only. Both the model
                             // and the effort ride `session/selectModel`.
                             if (isSelected && option.efforts.isNotEmpty()) {
-                                Row(
+                                // Insets match the model row's own content box: the
+                                // lead lines the chips up under the model's name
+                                // (12dp row + 12dp inner padding) and the trailing
+                                // side now matches it instead of stopping at the
+                                // row's edge — 24dp against 12dp is what read as a
+                                // lopsided row. A route can carry four levels
+                                // (Off/Low/High/Max is ~262dp of chips), so this
+                                // wraps rather than running the last one off a
+                                // phone's edge.
+                                FlowRow(
                                     Modifier
                                         .fillMaxWidth()
                                         .padding(
                                             start = DshSpacing.xxl,
-                                            end = DshSpacing.lg,
+                                            end = DshSpacing.xxl,
                                             bottom = DshSpacing.lg,
                                         ),
                                     horizontalArrangement = Arrangement.spacedBy(DshSpacing.md),
+                                    verticalArrangement = Arrangement.spacedBy(DshSpacing.sm),
                                 ) {
                                     option.efforts.forEach { effort ->
                                         val active = effort.id == selectedEffort ||
