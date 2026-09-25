@@ -66,8 +66,16 @@ editing the live copy. There is no install step to forget.
   with `adb pair <ip>:<pairing port> <code>` when discovery fails; pairing codes
   expire fast.
 - `adb reverse tcp:8081 tcp:8081` (spec in `ADB_REVERSE`) is applied by
-  `adbtrack` whenever a device registers, so it survives emulator and phone
-  restarts with no manual step.
+  `adbtrack` whenever an emulator registers, so it survives restarts with no
+  manual step. **It registers but does not relay on this box's emulator**
+  (measured 2026-09-25, emulator-5554): `reverse --list` lists it and the guest
+  gets its listener, but the host side accepts the connection and reads zero
+  bytes while the guest gets no reply — reproduced with adb's own client, so it
+  is not our code, and restarting the adb server and adbd changed nothing. From
+  inside the emulator, reach the host at **`10.0.2.2:<port>`**, which does carry
+  data. Watch out when testing this by hand: `toybox nc`'s `-w` is only the
+  *connect* timeout, so without `-q 2` it exits at stdin EOF and prints nothing,
+  which looks exactly like a broken relay.
 - `adblease <serial> <command...>` is the device lease (it replaced
   `tools/device`), installed in `~/bin`.
 

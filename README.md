@@ -119,12 +119,13 @@ mux reconnects. Only an HTTP 401/403 (or a redirect to the login page) is a
 credential refusal, and only that offers sign-in again.
 
 **Emulator pointed at a host on the same machine:** the emulator's own
-`127.0.0.1` is the emulator, not the host, so `http://127.0.0.1:8081/` reaches
-nothing until the carrier port is reversed with
-`adb reverse tcp:8081 tcp:8081` (the emulator's `10.0.2.2` is the other route to
-the host's loopback). Either way, paste the carrier cookie — the loopback
-carrier has no login form. The `adb` user service (`adbtrack`) re-applies the
-reverse for this box's own emulator whenever it registers.
+`127.0.0.1` is the emulator, not the host, so address the host through the
+emulator's NAT alias: **`http://10.0.2.2:8081/`**. (The carrier port is also
+reversed in with `adb reverse tcp:8081 tcp:8081`, which the `adb` user service
+applies to every emulator that registers — but on this box's emulator that relay
+registers without carrying bytes, so do not rely on `127.0.0.1:8081` from inside
+it. Details and the measurement are in `docs/HANDOFF.md`.) Either way, paste the
+carrier cookie — the loopback carrier has no login form.
 
 ## Wire protocol
 
