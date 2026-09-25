@@ -498,6 +498,12 @@ data class UiState(
     val approval: PendingApproval? = null,
     /** An agent is waiting on an answer; the app must answer or the call fails. */
     val questions: PendingQuestionSet? = null,
+    /**
+     * Which blocking interaction each session holds, keyed by session id
+     * (`AttentionCenter.pendingBySession`). Per session rather than the single
+     * card above because the drawer paints every row at once.
+     */
+    val pendingInteractions: Map<String, PendingKind> = emptyMap(),
 
     /** The host's `settings/describe` answer, folded into the General panel's five rows. */
     val hostSettings: HostSettings? = null,
@@ -806,6 +812,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             app.attention.questions.collect { pending ->
                 if (_ui.value.questions != pending) _ui.value = _ui.value.copy(questions = pending)
+            }
+        }
+        viewModelScope.launch {
+            // The drawer's per-session status source; a session parked on an
+            // approval or a question is not idle and must not be painted as running.
+            app.attention.pendingBySession.collect { pending ->
+                if (_ui.value.pendingInteractions != pending) {
+                    _ui.value = _ui.value.copy(pendingInteractions = pending)
+                }
             }
         }
 
