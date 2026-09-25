@@ -482,7 +482,13 @@ fun SessionsDrawer(
         }
         }
 
-        Spacer(Modifier.height(DshSpacing.lg))
+        // Tight to what is above it. In the common case (grouped, a host with
+        // Workspaces) the New Session button is not drawn at all, so this gap is
+        // the whole distance from the 60dp brand lockup to the field — at 12dp it
+        // plus the lockup's own centred whitespace read as a band of nothing above
+        // "Search sessions...". Halved rather than removed: with the button drawn
+        // it is still the separator between it and the field.
+        Spacer(Modifier.height(DshSpacing.sm))
 
         DshTextField(
             value = query,
@@ -770,6 +776,12 @@ private fun FooterAction(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        // The glyph carries its own inset (28dp box, 6dp padding), so an action
+        // that ends in a glyph looks right against the drawer's edge. The trailing
+        // action ends in *text*, which does not, and flush-right read as clamped to
+        // the edge. This is a trailing spacer rather than end padding on the row so
+        // the label moves in but the tap target still reaches the edge.
+        Spacer(Modifier.width(DshSpacing.md))
     }
 }
 
