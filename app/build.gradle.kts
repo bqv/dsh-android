@@ -107,5 +107,10 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // The module's first test source set. The terminal's VT parser and its
+    // attachment/sequence rules are verified against bytes here, because the device
+    // half of this feature cannot be exercised from a build box.
+    testImplementation("junit:junit:4.13.2")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

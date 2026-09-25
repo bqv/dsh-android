@@ -66,6 +66,22 @@ import uk.xa0.dsh.net.DshRpcException
 import uk.xa0.dsh.net.DshUnreachableException
 import uk.xa0.dsh.net.MuxState
 import uk.xa0.dsh.net.StreamEvent
+import uk.xa0.dsh.net.TerminalClient
+import uk.xa0.dsh.term.TerminalEmulator
+import uk.xa0.dsh.term.TerminalEnvironmentInfo
+import uk.xa0.dsh.term.TerminalFrame
+import uk.xa0.dsh.term.TerminalGateOutcome
+import uk.xa0.dsh.term.TerminalInfo
+import uk.xa0.dsh.term.TerminalInputBudget
+import uk.xa0.dsh.term.TerminalIssue
+import uk.xa0.dsh.term.TerminalProtocolException
+import uk.xa0.dsh.term.TerminalResizeGate
+import uk.xa0.dsh.term.TerminalState
+import uk.xa0.dsh.term.TerminalStreamGate
+import uk.xa0.dsh.term.clampGrid
+import uk.xa0.dsh.term.isWritable
+import uk.xa0.dsh.term.terminalIssueFact
+import uk.xa0.dsh.term.terminalIssueOf
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -739,6 +755,457 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     val directoryBusy: StateFlow<Boolean> = _directoryBusy.asStateFlow()
     /** Bumped on every listing so a superseded scan cannot land after a newer one. */
     private var directoryGeneration = 0
+
+    // --------------------------------------------------------------- terminal
+
+    /**
+     * The session terminal panel.
+     *
+     * One at a time on purpose: a phone draws one grid, and the host is what owns
+     * the terminals — a second one is one tap away through the picker above the
+     * grid, not a second pane beside it.
+     */
+    private val _terminal = MutableStateFlow(TerminalUiState())
+    val terminal: StateFlow<TerminalUiState> = _terminal.asStateFlow()
+
+    private val terminalClient by lazy { TerminalClient(client) }
+
+    /**
+     * The live screen, mutated in place rather than published as state.
+     *
+     * Both the mutation (the `terminal/follow` collector, on the main dispatcher)
+     * and the read (the panel's Canvas, on the main thread) happen on the same
+     * thread, which is what makes reading it without a lock correct. The
+     * unsynchronised emulator says the same thing from its side.
+     */
+    private var terminalEmulator: TerminalEmulator? = null
+    private var terminalGate = TerminalStreamGate()
+    private var terminalResizeGate = TerminalResizeGate()
+    /** This panel's attachment. A fresh one per attach — that is what regains input. */
+    private var terminalAttachment: String? = null
+    private var terminalId: String? = null
+    private var terminalInput = TerminalInputBudget(64 * 1024)
+    private var terminalJob: Job? = null
+    /** Tail of the input chain; see [enqueueTerminalWrite]. */
+    private var terminalWriteChain: Job? = null
+
+    /** The screen for the panel's Canvas, or null before the first snapshot. */
+    fun terminalScreen(): TerminalEmulator? = terminalEmulator
+
+    /**
+     * Entered when the Terminal tab is shown.
+     *
+     * Idempotent for a tab that is already open, and a *different* session starts
+     * over: the terminal identity and the attachment are both scoped to the session
+     * whose agent id they were created with, so reusing either across a switch would
+     * address another session's shell.
+     */
+    fun enterTerminal(sessionId: String?) {
+        if (sessionId == null) {
+            leaveTerminal()
+            _terminal.value = TerminalUiState()
+            return
+        }
+        val current = _terminal.value
+        val live = current.sessionId == sessionId &&
+            current.phase != TerminalPhase.IDLE &&
+            current.phase != TerminalPhase.CLOSED &&
+            current.phase != TerminalPhase.FAILED
+        if (live) return
+        startTerminal(sessionId, reuse = true)
+    }
+
+    /**
+     * Left the tab.
+     *
+     * Detaches only. The host's process is independent of the attachment by design
+     * (`BrowserTerminal.follow` never terminates it), so dropping the stream here is
+     * what "leaving must not close the terminal" means on this side.
+     */
+    fun leaveTerminal() {
+        terminalJob?.cancel()
+        terminalJob = null
+        terminalAttachment = null
+        terminalId = null
+        terminalResizeGate.clear()
+        publishTerminal(phase = TerminalPhase.IDLE, writable = false, error = null, issue = null, limit = null)
+    }
+
+    /** Re-attaches for a fresh screen after a failure or a stream that ended. */
+    fun retryTerminal() {
+        val sessionId = _terminal.value.sessionId ?: return
+        startTerminal(sessionId, reuse = true)
+    }
+
+    /** Explicitly allocates a second terminal in this session. */
+    fun newTerminal() {
+        val sessionId = _terminal.value.sessionId ?: return
+        startTerminal(sessionId, reuse = false)
+    }
+
+    /** Switches the panel to another terminal the session already retains. */
+    fun selectTerminal(id: String) {
+        val sessionId = _terminal.value.sessionId ?: return
+        if (id == terminalId) return
+        val info = _terminal.value.terminals.firstOrNull { it.id == id } ?: return
+        terminalJob?.cancel()
+        terminalGate = TerminalStreamGate()
+        terminalResizeGate.clear()
+        publishTerminal(phase = TerminalPhase.CONNECTING, active = info, error = null, issue = null, limit = null)
+        terminalJob = viewModelScope.launch {
+            try {
+                val environment = _terminal.value.environment ?: terminalClient.environment(sessionId)
+                attachTerminal(sessionId, info, environment)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                reportTerminalFailure(error)
+            }
+        }
+    }
+
+    /**
+     * Kills the active terminal's process.
+     *
+     * The only thing in this feature that ends a shell. A detach — closing the tab,
+     * losing the socket, backgrounding the app — deliberately does not.
+     */
+    fun closeActiveTerminal() {
+        val sessionId = _terminal.value.sessionId ?: return
+        val id = terminalId ?: return
+        terminalJob?.cancel()
+        terminalJob = null
+        terminalAttachment = null
+        terminalId = null
+        val remaining = _terminal.value.terminals.filterNot { it.id == id }
+        publishTerminal(phase = TerminalPhase.CLOSING, writable = false, error = null, issue = null)
+        viewModelScope.launch {
+            try {
+                terminalClient.close(sessionId, id)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                reportTerminalFailure(error)
+                return@launch
+            }
+            terminalEmulator = null
+            publishTerminal(
+                phase = TerminalPhase.CLOSED, active = null, writable = false,
+                terminals = remaining, error = null, issue = null, limit = null,
+            )
+        }
+    }
+
+    /**
+     * Types into the terminal.
+     *
+     * Every keystroke and every key-row button arrives here. A write that the host
+     * refuses as read-only is not an error the reader needs a banner for: it means
+     * another attachment owns input, and the panel says exactly that.
+     */
+    fun terminalWrite(data: String) {
+        if (data.isEmpty()) return
+        val sessionId = _terminal.value.sessionId ?: return
+        val id = terminalId ?: return
+        val attachment = terminalAttachment ?: return
+        if (!_terminal.value.writable) return
+        val bytes = data.toByteArray(Charsets.UTF_8).size
+        // The host's own budget, counted the way the web client counts it: queued
+        // bytes, not just this request's, because a write is asynchronous.
+        if (!terminalInput.offer(bytes)) {
+            publishTerminal(
+                issue = TerminalIssue.INPUT_FULL,
+                error = terminalIssueFact(TerminalIssue.INPUT_FULL),
+            )
+            return
+        }
+        enqueueTerminalWrite {
+            try {
+                if (terminalAttachment == attachment) terminalClient.write(sessionId, id, attachment, data)
+            } finally {
+                terminalInput.release(bytes)
+            }
+        }
+    }
+
+    /**
+     * Reports the panel's measured grid.
+     *
+     * Clamped to the host's `maxCols`/`maxRows` — the host rejects an oversized grid
+     * rather than clipping it — and dropped when it would not change anything, since
+     * the panel is re-measured on every layout pass and the soft keyboard changes
+     * the height on every open and close.
+     */
+    fun terminalResize(columns: Int, rows: Int) {
+        val sessionId = _terminal.value.sessionId ?: return
+        val id = terminalId ?: return
+        val attachment = terminalAttachment ?: return
+        if (!_terminal.value.writable) return
+        val (cols, limitRows) = clampGrid(columns, rows, _terminal.value.environment)
+        if (!terminalResizeGate.shouldSend(cols, limitRows)) return
+        enqueueTerminalWrite {
+            if (terminalAttachment == attachment) terminalClient.resize(sessionId, id, attachment, cols, limitRows)
+        }
+    }
+
+    /**
+     * Chains a terminal mutation onto the previous one.
+     *
+     * A mutex would only guarantee mutual exclusion; its waiters may be scheduled in
+     * any order, and two keystrokes that overtake each other arrive transposed. A
+     * chain on the previous job preserves submission order exactly.
+     */
+    private fun enqueueTerminalWrite(block: suspend () -> Unit) {
+        val previous = terminalWriteChain
+        terminalWriteChain = viewModelScope.launch {
+            previous?.join()
+            try {
+                block()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                onTerminalControlFailure(error)
+            }
+        }
+    }
+
+    /**
+     * Opens (or adopts) a terminal for [sessionId] and attaches to it.
+     *
+     * `terminal/list` comes first and is not agent-scoped, so a session that already
+     * retains a running terminal adopts it instead of leaving an orphan behind on
+     * every visit. Only `terminal/create` needs the live agent, and that is where the
+     * "no live agent" fact comes from.
+     */
+    private fun startTerminal(sessionId: String, reuse: Boolean) {
+        terminalJob?.cancel()
+        terminalGate = TerminalStreamGate()
+        terminalResizeGate.clear()
+        // The session id moves first: every publish below spreads the current state,
+        // and a stale id here would attach the new session's screen to the old
+        // session's identity for a frame.
+        _terminal.value = _terminal.value.copy(sessionId = sessionId)
+        publishTerminal(
+            phase = TerminalPhase.LOADING, active = null, writable = false,
+            error = null, issue = null, limit = null,
+        )
+        terminalJob = viewModelScope.launch {
+            try {
+                val environment = terminalClient.environment(sessionId)
+                val existing = terminalClient.list(sessionId)
+                val adopted = if (reuse) {
+                    existing.firstOrNull { it.state == TerminalState.RUNNING } ?: existing.firstOrNull()
+                } else {
+                    null
+                }
+                val info = adopted ?: createTerminal(sessionId, environment)
+                publishTerminal(
+                    environment = environment,
+                    terminals = (existing.filterNot { it.id == info.id } + info),
+                )
+                attachTerminal(sessionId, info, environment)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                reportTerminalFailure(error)
+            }
+        }
+    }
+
+    private suspend fun createTerminal(
+        sessionId: String,
+        environment: TerminalEnvironmentInfo,
+    ): TerminalInfo {
+        publishTerminal(phase = TerminalPhase.CREATING)
+        // The shell list is a convenience; a host that refuses it still has a
+        // default shell, which `create` selects when `shellPath` is absent.
+        val shells = runCatching { terminalClient.shells(sessionId) }.getOrDefault(emptyList())
+        val id = UUID.randomUUID().toString()
+        terminalId = id
+        return terminalClient.create(
+            agentId = sessionId,
+            id = id,
+            // The web client opens a new tab at 80×24 and lets the first resize fix
+            // it; the host's own floors are 2 columns and 1 row.
+            columns = minOf(80, environment.maxCols),
+            rows = minOf(24, environment.maxRows),
+            shellPath = shells.firstOrNull()?.path,
+        )
+    }
+
+    private suspend fun attachTerminal(
+        sessionId: String,
+        info: TerminalInfo,
+        environment: TerminalEnvironmentInfo,
+    ) {
+        val attachment = UUID.randomUUID().toString()
+        terminalId = info.id
+        terminalAttachment = attachment
+        terminalInput = TerminalInputBudget(environment.maxInputBytes)
+        val emulator = terminalEmulator ?: TerminalEmulator(info.cols, info.rows, environment.scrollback)
+            .also { terminalEmulator = it }
+        emulator.resize(info.cols, info.rows)
+        terminalGate.reset()
+        terminalResizeGate.clear()
+        terminalResizeGate.adopt(info)
+        publishTerminal(
+            phase = TerminalPhase.CONNECTING, environment = environment, active = info,
+            writable = false, error = null, issue = null, limit = null,
+        )
+
+        terminalClient.follow(sessionId, info.id, attachment).collect { event ->
+            when (event) {
+                is StreamEvent.Item -> onTerminalFrame(emulator, event.value)
+                is StreamEvent.Failure -> onTerminalStreamFailure(event)
+                // The mux closes the channel on `end`, so the collector unwinds and
+                // the completion below reports it; nothing to do here.
+                StreamEvent.End -> Unit
+            }
+        }
+        if (_terminal.value.phase != TerminalPhase.CLOSED && _terminal.value.phase != TerminalPhase.FAILED) {
+            publishTerminal(
+                phase = TerminalPhase.DISCONNECTED, writable = false,
+                issue = _terminal.value.issue ?: TerminalIssue.ATTACHMENT_ENDED,
+            )
+        }
+    }
+
+    /**
+     * One `terminal/follow` frame.
+     *
+     * A snapshot is a *repaint*, not text: the host serialises xterm's whole buffer
+     * (scrollback included, `\r\n` per row, with `?1049h` and the modes appended) for
+     * a fresh terminal, so the emulator is reset before it is fed. Every frame is
+     * handed to the gate first, because a sequence gap means output was lost and the
+     * screen would be quietly wrong.
+     */
+    private fun onTerminalFrame(emulator: TerminalEmulator, value: JSONObject) {
+        val frame = TerminalClient.frameOf(value) ?: return
+        val outcome = try {
+            terminalGate.accept(frame)
+        } catch (error: TerminalProtocolException) {
+            // Reattach for a fresh screen rather than render a grid with a hole in it.
+            onTerminalStreamFailure(
+                StreamEvent.Failure("terminal/view", error.message ?: "Terminal output error"),
+            )
+            return
+        }
+        when (outcome) {
+            TerminalGateOutcome.NEW_GENERATION -> {
+                val info = (frame as TerminalFrame.Snapshot).info
+                emulator.resize(info.cols, info.rows)
+                emulator.resetForSnapshot()
+                terminalResizeGate.adopt(info)
+                // Input is set up *before* the screen is fed: a repaint can ask the
+                // host for its cursor position (DSR), and that answer must be writable.
+                publishTerminal(
+                    phase = TerminalPhase.CONNECTED, active = info,
+                    writable = isWritable(info, terminalAttachment), issue = null, error = null,
+                )
+                emulator.append(frame.screen)
+                flushTerminalReplies(emulator)
+            }
+
+            TerminalGateOutcome.OUTPUT -> {
+                emulator.append((frame as TerminalFrame.Output).data)
+                flushTerminalReplies(emulator)
+                bumpTerminalRevision()
+            }
+
+            TerminalGateOutcome.STATE -> {
+                val info = (frame as TerminalFrame.State).info
+                terminalResizeGate.adopt(info)
+                publishTerminal(
+                    active = info,
+                    writable = isWritable(info, terminalAttachment),
+                )
+            }
+        }
+    }
+
+    /** Answers the emulator's own questions (cursor position, DA) on the PTY. */
+    private fun flushTerminalReplies(emulator: TerminalEmulator) {
+        val replies = emulator.takeReplies()
+        if (replies.isNotEmpty()) terminalWrite(replies)
+    }
+
+    private fun onTerminalStreamFailure(event: StreamEvent.Failure) {
+        if (isAuthStreamFailure(event.code, event.message)) {
+            onAuthFailure("terminal/follow", null)
+            return
+        }
+        val issue = terminalIssueOf(event.code, null).takeIf { it != TerminalIssue.UNKNOWN }
+            ?: if (event.code == "terminal/view") TerminalIssue.OUTPUT_INVALID else null
+        publishTerminal(
+            phase = TerminalPhase.DISCONNECTED, writable = false, issue = issue,
+            error = event.message.ifBlank { null },
+        )
+    }
+
+    /**
+     * A refused write or resize.
+     *
+     * `terminal/control-unavailable` is the interesting one and it is not a banner:
+     * it means another attachment took input, or the shell stopped. Both are facts
+     * about control, so the panel drops to read-only and says which one it is.
+     */
+    private fun onTerminalControlFailure(error: Throwable) {
+        if (error is DshAuthException) {
+            onAuthFailure("terminal", error)
+            return
+        }
+        val rpc = error as? DshRpcException
+        val issue = terminalIssueOf(rpc?.code.orEmpty(), rpc?.details?.optString("reason"))
+        publishTerminal(writable = false, issue = issue.takeIf { it != TerminalIssue.UNKNOWN })
+    }
+
+    private fun reportTerminalFailure(error: Throwable) {
+        if (error is DshAuthException) {
+            onAuthFailure("terminal", error)
+            return
+        }
+        val rpc = error as? DshRpcException
+        val issue = terminalIssueOf(rpc?.code.orEmpty(), rpc?.details?.optString("reason"))
+        val limit = rpc?.details?.optInt("limit")?.takeIf { it > 0 }
+        val message = if (error is DshUnreachableException) {
+            "Could not reach the host."
+        } else {
+            error.message?.takeIf { it.isNotBlank() } ?: terminalIssueFact(issue, limit)
+        }
+        publishTerminal(
+            phase = TerminalPhase.FAILED, writable = false,
+            issue = issue.takeIf { it != TerminalIssue.UNKNOWN }, error = message, limit = limit,
+        )
+    }
+
+    private fun bumpTerminalRevision() {
+        _terminal.value = _terminal.value.copy(revision = _terminal.value.revision + 1)
+    }
+
+    private fun publishTerminal(
+        phase: TerminalPhase = _terminal.value.phase,
+        environment: TerminalEnvironmentInfo? = _terminal.value.environment,
+        active: TerminalInfo? = _terminal.value.active,
+        writable: Boolean = _terminal.value.writable,
+        issue: TerminalIssue? = _terminal.value.issue,
+        error: String? = _terminal.value.error,
+        limit: Int? = _terminal.value.limit,
+        terminals: List<TerminalInfo>? = null,
+    ) {
+        // A revision bump keeps the Canvas honest when only the metadata changed:
+        // an exit or a mode change redraws the same grid with a different cursor.
+        _terminal.value = _terminal.value.copy(
+            phase = phase,
+            environment = environment,
+            active = active,
+            writable = writable,
+            issue = issue,
+            error = error,
+            limit = limit,
+            terminals = terminals ?: _terminal.value.terminals,
+            revision = _terminal.value.revision + 1,
+        )
+    }
     /** Sessions the host says are running right now, from `api-session/status`. */
     private val liveRunning: MutableSet<String> = liveRunningIds
     /** Client-side fallback for the running clock when `turn/start` is off-window. */
@@ -1382,6 +1849,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         ensureControlStream()
         val sessionId = _ui.value.currentSessionId
         if (sessionId != null) startFollow(sessionId)
+        // The terminal stream is a reconnecting attachment like the others, but a
+        // frozen process leaves its collector "active" and dead. Re-attaching with a
+        // *fresh* attachment is also the only way to take input control back from
+        // another client that took it while this one was asleep.
+        if (sessionId != null && terminalJob != null && _terminal.value.sessionId == sessionId) {
+            startTerminal(sessionId, reuse = true)
+        }
     }
 
     /** A few spaced retries, so a host that is merely slow heals without a tap. */

@@ -676,6 +676,16 @@ fun ChatScreen(vm: DshViewModel) {
                     onClose = { showFiles = false },
                     modifier = Modifier.weight(1f),
                 )
+            } else if (view == ChatView.TERMINAL) {
+                // A real PTY for this session, from the host's `terminal` Remote
+                // namespace. The screen creates or adopts the session's terminal, so
+                // it is only reachable for an open session — the strip that selects
+                // it is not drawn on the hero.
+                TerminalScreen(
+                    vm = vm,
+                    sessionId = ui.currentSessionId,
+                    modifier = Modifier.weight(1f),
+                )
             } else if (view == ChatView.TRAJECTORY) {
                 val trajectory = remember(entries, endedTurns) {
                     buildTrajectory(entries, endedTurns, vm.toolParents())
@@ -1621,14 +1631,18 @@ private fun ChatHeader(
 }
 
 /**
- * The two registered `conversation.view` entries, in the host's own order.
+ * The registered `conversation.view` entries, in the host's own order, plus this
+ * client's own terminal view.
  *
  * `ui-conversation/src/client/contract/views.ts` — chat (order 0, the default in
- * `view-selection.ts`) and trajectory (order 10).
+ * `view-selection.ts`) and trajectory (order 10). Terminal is not a host-registered
+ * view: it is a client view over the host's `terminal` Remote namespace, which is
+ * what the web client's own terminal tab is assembled from too.
  */
 private enum class ChatView(val label: String) {
     CHAT("Chat"),
     TRAJECTORY("Trajectory"),
+    TERMINAL("Terminal"),
 }
 
 /**
