@@ -82,13 +82,14 @@ tools/install.sh <serial> <apk>        # or an explicit APK
   not a mutex here. A second caller waits rather than interleaving.
 - Debug builds carry the `.debug` application id suffix
   (`uk.xa0.dsh.debug`).
-- `tools/device <serial> <command...>` runs a whole device sequence — install,
+- `adblease <serial> <command...>` runs a whole device sequence — install,
   launch, tap, screencap — under one per-device lease, so two verification runs
   cannot split each other halfway. `$SERIAL` and `$ADB` are exported to the
-  command:
+  command. It is generic device infrastructure, so it lives outside this
+  checkout with the rest of the adb plumbing (`~/bin/adb-wireless`):
 
   ```sh
-  tools/device 127.0.0.1:5555 sh -c 'adb -s $SERIAL shell input tap 48 128'
+  adblease 127.0.0.1:5555 sh -c 'adb -s $SERIAL shell input tap 48 128'
   ```
 
 ## Point it at a host and sign in
@@ -122,8 +123,8 @@ credential refusal, and only that offers sign-in again.
 nothing until the carrier port is reversed with
 `adb reverse tcp:8081 tcp:8081` (the emulator's `10.0.2.2` is the other route to
 the host's loopback). Either way, paste the carrier cookie — the loopback
-carrier has no login form. `tools/adb-keepalive` re-applies the reverse for
-this box's own emulator whenever it registers.
+carrier has no login form. The `adb` user service (`adbtrack`) re-applies the
+reverse for this box's own emulator whenever it registers.
 
 ## Wire protocol
 

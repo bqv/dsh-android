@@ -9,7 +9,7 @@
 | `app/src/main/java/uk/xa0/dsh/net/` | `DshClient.kt` (RPC + auth), `RemoteMux.kt` (the `/api/remote.mux` stream mux) |
 | `app/src/main/java/uk/xa0/dsh/data/` | `ConfigStore.kt`, the Keystore-backed config |
 | `app/src/main/java/uk/xa0/dsh/DshViewModel.kt` | Every RPC call site, the mux wiring and the UI state |
-| `tools/` | Device plumbing: `adb.initd`/`adb.confd`/`adb-keepalive` (execline supervisor) + `adb-keepalive-pass` (its bash worker), `emulator.initd`/`emulator.confd`/`emulator-run`, `adb-discover.py`, `device`, `install.sh`, `dsh-api.mjs` |
+| `tools/` | What is actually this project's: `install.sh` (APK install), `dsh-api.mjs`, `gh-secrets.py`. The adb/emulator services and the device lease are **generic host infrastructure** and live outside this checkout — source in `~/bin/adb-wireless`, services in `~/etc/init.d` + `~/etc/conf.d` |
 | `build.sh` | The whole build; owns the build lock |
 | `docs/PARITY.md` | The ledger of what the web does vs what this app does. It is the file a future reader trusts most, so a row there must match code |
 | `docs/research/*.md` | Two kinds. A web reference (`protocol`, `design-system`, `chrome-ui`, `transcript-ui`, `panels-settings`, `mobile-remote`, `composer-menu-and-tools`, `notices-and-fold`, `journal-compaction`) whose wire contracts and reverse-engineered design are the durable value; and app notes (`trajectory`, `goal-chip`, `files-and-deliverables`, `sidebar-workspace-groups`) |
@@ -24,10 +24,10 @@ monospace.
 ./build.sh :app:assembleDebug                     # lock is INSIDE build.sh now
 tools/install.sh 127.0.0.1:5555                   # lock is INSIDE the script
 tools/install.sh <phone serial>                   # install to the phone every time too
-tools/device 127.0.0.1:5555 .probe/verify.sh   # lease the whole verification block
+adblease 127.0.0.1:5555 .probe/verify.sh   # lease the whole verification block
 ```
 
-`tools/device` holds one lease for the whole sequence. A per-command lock lets
+`adblease` holds one lease for the whole sequence. A per-command lock lets
 another agent's install land between two of your steps, and an install
 force-stops the app — a check of the lineage sheet once came back as a bare
 "Loading sessions…" screen exactly that way. The box hosts one emulator (4
@@ -50,19 +50,26 @@ rc-service --user adb      status|restart     # one adb server + the phone trans
 rc-service --user emulator status|restart     # one headless x86_64 emulator
 ```
 
+Neither the services nor the binaries they run belong to this checkout. They are
+generic host infrastructure: source in **`~/bin/adb-wireless`**, service files in
+**`~/etc/init.d`** and **`~/etc/conf.d`** — and `~/.config/rc/init.d` /
+`~/.config/rc/conf.d` are symlinks into those, so editing a service there IS
+editing the live copy. There is no install step to forget.
+
 - Emulator serial: **`127.0.0.1:5555`** — the odd port beside console 5554, which
-  `tools/adb-keepalive` attaches explicitly (from the `emulator-5554` transport)
-  because modern adb no longer scans for emulator ports. Use that serial, not
+  `adbtrack` attaches explicitly (from the `emulator-5554` transport) because
+  modern adb no longer scans for emulator ports. Use that serial, not
   `emulator-5554`.
 - Phone: the LAN host is `192.168.1.100` and the port is random per Wireless
-  debugging session, so `tools/adb-discover.py --host 192.168.1.100` finds it
-  (mDNS `_adb-tls-connect._tcp`, TCP-scan fallback). Re-pair with
-  `adb pair <ip>:<pairing port> <code>` when discovery fails; pairing codes
+  debugging session, so `adbdiscover` finds it over mDNS
+  (`_adb-tls-connect._tcp`); a TCP scan is available behind `ADB_SCAN=1`. Re-pair
+  with `adb pair <ip>:<pairing port> <code>` when discovery fails; pairing codes
   expire fast.
-- `adb reverse tcp:8081 tcp:8081` is applied by the keepalive whenever an
-  emulator registers, so it survives emulator restarts with no manual step.
-- Install the services with `install -m 0755 tools/*.initd ~/.config/rc/init.d/`
-  plus the confd equivalents.
+- `adb reverse tcp:8081 tcp:8081` (spec in `ADB_REVERSE`) is applied by
+  `adbtrack` whenever a device registers, so it survives emulator and phone
+  restarts with no manual step.
+- `adblease <serial> <command...>` is the device lease (it replaced
+  `tools/device`), installed in `~/bin`.
 
 ## Traps
 
@@ -71,15 +78,23 @@ rc-service --user emulator status|restart     # one headless x86_64 emulator
    lock is `$ROOT/.build.lock`, `.install.lock`, `.device-<serial>.lock`.
 2. **One adb client for everything.** `/usr/bin/adb`, `/opt/android-sdk` and the
    emulator's bundled platform-tools are three versions; when they disagree each
-   client restarts the shared server on 5037 and drops live transports. The
-   scripts pin `ADB=/opt/android-sdk/platform-tools/adb` and the emulator's copy
-   is a symlink to it.
-3. **The keepalive must not drop the emulator.** It sweeps transports that are
-   not in `device` state, and an emulator mid-boot is exactly that. Emulator
+   client restarts the shared server on 5037 and drops live transports. The adb
+   service pins `ADB_BIN=/opt/android-sdk/platform-tools/adb` (nothing it runs
+   resolves a bare `adb`), the emulator service pins `ADB` for its own `stop`, and
+   `DSH_EMULATOR_ADB_DIR` is what the launcher puts in front of PATH.
+3. **Never point `ANDROID_USER_HOME` at a build toolchain home.** `adb.confd` used
+   to set it to `.toolchain/android-home`, which holds a debug keystore and **no
+   `adbkey` at all**: any adb server started from that environment had no key for
+   the phone, so Wireless debugging could not authenticate and every transport
+   landed as `offline` — advertised forever, never usable. The keys live in
+   `~/.android`, so that file now `unset`s the variable instead of setting it.
+4. **The keepalive must not drop the emulator.** `adbtrack` sweeps transports that
+   are not in `device` state, and an emulator mid-boot is exactly that. Emulator
    transports are exempt (odd `55xx` ports and `emulator-*`; even ports are the
-   console). It also blocks on `adb track-devices`, whose wire format is a
-   4-hex-digit length followed by the **entire device list**, not a per-device
-   line — it is read with `dd bs=1` so header and payload cannot desync.
+   console). It blocks on `host:track-devices`, which sends the **entire device
+   list** on every change as a 4-hex-digit length followed by exactly that many
+   bytes — and sends nothing at all until the first change, so the devices already
+   registered have to be adopted once at startup.
 4. **Never capture blind.** Gate a screencap on the app actually being focused
    (`dumpsys window | grep mCurrentFocus` contains `uk.xa0.dsh.debug`), and check
    `mScreenState` first: with the display off, `screencap` silently returns a
@@ -131,6 +146,22 @@ rc-service --user emulator status|restart     # one headless x86_64 emulator
     `directoryPicker/createDirectory` among them. `DshClient.rpcRaw` returns
     `result.value` untouched; `rpc` casts to `JSONObject` and is the wrong door for
     those.
+
+15. **An mDNS answer is not all in the answer section.** Android answers a
+    `_adb-tls-connect._tcp` PTR query with the PTR under *answers* and the SRV,
+    TXT and A records under **additional**. A parser that reads only `ancount`
+    finds the instance, has no port for it, and drops it — which is why the old
+    `adb-discover.py` never once found the phone, and why the service answered
+    "not found" with a 20,001-port scan every 30 seconds, forever, from a Python
+    interpreter with 256 threads. Parse all three sections, and stop listening as
+    soon as an instance has both a port and an address: the phone replies in
+    single-digit milliseconds, so listening out the timeout is pure latency.
+16. **`host:connect` reports failure as `OKAY`.** A refused port comes back as
+    `OKAY "failed to connect to '…': Connection refused"` — the status code is
+    fine and the verdict is in the message. And `reverse:` is **not** a host
+    service: `host-serial:X:reverse:forward:…` is rejected with "unknown host
+    service". The reverse has to go out as two requests on one socket —
+    `host:transport:<serial>`, then `reverse:forward:<remote>;<local>`.
 
 ## Open items
 
