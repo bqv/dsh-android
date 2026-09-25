@@ -58,6 +58,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,6 +78,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.boundsInParent
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.semantics.contentDescription
@@ -85,6 +87,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -469,6 +472,16 @@ fun ChatScreen(vm: DshViewModel) {
         onDispose { if (root != null) vm.setSubagentCatalogOpen(root, false) }
     }
 
+    // The loading body is the Column's *last* child, so the box it centres its
+    // contents in is everything below the chrome — an area that already ends at
+    // the viewport's bottom edge. Its centre therefore sits `chrome / 2` below
+    // the viewport's centre, and the content is translated back up by exactly
+    // that half rather than restructured into a viewport-filling overlay. The
+    // chrome is measured, not assumed: the header grows a tab strip outside the
+    // hero, and the banner is present only while `ui.error` is set.
+    var headerPx by remember { mutableIntStateOf(0) }
+    var bannerPx by remember { mutableIntStateOf(0) }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         // Material's own gesture commits only after the panel has travelled half
@@ -592,6 +605,9 @@ fun ChatScreen(vm: DshViewModel) {
                 },
                 lineage = current?.let { subagentRollups[it.id] },
                 onLineage = { showLineage = true },
+                // Feeds the loading offset above: the header is the top half of
+                // the chrome, and its own height is not a constant.
+                modifier = Modifier.onSizeChanged { headerPx = it.height },
             )
 
             if (ui.error != null) {
@@ -602,6 +618,9 @@ fun ChatScreen(vm: DshViewModel) {
                     // must carry the way out, or the screen is a dead end.
                     actionLabel = if (ui.errorNeedsSignIn) "Sign in again" else null,
                     onAction = if (ui.errorNeedsSignIn) vm::signInAgain else null,
+                    // The banner sits between the header and the body, so it is
+                    // part of the chrome the loading content has to be lifted by.
+                    modifier = Modifier.onSizeChanged { bannerPx = it.height },
                 )
             }
 
@@ -643,9 +662,25 @@ fun ChatScreen(vm: DshViewModel) {
                 // answered this session's follow stream. Naming the connection
                 // when it is the reason costs no new copy — the drawer's own
                 // "Loading…" plus the shell's connection word.
+                //
+                // The composer and the pills are not siblings of this branch —
+                // they live in the transcript `else` below — so the chrome is
+                // the whole offset: `weight(1f)`'s box runs from the header
+                // (plus banner) to the Column's bottom, putting its centre at
+                // `H/2 + (header + banner)/2`. Half of that, negated, is the
+                // viewport's centre. Reading the states inside `offset` keeps the
+                // first frame still (both are 0 until measured) and re-places
+                // instead of recomposing when the banner arrives.
                 LoadingSessionBody(
                     connection = connectionLabel,
-                    modifier = Modifier.weight(1f),
+                    // A Box wraps its content, so without `fillMaxWidth` the
+                    // Column's Start alignment parks the dot+label on the left
+                    // edge; filling the width is what makes the centring two-
+                    // dimensional.
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .offset { IntOffset(0, -(headerPx + bannerPx) / 2) },
                 )
             } else if (isHero) {
                 // The hero has no flex child that can absorb a pill the way the
@@ -1009,7 +1044,9 @@ fun ChatScreen(vm: DshViewModel) {
                         modifier = Modifier.padding(
                             start = DshSpacing.xl,
                             end = DshSpacing.xl,
-                            bottom = DshSpacing.md,
+                            // Keeps the frame in the composer's slot: the same
+                            // 6dp the card leaves above the pills.
+                            bottom = DshSpacing.sm,
                             top = DshSpacing.sm,
                         ),
                     )
@@ -1055,7 +1092,11 @@ fun ChatScreen(vm: DshViewModel) {
                         modifier = Modifier.padding(
                             start = DshSpacing.xl,
                             end = DshSpacing.xl,
-                            bottom = DshSpacing.md,
+                            // Matches the pills' own bottom margin below, so the
+                            // two gaps around the row are the same 6dp. With the
+                            // pills absent this is the composer's clearance to the
+                            // navigation inset, which is why it is not larger.
+                            bottom = DshSpacing.sm,
                             // Constant whether or not the dock is present: the dock's
                             // own offset reaches back down over this gap when it is.
                             top = DshSpacing.sm,
@@ -1452,9 +1493,10 @@ private fun ChatHeader(
     onFiles: () -> Unit = {},
     lineage: SubagentRollup? = null,
     onLineage: () -> Unit = {},
+    modifier: Modifier = Modifier,
 ) {
     val colors = DshTheme.colors
-    Column {
+    Column(modifier) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -2275,10 +2317,11 @@ private fun ErrorBanner(
     onDismiss: () -> Unit,
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
 ) {
     val colors = DshTheme.colors
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .background(colors.warnTertiary)
             .padding(horizontal = DshSpacing.xl, vertical = DshSpacing.lg)

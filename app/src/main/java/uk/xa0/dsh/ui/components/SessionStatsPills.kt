@@ -72,9 +72,17 @@ private enum class StatPill { TIME, USAGE }
  *
  * @param stats the parsed projections, or null while the host has not sent them
  * @param modifier slot for the host's own padding. The web's `.root` pads
- *   `4px [composer-side-clearance + 16px] 0`; this row adds only the 4dp top
- *   gap, so a host that gives its composer `16dp` of side padding gives this
- *   row the same and lets the host decide whether the extra 16px is wanted.
+ *   `4px [composer-side-clearance + 16px] 0`, but that 4px is the dock's share
+ *   of the composer-to-pills gap, not a property of this row:
+ *   `ui-conversation/.../InputBar.module.css` drops the composer root's own
+ *   `8px` bottom clearance to `4px` while the row is mounted
+ *   (`.root:has([data-composer-stats])`), so the web's gap stays a constant
+ *   `8px`. Here the dock *is* the host's composer padding, so adding the web's
+ *   4px on top of it made the gap `8 + 4 = 12dp` against the row's own `6dp`
+ *   bottom margin. This row therefore adds no vertical space of its own, and
+ *   the host pads the composer's bottom edge by that same `6dp` so the gaps
+ *   above and below match. The sides remain the host's `16dp`, matching the
+ *   composer card's edges.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -94,9 +102,7 @@ fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
     // the block read as unbalanced rather than as part of the composer's stack.
     // Aligned to the composer card's own edge, all four margins are of a size.
     FlowRow(
-        modifier
-            .fillMaxWidth()
-            .padding(top = DshSpacing.xs),
+        modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(DshSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(DshSpacing.xs),
     ) {
