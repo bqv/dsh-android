@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -80,6 +81,33 @@ import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
+
+/**
+ * How far the 34dp send/steer circle is dropped below the action row's centre.
+ *
+ * Measured: the row's `end = md` leaves 8dp between the circle and the card's
+ * right edge, and its `bottom = sm` leaves 6dp below it. The horizontal gap is
+ * fine, but the card is a 22dp [DshRadius.bubble] capsule, so its bottom-right
+ * corner curves away exactly where the circle sits — and 6dp against a curved
+ * edge reads wider than the 6dp it measures. On a real phone the user read the
+ * circle's bottom as a couple of dp too high, which is what this closes.
+ *
+ * `Modifier.offset`, not padding: offset shifts placement without changing the
+ * row's measured height, so the attach button, the mode chips, the context ring
+ * and the model trigger keep the seats they have. Padding here would grow the
+ * row and move all of them — the request named the send control, not the row.
+ *
+ * It stays inside the card. The bottom gap becomes 6dp - 2dp = 4dp, and the
+ * circle clears the corner: its centre is 25dp from the right edge and 21dp from
+ * the bottom, i.e. (3, 1) from the 22dp arc's centre, so radius + distance =
+ * 17 + sqrt(3^2 + 1^2) = 20.16dp < 22dp — no part of it crosses the curve (the
+ * arc is only reached at a 5dp nudge, and 6dp would zero the bottom gap).
+ *
+ * The exact few px was picked against a phone screen, not derived, so the parent
+ * may want it re-tuned after the user looks. This constant is the only place the
+ * number lives: 2dp is 5px at density 2.625 and 6px at 2.75.
+ */
+private val SEND_BUTTON_NUDGE = 2.dp
 
 /**
  * The composer card: a 22dp capsule on the `specific-input-major` fill with a
@@ -292,7 +320,11 @@ private fun SendButton(
         label = "sendFill",
     )
 
-    Box {
+    Box(
+        // See [SEND_BUTTON_NUDGE]: the whole control moves — the circle, its tap
+        // target and the long-press menu anchor — while the row stays put.
+        Modifier.offset(y = SEND_BUTTON_NUDGE),
+    ) {
         val interaction = remember { MutableInteractionSource() }
         Box(
             Modifier
