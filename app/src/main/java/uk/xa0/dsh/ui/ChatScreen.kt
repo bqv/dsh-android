@@ -507,11 +507,22 @@ fun ChatScreen(vm: DshViewModel) {
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        // Material's own gesture commits only after the panel has travelled half
-        // its width (150dp here), so a normal thumb swipe shows a peek and springs
-        // back. `drawerDrag` below replaces it with a finger-following drag that
-        // commits at a quarter of the width or on a modest fling.
-        gesturesEnabled = false,
+        // Enabled for its *scrim*, not for its drag.
+        //
+        // Material gates the scrim's tap on this same flag — `NavigationDrawer.kt`
+        // only calls the scrim's `onClose` when `gesturesEnabled` is true, while
+        // its full-size Canvas attaches the tap detector either way. So at `false`
+        // the scrim swallowed every tap outside the drawer and closed nothing: the
+        // tap went nowhere at all, which is why "tap outside to dismiss" could
+        // never work.
+        //
+        // Its drag still never wins. `drawerDrag` sits on the sheet and on the
+        // content, both descendants of the draggable container, and consumes every
+        // move it owns before the ancestor sees it — the same child-consumes-first
+        // rule the nested scrollables rely on. That is what keeps the commit
+        // threshold at DRAWER_COMMIT (40dp, or a 200dp/s fling) instead of
+        // Material's half-width 150dp.
+        gesturesEnabled = true,
         drawerContent = {
             ModalDrawerSheet(
                 modifier = Modifier
