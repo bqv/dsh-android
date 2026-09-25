@@ -420,6 +420,21 @@ fun ChatScreen(vm: DshViewModel) {
 
     val current = ui.sessions.firstOrNull { it.id == ui.currentSessionId }
     val isHero = entries.isEmpty() && live == null
+    // An empty transcript is not the same fact as a blank session. The follow
+    // stream's opening snapshot is the one event that proves the host has
+    // answered for *this* session, and `TranscriptReducer.applySnapshot` is what
+    // sets the header (`publishTranscript` copies it out); `openSession`'s
+    // `reducer.reset()` is what clears it. So a null header while a session is
+    // open means nothing has loaded yet, not that there is nothing to load.
+    // The roster's own `blank` is the other half: only the host may call a
+    // session provisional, and that hero is where a new session is meant to
+    // start, so it keeps the hero from the first frame rather than flashing a
+    // spinner first.
+    val transcriptArrived = header != null
+    val awaitingTranscript =
+        isHero && ui.currentSessionId != null && !transcriptArrived && current?.blank != true
+    // Bug A: silence while connected, a named state otherwise.
+    val connectionLabel = ui.connectionLabel
     // The host refuses to recompose an agent once a turn has run, so the chip is
     // only meaningful while the session is blank — the web hero seat's own rule.
     // The label prefers the session's recorded preset, then the host default.
@@ -616,50 +631,74 @@ fun ChatScreen(vm: DshViewModel) {
                     // would be a second copy of it.
                     showHeader = false,
                 )
-            } else if (isHero) {
-                HeroBody(
+            } else if (awaitingTranscript) {
+                // A non-blank session with nothing loaded yet: the host has not
+                // answered this session's follow stream. Naming the connection
+                // when it is the reason costs no new copy — the drawer's own
+                // "Loading…" plus the shell's connection word.
+                LoadingSessionBody(
+                    connection = connectionLabel,
                     modifier = Modifier.weight(1f),
-                    value = draft,
-                    onValueChange = { draft = it },
-                    running = ui.running,
-                    modelLabel = modelLabel,
-                    onModelClick = { showModels = true },
-                    permissionLabel = permissionLabel,
-                    onPermissionClick = { showPermission = true },
-                    planActive = ui.planActive,
-                    onExitPlan = vm::exitPlanMode,
-                    contextPercent = ui.contextPercent,
-                    contextTokens = ui.contextTokens,
-                    contextWindow = ui.contextWindow,
-                    contextBreakdown = ui.contextBreakdown,
-                    attachments = ui.attachments,
-                    onToggleCommands = { menuOpen = !menuOpen },
-                    onRemoveAttachment = vm::removeAttachment,
-                    menuOpen = menuOpen,
-                    triggers = triggers,
-                    references = references,
-                    clearReferences = vm::clearReferences,
-                    onPickCommand = onPickCommand,
-                    workspaceLabel = current?.cwd?.let(::shortenLastSegment) ?: "Choose workspace",
-                    onWorkspaceClick = { showWorkspace = true },
-                    presetLabel = presetLabel,
-                    showPresetChip = showPresetChip,
-                    onPresetClick = {
-                        vm.refreshAgentPresets()
-                        showPresets = true
-                    },
-                    onSend = {
-                        val text = draft.text
-                        draft = TextFieldValue("")
-                        stickToBottom = true
-                        vm.send(text)
-                    },
-                    onStop = vm::stop,
-                    // A child can land on the hero for the moment before its
-                    // history snapshot arrives; the same gate claims its seat
-                    // there as in a live session.
-                    readOnlyReason = readOnlyReason,
                 )
+            } else if (isHero) {
+                // The hero has no flex child that can absorb a pill the way the
+                // transcript does, so an in-flow row would lift the centred
+                // composer by half the pill's height when the socket drops.
+                // Overlaid on the seat it costs no layout at all, and the strip
+                // it lands on is empty because the hero block is centred.
+                Box(Modifier.weight(1f)) {
+                    HeroBody(
+                        modifier = Modifier.fillMaxSize(),
+                        value = draft,
+                        onValueChange = { draft = it },
+                        running = ui.running,
+                        modelLabel = modelLabel,
+                        onModelClick = { showModels = true },
+                        permissionLabel = permissionLabel,
+                        onPermissionClick = { showPermission = true },
+                        planActive = ui.planActive,
+                        onExitPlan = vm::exitPlanMode,
+                        contextPercent = ui.contextPercent,
+                        contextTokens = ui.contextTokens,
+                        contextWindow = ui.contextWindow,
+                        contextBreakdown = ui.contextBreakdown,
+                        attachments = ui.attachments,
+                        onToggleCommands = { menuOpen = !menuOpen },
+                        onRemoveAttachment = vm::removeAttachment,
+                        menuOpen = menuOpen,
+                        triggers = triggers,
+                        references = references,
+                        clearReferences = vm::clearReferences,
+                        onPickCommand = onPickCommand,
+                        workspaceLabel = current?.cwd?.let(::shortenLastSegment) ?: "Choose workspace",
+                        onWorkspaceClick = { showWorkspace = true },
+                        presetLabel = presetLabel,
+                        showPresetChip = showPresetChip,
+                        onPresetClick = {
+                            vm.refreshAgentPresets()
+                            showPresets = true
+                        },
+                        onSend = {
+                            val text = draft.text
+                            draft = TextFieldValue("")
+                            stickToBottom = true
+                            vm.send(text)
+                        },
+                        onStop = vm::stop,
+                        // A child can land on the hero for the moment before its
+                        // history snapshot arrives; the same gate claims its seat
+                        // there as in a live session.
+                        readOnlyReason = readOnlyReason,
+                    )
+                    connectionLabel?.let {
+                        ConnectionPill(
+                            label = it,
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = DshSpacing.md),
+                        )
+                    }
+                }
             } else {
                 // Ascending seq order from the reducer; reversed for reverseLayout
                 // so the newest turn sits at the visual bottom.
@@ -718,6 +757,20 @@ fun ChatScreen(vm: DshViewModel) {
                     if (stickToBottom && !listState.isScrollInProgress && rows.isNotEmpty()) {
                         listState.scrollToItem(0)
                     }
+                }
+
+                // Bug A: the transcript is the flex child, so a row inserted
+                // above it takes its height out of the transcript's flexible
+                // space and leaves every seat below — the dock, the composer —
+                // exactly where it was. The newest turn stays pinned to the
+                // bottom and no row moves.
+                connectionLabel?.let {
+                    ConnectionPill(
+                        label = it,
+                        modifier = Modifier
+                            .align(Alignment.CenterHorizontally)
+                            .padding(top = DshSpacing.sm),
+                    )
                 }
 
                 // reverseLayout keeps the newest turn pinned to the bottom, so a
@@ -2240,6 +2293,63 @@ private fun ErrorBanner(
             )
         }
         Text("Dismiss", style = DshType.bodySmall, color = colors.link)
+    }
+}
+
+/**
+ * The connection pill (Bug A).
+ *
+ * The socket being down was invisible in the conversation: sends looked like
+ * they went nowhere and nothing said why. This is the smallest honest thing to
+ * put up — the shell's own two words, a chase dot while the supervisor is
+ * working, and the browser surface's pill idiom. It is only ever composed for a
+ * non-null [uk.xa0.dsh.UiState.connectionLabel], so an ordinary OPEN socket
+ * draws nothing.
+ */
+@Composable
+private fun ConnectionPill(label: String, modifier: Modifier = Modifier) {
+    val colors = DshTheme.colors
+    Row(
+        modifier
+            .clip(RoundedCornerShape(DshRadius.pill))
+            .background(colors.tip)
+            .padding(horizontal = DshSpacing.md, vertical = DshSpacing.xs),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // The chase is the honest glyph for both non-OPEN states: the supervisor
+        // re-dials whether the mux is mid-handshake or waiting out a backoff.
+        StateDot(state = DotState.ONGOING, size = 8.dp)
+        Spacer(Modifier.width(DshSpacing.sm))
+        Text(text = label, style = DshType.bodySmall, color = colors.labelSecondary)
+    }
+}
+
+/**
+ * Bug B: a non-blank session whose transcript has not arrived yet.
+ *
+ * The hero used to stand in for this, which is what made a real session with a
+ * slow or unreachable host look like a brand-new one. The wording is the
+ * drawer's existing "Loading…" (`SessionsDrawer`), and when the connection is
+ * the reason it is named underneath rather than guessed at.
+ */
+@Composable
+private fun LoadingSessionBody(connection: String?, modifier: Modifier = Modifier) {
+    val colors = DshTheme.colors
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StateDot(state = DotState.ONGOING, size = 8.dp)
+                Spacer(Modifier.width(DshSpacing.sm))
+                Text(
+                    text = "Loading…",
+                    style = DshType.bodyMedium,
+                    color = colors.labelTertiary,
+                )
+            }
+            if (connection != null) {
+                ConnectionPill(connection, Modifier.padding(top = DshSpacing.md))
+            }
+        }
     }
 }
 
