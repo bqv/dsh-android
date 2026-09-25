@@ -45,6 +45,18 @@ data class DshConfig(
      * user reported for Order ("on app restart the drawer's order should persist").
      */
     val drawerShowArchived: Boolean = false,
+    /**
+     * The Workspace sections the user has collapsed, by section key (a Workspace's
+     * host id, or the `__flat__`/`__ungrouped__` sentinels). Persisted for the same
+     * reason as the three above: collapsing a Workspace is a view the user chose,
+     * and a plain `remember` in the drawer lost it on every cold start.
+     *
+     * Only the Workspace collapse lives here. The drawer's "Show N more" paging and
+     * the per-session subagent disclosure stay ephemeral in the composable: they
+     * are per-visit navigation, not a preference, and restoring them would reopen
+     * the drawer in a state the user did not ask for.
+     */
+    val drawerCollapsedSections: Set<String> = emptySet(),
 ) {
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
@@ -100,6 +112,12 @@ class ConfigStore(context: Context) {
         drawerGroupByWorkspace = prefs.getBoolean(KEY_DRAWER_GROUP, true),
         drawerOrderByUpdated = prefs.getBoolean(KEY_DRAWER_ORDER, false),
         drawerShowArchived = prefs.getBoolean(KEY_DRAWER_ARCHIVED, false),
+        // `getStringSet` hands back the set the prefs object is still using, so a
+        // caller that mutated it would edit stored state out from under the store
+        // (and trip the "must not be modified" contract). Copy it on the way out.
+        drawerCollapsedSections = prefs.getStringSet(KEY_DRAWER_COLLAPSED, null)
+            ?.toSet()
+            ?: emptySet(),
     )
 
     fun save(config: DshConfig) {
@@ -114,6 +132,10 @@ class ConfigStore(context: Context) {
             .putBoolean(KEY_DRAWER_GROUP, config.drawerGroupByWorkspace)
             .putBoolean(KEY_DRAWER_ORDER, config.drawerOrderByUpdated)
             .putBoolean(KEY_DRAWER_ARCHIVED, config.drawerShowArchived)
+            // The same aliasing hazard in reverse: `apply` may keep a reference to
+            // the set, and the caller (a UiState copy) must not be able to mutate
+            // what was stored. Pass a fresh copy.
+            .putStringSet(KEY_DRAWER_COLLAPSED, config.drawerCollapsedSections.toSet())
             .apply()
     }
 
@@ -132,5 +154,6 @@ class ConfigStore(context: Context) {
         const val KEY_DRAWER_GROUP = "drawer_group_by_workspace"
         const val KEY_DRAWER_ORDER = "drawer_order_by_updated"
         const val KEY_DRAWER_ARCHIVED = "drawer_show_archived"
+        const val KEY_DRAWER_COLLAPSED = "drawer_collapsed_sections"
     }
 }

@@ -482,6 +482,12 @@ data class UiState(
     val drawerOrderByUpdated: Boolean = false,
     /** Sidebar Archived filter; persisted so it survives a restart like the other two. */
     val drawerShowArchived: Boolean = false,
+    /**
+     * Sidebar Workspace sections the user collapsed, keyed by section key (a
+     * Workspace's host id, or the `__flat__`/`__ungrouped__` sentinels); persisted
+     * so a cold start restores the drawer's shape instead of expanding everything.
+     */
+    val drawerCollapsedSections: Set<String> = emptySet(),
     /** The new-session default the app passes to `session/create` (a stored setting). */
     val agentPreset: String = "",
     /** Roster the host offers for a blank session (`agentPresets/list`). */
@@ -779,6 +785,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             drawerGroupByWorkspace = config.drawerGroupByWorkspace,
             drawerOrderByUpdated = config.drawerOrderByUpdated,
             drawerShowArchived = config.drawerShowArchived,
+            drawerCollapsedSections = config.drawerCollapsedSections,
             baseUrl = config.baseUrl,
             username = config.username,
         )
@@ -906,6 +913,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             username = config.username,
             drawerGroupByWorkspace = config.drawerGroupByWorkspace,
             drawerOrderByUpdated = config.drawerOrderByUpdated,
+            drawerCollapsedSections = config.drawerCollapsedSections,
         )
         connect()
     }
@@ -1035,6 +1043,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     fun setDrawerShowArchived(showArchived: Boolean) {
         configStore.save(configStore.load().copy(drawerShowArchived = showArchived))
         _ui.value = _ui.value.copy(drawerShowArchived = showArchived)
+    }
+
+    /**
+     * Collapse/expand a Workspace section. Takes the whole set rather than a single
+     * key so the drawer's toggle stays a pure `set +/- key` at the call site, exactly
+     * as it was when the set lived in the composable.
+     */
+    fun setDrawerCollapsedSections(sections: Set<String>) {
+        configStore.save(configStore.load().copy(drawerCollapsedSections = sections))
+        _ui.value = _ui.value.copy(drawerCollapsedSections = sections)
     }
 
     fun signOut() {

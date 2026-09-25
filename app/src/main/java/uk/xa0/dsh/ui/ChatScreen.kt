@@ -512,9 +512,11 @@ fun ChatScreen(vm: DshViewModel) {
                     groupByWorkspace = ui.drawerGroupByWorkspace,
                     orderByUpdated = ui.drawerOrderByUpdated,
                     showArchived = ui.drawerShowArchived,
+                    collapsedSections = ui.drawerCollapsedSections,
                     onGroupByWorkspace = vm::setDrawerGroupByWorkspace,
                     onOrderByUpdated = vm::setDrawerOrderByUpdated,
                     onShowArchived = vm::setDrawerShowArchived,
+                    onCollapsedSections = vm::setDrawerCollapsedSections,
                     // The box is one control with two answers: the roster filtered
                     // locally by title/path, and the host's own content search. The
                     // ViewModel owns the debounce and drops superseded pages.
