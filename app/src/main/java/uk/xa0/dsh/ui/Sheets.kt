@@ -290,20 +290,33 @@ fun ModelSheet(
                             // and the effort ride `session/selectModel`.
                             if (isSelected && option.efforts.isNotEmpty()) {
                                 // Insets match the model row's own content box: the
-                                // lead lines the chips up under the model's name
+                                // 24dp lead lines the chips up under the model's name
                                 // (12dp row + 12dp inner padding) and the trailing
-                                // side now matches it instead of stopping at the
-                                // row's edge — 24dp against 12dp is what read as a
-                                // lopsided row. A route can carry four levels
-                                // (Off/Low/High/Max is ~262dp of chips), so this
-                                // wraps rather than running the last one off a
-                                // phone's edge.
+                                // side matches it instead of stopping at the row's
+                                // edge — 24dp against 12dp is what read as a
+                                // lopsided row. Vertically the same 12dp sits above
+                                // and below the chips: the selected row's own box
+                                // edge is 12dp above their tops (this `top`) and the
+                                // next row's box starts 12dp below their bottoms
+                                // (`bottom`), so the effort row is spaced like every
+                                // other row boundary instead of being taped flush to
+                                // the row it belongs to. Keeping the chips' name
+                                // alignment: their tops also land 38dp below the
+                                // model name's text, the same name-to-name cadence
+                                // two collapsed rows have (14dp model-id line + 12dp
+                                // inner padding + 12dp here). A route can carry four
+                                // levels (Off/Low/High/Max is ~262dp of chips), so
+                                // this wraps rather than running the last one off a
+                                // phone's edge; the wrapped lines keep the tighter
+                                // 6dp `verticalArrangement`, intra-group spacing
+                                // rather than the 12dp group margin above.
                                 FlowRow(
                                     Modifier
                                         .fillMaxWidth()
                                         .padding(
                                             start = DshSpacing.xxl,
                                             end = DshSpacing.xxl,
+                                            top = DshSpacing.lg,
                                             bottom = DshSpacing.lg,
                                         ),
                                     horizontalArrangement = Arrangement.spacedBy(DshSpacing.md),
