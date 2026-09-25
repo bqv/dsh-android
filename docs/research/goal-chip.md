@@ -82,7 +82,7 @@ below caught the off-by-one: it showed `2/4` while the host had admitted round 1
   showed the wrong `2/4`. The compile failure that blocked a re-run is gone —
   `AUTH_ERROR` (`DshViewModel.kt:3597`) and `DshUnreachableException`
   (`net/DshClient.kt:36`, imported `DshViewModel.kt:58`) are both defined — so
-  `tools/device 127.0.0.1:5555 .probe/goalchip-verify.sh` can be rerun unchanged.
+  `adblease 127.0.0.1:5555 .probe/goalchip-verify.sh` can be rerun unchanged.
 - `activation` is not modelled, so a disarmed goal (after session resume/fork, or a
   `connection/reset`) still renders `Ongoing Goal` instead of the web's
   `Inactive Goal` (`ui-goal/src/client/locales.ts:25`; `GoalBar`'s label has no
