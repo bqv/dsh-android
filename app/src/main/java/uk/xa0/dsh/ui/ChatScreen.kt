@@ -234,6 +234,25 @@ fun ChatScreen(vm: DshViewModel) {
     var frozenLive by remember { mutableStateOf<LiveAttempt?>(null) }
     val currentLive by rememberUpdatedState(live)
 
+    // ...and hold the *shape* of the ended-turn fold for the same reason.
+    //
+    // Folding is what a just-finished turn does to rows that a moment earlier were
+    // the running turn's rows, and when the reader is inside them it rewrites the
+    // whole viewport under them. Measured on a parked reader: at the instant of a
+    // fold 79% of the transcript rows in view were replaced, taking the reader
+    // from the middle of the turn to the beginning of the session.
+    //
+    // Re-pinning the reader's item cannot save that one: every row they can see is
+    // a fold member, so there is no surviving key to pin and Compose falls back to
+    // the raw index. The fix at this level is not to rewrite rows the reader is
+    // reading. The web client folds immediately because its reader is parked at the
+    // end; holding the set while they are away, and applying it in one step when
+    // they return, is the same rule as the live row above.
+    var foldedTurns by remember { mutableStateOf(endedTurns) }
+    LaunchedEffect(stickToBottom, endedTurns) {
+        if (stickToBottom) foldedTurns = endedTurns
+    }
+
     // A session switch is not a scroll. `listState` and the freeze are remembered
     // across sessions on purpose (the list must not be rebuilt per session), so
     // without this an opened session inherits the *previous* one's position and
@@ -710,8 +729,8 @@ fun ChatScreen(vm: DshViewModel) {
                 // `frozenLive` while the reader is in history, so the streaming row
                 // cannot grow and reflow the list under them.
                 val shownLive = frozenLive ?: live
-                val rows = remember(entries, endedTurns, expandedTurns, shownLive) {
-                    buildDisplayRows(entries, endedTurns, expandedTurns, shownLive).asReversed()
+                val rows = remember(entries, foldedTurns, expandedTurns, shownLive) {
+                    buildDisplayRows(entries, foldedTurns, expandedTurns, shownLive).asReversed()
                 }
 
                 // The tool-call forest, keyed by call id so a row can find its own
