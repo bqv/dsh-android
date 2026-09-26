@@ -309,9 +309,16 @@ class TerminalEmulator(columns: Int, rows: Int, scrollback: Int = 1000) {
             's' -> saveCursor()
             'u' -> restoreCursor()
             'n' -> deviceStatusReport()
-            'c' -> {
+            'c' -> when (privateMarker) {
+                // Secondary DA: a program that asks (`vim`, `tmux`) blocks until it
+                // gets an answer. Reply as the conservative VT100-class identity
+                // Alacritty reports, version 1 — this is not xterm, and claiming a
+                // high xterm version would invite extensions the parser lacks.
+                '>' -> replies.append("\u001B[>0;1;0c")
                 // Primary DA: answer as a VT102, which is all a shell needs to know.
-                if (privateMarker != '>') replies.append("\u001B[?6c")
+                '\u0000' -> replies.append("\u001B[?6c")
+                // Tertiary DA (`ESC[=c`) is a DCS reply this emulator does not make.
+                else -> Unit
             }
             'b' -> if (lastPrintable != '\u0000') repeatLast(lastPrintable, maxOf(1, param(0, 1)))
             't' -> Unit // Window manipulation: nothing a phone-sized panel should obey.
@@ -344,11 +351,13 @@ class TerminalEmulator(columns: Int, rows: Int, scrollback: Int = 1000) {
                 code == 3 -> attrs = attrs or ATTR_ITALIC
                 code == 4 -> attrs = attrs or ATTR_UNDERLINE
                 code == 7 -> attrs = attrs or ATTR_REVERSE
+                code == 8 -> attrs = attrs or ATTR_HIDDEN
                 code == 9 -> attrs = attrs or ATTR_STRIKE
                 code == 21 || code == 22 -> attrs = attrs and (ATTR_BOLD or ATTR_DIM).inv()
                 code == 23 -> attrs = attrs and ATTR_ITALIC.inv()
                 code == 24 -> attrs = attrs and ATTR_UNDERLINE.inv()
                 code == 27 -> attrs = attrs and ATTR_REVERSE.inv()
+                code == 28 -> attrs = attrs and ATTR_HIDDEN.inv()
                 code == 29 -> attrs = attrs and ATTR_STRIKE.inv()
                 code in 30..37 -> fg = code - 30
                 code == 39 -> fg = COLOR_DEFAULT
@@ -420,9 +429,13 @@ class TerminalEmulator(columns: Int, rows: Int, scrollback: Int = 1000) {
     }
 
     private fun deviceStatusReport() {
+        // A private DSR (`ESC[?6n`) must be answered in the private form
+        // (`CSI ? r;c R`); an application that asks with the `?` rejects the plain
+        // reply and keeps waiting.
+        val marker = if (privateMarker == '?') "?" else ""
         when (param(0, 0)) {
-            5 -> replies.append("\u001B[0n")
-            6 -> replies.append("\u001B[${cursorRow + 1};${cursorCol + 1}R")
+            5 -> replies.append("\u001B[${marker}0n")
+            6 -> replies.append("\u001B[${marker}${cursorRow + 1};${cursorCol + 1}R")
             else -> Unit
         }
     }
@@ -808,7 +821,11 @@ class TerminalEmulator(columns: Int, rows: Int, scrollback: Int = 1000) {
         g1Special = false
         shiftedG1 = false
         automaticWrap = true
-        cursorVisible = true
+        // Cursor visibility is deliberately *not* reset, exactly as `title` is not.
+        // `SerializeAddon` emits no `?25` at all — a dump from a terminal with the
+        // cursor hidden is byte-identical to one from a visible cursor — so the
+        // snapshot carries no information about it. Forcing `true` here put a
+        // spurious block cursor in the middle of `htop` after every reconnect.
         applicationCursorKeys = false
         originMode = false
         cursorRow = 0
