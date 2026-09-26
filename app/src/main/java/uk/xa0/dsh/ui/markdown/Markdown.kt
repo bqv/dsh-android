@@ -277,11 +277,75 @@ object Markdown {
                 }
             }
 
+            // A bare URL is a link whether or not it was written as one.
+            //
+            // Assistant messages are full of them — a release page, a file on a host,
+            // an issue — and `[text](url)` is the form people write when they are
+            // being *careful*; the common case on screen is the URL by itself. GFM's
+            // rule, so the two clients agree on what counts: `http://`, `https://`
+            // and a `www.` host, and nothing else.
+            //
+            // Guarded on the first character because the parser runs per character
+            // over text that is still streaming in, and a regex scan at every
+            // position would be quadratic for no reason.
+            val auto = if (text[i] == 'h' || text[i] == 'w') AUTOLINK.find(text, i) else null
+            // A link starts at a word boundary: `xhttps://example.dev` is a word that
+            // happens to contain one, not a URL, and linking it would also make the
+            // link's text disagree with what is on screen.
+            val atBoundary = i == 0 || !text[i - 1].isLetterOrDigit()
+            if (auto != null && auto.range.first == i && atBoundary) {
+                val (link, end) = trimUrlEnd(auto.value)
+                if (link.isNotEmpty()) {
+                    flush()
+                    tokens += InlineToken(
+                        text = link,
+                        style = InlineStyle.LINK,
+                        // `www.example.com` has no scheme; both a browser intent and
+                        // the web client read it as HTTPS.
+                        url = if (link.startsWith("www.")) "https://$link" else link,
+                    )
+                    i += end
+                    continue
+                }
+            }
+
             buffer.append(text[i])
             i++
         }
         flush()
         return tokens
+    }
+
+    /**
+     * `https://…`, `http://…` or a `www.` host, as GFM autolinks them.
+     *
+     * Brackets are allowed *inside* the match on purpose: `…/wiki/Foo_(bar)` is a
+     * real URL and cutting it at the `(` mangles it. What is not part of the address
+     * is a trailing closer — that is [trimUrlEnd]'s job, and it balances them.
+     */
+    private val AUTOLINK = Regex("(?:https?://|www\\.)[^\\s<>\"'`\\[\\]]+")
+
+    /**
+     * A URL as it should be linked, and how much of the match that consumed.
+     *
+     * Sentence punctuation is not part of the address: "see https://x.dev/a." ends
+     * the sentence, and "(see https://x.dev/a)" closes a bracket. A closing paren
+     * that *is* part of the path is kept — `…/wiki/Foo_(bar)` — which is why the
+     * counts are compared rather than the character stripped blindly.
+     */
+    private fun trimUrlEnd(raw: String): Pair<String, Int> {
+        var end = raw.length
+        while (end > 0) {
+            val c = raw[end - 1]
+            val prefix = raw.take(end)
+            val unbalanced = c == ')' && prefix.count { it == ')' } > prefix.count { it == '(' }
+            if (c == '.' || c == ',' || c == ';' || c == ':' || c == '!' || c == '?' || unbalanced) {
+                end--
+            } else {
+                break
+            }
+        }
+        return raw.take(end) to end
     }
 
     private val TASK = Regex("^\\[([ xX])\\]\\s+")
