@@ -36,6 +36,7 @@ import uk.xa0.dsh.model.SessionIntentPlan
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
 import uk.xa0.dsh.model.SessionSearch
+import uk.xa0.dsh.model.sessionRowTitle
 import uk.xa0.dsh.model.SettingsApply
 import uk.xa0.dsh.model.SettingsWritePlan
 import uk.xa0.dsh.model.SessionSearchHit
@@ -3445,13 +3446,17 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // every session the host never titled — anything created by a script,
                 // an automation or a fork — read as "Untitled session" in the drawer
                 // while the web named it after its directory.
-                title = when {
-                    subagent != null && subagent.first.isNotBlank() -> subagent.first
-                    blank -> "New Session"
-                    stored.isNotBlank() -> stored
-                    basename(cwd)?.isNotEmpty() == true -> basename(cwd)!!
-                    else -> id
-                },
+                //
+                // The rule itself lives in [sessionRowTitle] so it can be tested
+                // without a ViewModel; the order there is the point (a stored name
+                // outranks the blank placeholder).
+                title = sessionRowTitle(
+                    subagentLabel = subagent?.first,
+                    stored = stored,
+                    blank = blank,
+                    directoryName = basename(cwd),
+                    id = id,
+                ),
                 cwd = cwd,
                 updatedAt = item.optLong("updatedAt"),
                 running = item.optBoolean("running"),
