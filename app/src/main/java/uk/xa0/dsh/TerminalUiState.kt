@@ -43,6 +43,9 @@ data class TerminalUiState(
      *
      * The panel draws one grid, so the seat is state rather than a second pane; the
      * seat the user picked is what decides which session the terminal RPCs address.
+     * The default is the host shell because every session has a root to open it in —
+     * its Workspace's directory, or the cwd it was created at — so a session that
+     * belongs to no Workspace still lands on a working shell rather than a refusal.
      */
     val seat: TerminalSeat = TerminalSeat.HOST_SHELL,
     /** The seats on offer, each labelled with the policy in force in it. */
