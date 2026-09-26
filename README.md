@@ -60,7 +60,7 @@ bash build.sh :app:assembleDebug
 # -> app/build/outputs/apk/debug/app-debug.apk
 
 bash build.sh :app:testDebugUnitTest
-# 149 tests, all JVM: the VT parser, the protocol gates and the key tables
+# 230 tests, all JVM: the VT parser, the protocol gates and the key tables
 ```
 
 The suite (`app/src/test/java/…`) exists because the VT core and the terminal's
@@ -214,6 +214,11 @@ socket resumes streaming instead of silently freezing the UI.
 - Back-pagination: scrolling to the oldest loaded row pulls one older page with
   `session/page`, so a long session is not capped at the follow window.
 - A deliverables row after each finished turn, opening the text preview.
+- A background-jobs seat in the header for the session in front of you: the
+  running jobs and their states, fed by the `jobs` delta of `session/control`,
+  with a "done" marker for a job that settled while you were in another session.
+  The count is the *open* session's, never the last session that happened to
+  report.
 
 ### The Shell tab
 
@@ -232,9 +237,8 @@ socket resumes streaming instead of silently freezing the UI.
   *Session's* policy, and the host refuses a mode change while a terminal is open
   in that session — "Close browser terminals before changing the Session sandbox
   mode" — so a terminal opened first would be a confined shell behind a seat
-  labelled "Full access". A session that is in no workspace should open its host
-  shell at the session's own cwd; that edge is still being fixed, and until it
-  lands the seat reports the fact instead of starting a shell elsewhere.
+  labelled "Full access". A session that is in no workspace opens its host shell
+  at the session's own cwd rather than guessing a workspace root.
 - **This session · Workspace Write / Read Only** is the session's own terminal,
   confined by whatever policy that session runs. The two seats exist because
   confinement is the *session's* policy with no per-terminal override: under
@@ -261,11 +265,16 @@ socket resumes streaming instead of silently freezing the UI.
 - **Verified on the emulator** — the qualification is the point: the grid follows
   the panel (`stty size` agreed at 16×56 against the panel's 56×16), a 287-column
   line wraps, after `seq 1 60` the last sixteen rows are visible with the prompt
-  on the bottom, `htop` renders unconfined in the host shell (159 tasks, box
+  on the bottom, `htop` renders unconfined in the host shell (165 tasks, box
   characters, no phantom cursor), `exit` reports a stopped shell, and the
   terminal picker distinguishes two terminals. **Re-attach after a network drop
   is unverified**: the emulator's `svc wifi/data` do not touch the path this app
   uses (eth0/10.0.2.15), so a drop-and-resume has not been exercised.
+
+<p align="center">
+  <img src="docs/images/shell.png" width="330"
+       alt="The Shell tab: the terminal's chip and its running state, the two seats labelled Host shell · Full access and This session · Workspace Write, and htop running unconfined in the host shell — showing the host's own processes — above the Esc/Tab/^C/^D key row">
+</p>
 
 ### The composer
 
@@ -337,6 +346,12 @@ socket resumes streaming instead of silently freezing the UI.
 - Not implemented elsewhere: the right-panel tab strip beyond Files,
   drag-to-reorder and the drawer's bottom fade, and Markdown
   images/citations/mermaid/math.
+- The jobs "done" marker lives in memory: restarting the app clears it, and a job
+  that settled while the app was closed is not re-announced, because a session's
+  first observation never marks it — the rule that keeps one session's job from
+  lighting a dot on another.
+- `session/selectModel` moves the host's **global** default model, not just the
+  open session's, so a model picked here changes every session's, in every client.
 - One host-side limitation the app cannot fix: a waterfall is fanned out to
   every registered `$events` client and settles only once each has answered, so
   a Skip or an approval is decisive only while this app is the sole event client
