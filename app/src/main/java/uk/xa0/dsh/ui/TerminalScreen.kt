@@ -180,7 +180,7 @@ private fun TerminalBar(
                 // ("vim", "user@host: ~/src"), where the host's own title is only ever
                 // the shell's name. It exists for the attached terminal only, which is
                 // exactly this header's subject.
-                text = screenTitle.ifBlank { state.title }.ifBlank { "Terminal" },
+                text = screenTitle.ifBlank { state.title }.ifBlank { "Shell" },
                 style = DshType.bodySmall.copy(fontWeight = FontWeight.Medium),
                 color = colors.labelPrimary,
                 maxLines = 1,

@@ -1656,7 +1656,10 @@ private fun ChatHeader(
 private enum class ChatView(val label: String) {
     CHAT("Chat"),
     TRAJECTORY("Trajectory"),
-    TERMINAL("Terminal"),
+    // "Shell", not "Terminal": the tab hosts two seats — an unconfined host shell
+    // and this session's own confined terminal — so the accurate word is the
+    // general one, and the seat chips inside say which is which.
+    TERMINAL("Shell"),
 }
 
 /**
