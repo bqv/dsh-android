@@ -40,6 +40,23 @@ daemon writes its liveness marker under `$XDG_DATA_HOME`, and with the default
 `~/.local/share` (read-only in this sandbox) the handshake failed and every build
 fell back to in-process compilation — 4 minutes instead of ~30-50s.
 
+## Releases
+
+```
+git tag v0.2.0 && git push origin v0.2.0      # runs .github/workflows/release.yml
+```
+
+The workflow builds and signs `:app:assembleRelease`, then creates the GitHub
+Release. Its body is **`docs/releases/<tag>.md`**, written in the same commit as
+the `versionCode`/`versionName` bump, with a generated download/version/SHA-256
+block appended — so the prose is reviewable in the repository instead of only
+existing on a web page. Bump the version *before* building the APK you test, or
+the About sheet will name the previous one.
+
+There is no `gh` on this box and none is needed: the repository is public, so
+`curl -s https://api.github.com/repos/bqv/dsh-android/actions/runs?per_page=3`
+reports the run, and the release page is readable with any web fetch.
+
 ## Device infrastructure
 
 Both the adb server and the emulator are **OpenRC user services**, so they
