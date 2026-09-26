@@ -102,6 +102,7 @@ import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.DisplayRow
 import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.SessionFiles
+import uk.xa0.dsh.model.SessionTarget
 import uk.xa0.dsh.model.SubagentComposerState
 import uk.xa0.dsh.model.SubagentReadOnlyReason
 import uk.xa0.dsh.model.TurnDeliverables
@@ -342,6 +343,13 @@ fun ChatScreen(vm: DshViewModel) {
     var draft by rememberSaveable(ui.currentSessionId, stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(""))
     }
+    // A send that never reached a session hands its text back here. Restored only
+    // into an empty draft: text the reader has typed since must not be overwritten.
+    LaunchedEffect(ui.draftRestore) {
+        val restore = ui.draftRestore ?: return@LaunchedEffect
+        if (draft.text.isEmpty()) draft = TextFieldValue(restore.text)
+        vm.consumeDraftRestore()
+    }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     // The About sheet is pure local state, so unlike Settings it needs no read on
     // open — see `AboutSheet`.
@@ -445,6 +453,21 @@ fun ChatScreen(vm: DshViewModel) {
 
 
     val current = ui.sessions.firstOrNull { it.id == ui.currentSessionId }
+    // The pending seat's directory, for the hero's workspace chip. The target's own
+    // path is preferred; a Workspace the registry has not delivered a path for yet
+    // still resolves through the registry, and a Directory target *is* its path.
+    val pendingTarget = ui.pendingSession?.target
+    val pendingPath = when (pendingTarget) {
+        is SessionTarget.Workspace ->
+            pendingTarget.path ?: ui.workspaces.firstOrNull { it.id == pendingTarget.id }?.path
+        is SessionTarget.Directory -> pendingTarget.path
+        null -> null
+    }
+    val heroCwd = current?.cwd ?: pendingPath
+    // The pending seat is a session that has deliberately not been created, so it
+    // wears the blank session's chips (workspace, preset) — a blank session is the
+    // only other thing the host calls provisional.
+    val blankSeat = current?.blank == true || (current == null && ui.pendingSession != null)
     val isHero = entries.isEmpty() && live == null
     // An empty transcript is not the same fact as a blank session. The follow
     // stream's opening snapshot is the one event that proves the host has
@@ -464,12 +487,14 @@ fun ChatScreen(vm: DshViewModel) {
     // The host refuses to recompose an agent once a turn has run, so the chip is
     // only meaningful while the session is blank — the web hero seat's own rule.
     // The label prefers the session's recorded preset, then the host default.
-    val presetLabel = ui.agentPresetOptions.firstOrNull { it.id == ui.currentAgentPreset }
+    val presetLabel = ui.agentPresetOptions.firstOrNull {
+        it.id == (ui.pendingSession?.preset ?: ui.currentAgentPreset)
+    }
         ?.let { agentPresetLabel(it.id, it.name) }
-        ?: ui.currentAgentPreset.takeIf { it.isNotBlank() }
+        ?: (ui.pendingSession?.preset ?: ui.currentAgentPreset).takeIf { it.isNotBlank() }
         ?: ui.agentPresetOptions.firstOrNull { it.isDefault }?.name
         ?: ui.agentPresetOptions.firstOrNull()?.name
-    val showPresetChip = isHero && current?.blank == true && presetLabel != null
+    val showPresetChip = isHero && blankSeat && presetLabel != null
     // A one-shot subagent's inbox is not its own to mutate — the web's
     // `queueMutable = subagent === null || mode === 'continuable'`.
     val queueMutable = current?.isSubagent != true || current.subagentMode == "continuable"
@@ -547,11 +572,15 @@ fun ChatScreen(vm: DshViewModel) {
                     onNew = {
                         // Inherits the current (or most recent) Workspace rather
                         // than creating at a bare cwd, which is what used to drop
-                        // a new session into Ungrouped.
+                        // a new session into Ungrouped. The target is only
+                        // *recorded* now — the session is created on first use, so
+                        // leaving the hero leaves nothing behind.
                         vm.startSession(current?.cwd ?: header?.cwd)
                         scope.launch { drawerState.close() }
                     },
                     onNewInWorkspace = { workspaceId ->
+                        // Same contract: reuse a blank if the host already has one
+                        // in this Workspace, otherwise record the target.
                         vm.startSessionInWorkspace(workspaceId)
                         scope.launch { drawerState.close() }
                     },
@@ -633,6 +662,11 @@ fun ChatScreen(vm: DshViewModel) {
                 onView = { view = it },
                 showTabs = !isHero,
                 filesOpen = showFiles,
+                // The Files panel resolves every path against a session
+                // (`agentId`), so on the pending seat there is nothing to list. The
+                // seat states that fact by not being offered, rather than opening a
+                // panel that can only be empty.
+                filesAvailable = ui.currentSessionId != null,
                 onFiles = {
                     filesFocus = null
                     showFiles = !showFiles
@@ -681,6 +715,13 @@ fun ChatScreen(vm: DshViewModel) {
                 // namespace. The screen creates or adopts the session's terminal, so
                 // it is only reachable for an open session — the strip that selects
                 // it is not drawn on the hero.
+                //
+                // The pending new-session seat therefore has no Shell tab, and the
+                // seat split is what keeps that honest: `HOST_SHELL` materialises its
+                // *own* dedicated archived session at the workspace root and never
+                // consults the pending target, while `THIS_SESSION` is work inside
+                // the open session and would have to materialise the seat first
+                // rather than open a second, unnamed terminal session.
                 TerminalScreen(
                     vm = vm,
                     sessionId = ui.currentSessionId,
@@ -756,7 +797,7 @@ fun ChatScreen(vm: DshViewModel) {
                         references = references,
                         clearReferences = vm::clearReferences,
                         onPickCommand = onPickCommand,
-                        workspaceLabel = current?.cwd?.let(::shortenLastSegment) ?: "Choose workspace",
+                        workspaceLabel = heroCwd?.let(::shortenLastSegment) ?: "Choose workspace",
                         onWorkspaceClick = { showWorkspace = true },
                         presetLabel = presetLabel,
                         showPresetChip = showPresetChip,
@@ -1276,7 +1317,10 @@ fun ChatScreen(vm: DshViewModel) {
     if (showWorkspace) {
         WorkspaceSheet(
             workspaces = ui.workspaces,
-            currentCwd = current?.cwd,
+            // The pending seat's directory counts as "where this session will run":
+            // the picker's check mark is what tells the reader which target the
+            // hero already records.
+            currentCwd = heroCwd,
             onPickWorkspace = { workspaceId ->
                 showWorkspace = false
                 vm.startSessionInWorkspace(workspaceId)
@@ -1548,6 +1592,12 @@ private fun ChatHeader(
     onView: (ChatView) -> Unit = {},
     showTabs: Boolean = false,
     filesOpen: Boolean = false,
+    /**
+     * Whether the Files seat is offered at all. A session is what the panel
+     * resolves every path against, so the pending new-session hero — which has
+     * deliberately no session — does not draw the seat.
+     */
+    filesAvailable: Boolean = true,
     onFiles: () -> Unit = {},
     lineage: SubagentRollup? = null,
     onLineage: () -> Unit = {},
@@ -1607,19 +1657,22 @@ private fun ChatHeader(
                 Spacer(Modifier.width(HEADER_SEAT_GAP))
             }
             // The right panel's seat, which on the web is a header utility. It
-            // stays available on the hero screen too: a blank session still has a
-            // workspace worth listing.
-            Icon(
-                Icons.Rounded.Folder,
-                contentDescription = if (filesOpen) "Close files" else "Files",
-                tint = if (filesOpen) colors.link else colors.labelSecondary,
-                modifier = Modifier
-                    .size(HEADER_SEAT)
-                    .clip(CircleShape)
-                    .clickableNoRipple(onClick = onFiles)
-                    .padding(DshSpacing.md),
-            )
-            Spacer(Modifier.width(HEADER_SEAT_GAP))
+            // stays available on a blank-session hero too: a blank session still has
+            // a workspace worth listing. On the *pending* hero there is no session
+            // for the panel to address at all, so the seat is withheld.
+            if (filesAvailable) {
+                Icon(
+                    Icons.Rounded.Folder,
+                    contentDescription = if (filesOpen) "Close files" else "Files",
+                    tint = if (filesOpen) colors.link else colors.labelSecondary,
+                    modifier = Modifier
+                        .size(HEADER_SEAT)
+                        .clip(CircleShape)
+                        .clickableNoRipple(onClick = onFiles)
+                        .padding(DshSpacing.md),
+                )
+                Spacer(Modifier.width(HEADER_SEAT_GAP))
+            }
             JobsSeat(jobs = jobs, finishedUnseen = jobsFinishedUnseen, onClick = onJobs)
             // No separate running-turn dot here on purpose. `JobsSeat` already
             // draws a `StateDot(ONGOING)` while a job runs, and this glyph is the
