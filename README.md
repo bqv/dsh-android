@@ -33,6 +33,9 @@ about the app instead: the host, the sign-in mode, the version, the platform, an
 the open session's route. (The session list is blurred in that shot; it is
 someone's, and not this repository's.)
 
+One shot is still owed: the Shell tab, showing a terminal with `htop` running in
+the host-shell seat, in dark mode.
+
 ## Requirements
 
 - **Android 8.0 (API 26) or newer.** `minSdk` is 26; `compileSdk` and `targetSdk`
@@ -55,10 +58,17 @@ someone's, and not this repository's.)
 ```sh
 bash build.sh :app:assembleDebug
 # -> app/build/outputs/apk/debug/app-debug.apk
+
+bash build.sh :app:testDebugUnitTest
+# 149 tests, all JVM: the VT parser, the protocol gates and the key tables
 ```
 
-CI builds the same thing on every push to `main` and every pull request, so an
-APK can be had without the local toolchain at all:
+The suite (`app/src/test/java/…`) exists because the VT core and the terminal's
+ordering gates are pure Kotlin with no Android in them: the half of the feature
+a build box cannot exercise on a device is pinned down against bytes instead.
+
+CI runs that suite and builds the same APK on every push to `main` and every pull
+request, so an APK can be had without the local toolchain at all:
 
 - the **Actions** tab → the *Build* workflow → the run for your commit →
   **Artifacts** → `dsh-android-debug-<sha>`, or
@@ -199,10 +209,63 @@ socket resumes streaming instead of silently freezing the UI.
 - Live token streaming with throttling so hundreds of deltas per second stay
   smooth; a per-turn process fold with a summary; a "Deep diving…" status with
   an elapsed clock; per-message clock and copy actions; a back-to-bottom button.
-- Chat / Trajectory view tabs, the second being the model's input/output ledger.
+- Chat / Trajectory / Shell view tabs: the second is the model's input/output
+  ledger, the third the session's PTY (see *The Shell tab*, below).
 - Back-pagination: scrolling to the oldest loaded row pulls one older page with
   `session/page`, so a long session is not capped at the follow window.
 - A deliverables row after each finished turn, opening the text preview.
+
+### The Shell tab
+
+- The view strip is **Chat / Trajectory / Shell**. The third is a real PTY over
+  the host's native `terminal` Remote namespace (`environment`, `shells`, `list`,
+  `create`, `follow`, `write`, `resize`, `rename`, `close`), streamed on the same
+  `/api/remote.mux` the transcript uses. It is labelled **Shell** rather than
+  Terminal because it hosts two *seats*, and it is a client view over that
+  namespace rather than a host-registered view — the same material the web
+  client's own terminal panel is assembled from (`docs/research/chrome-ui.md`
+  §5.3).
+- **Host shell · Full access** is the default seat: one dedicated Session per
+  workspace, created at the workspace root, given `danger-full-access` *before*
+  any terminal exists in it, then archived so it never sits in the drawer. The
+  order is the feature. `terminal/create` takes the shell's confinement from the
+  *Session's* policy, and the host refuses a mode change while a terminal is open
+  in that session — "Close browser terminals before changing the Session sandbox
+  mode" — so a terminal opened first would be a confined shell behind a seat
+  labelled "Full access". A session that is in no workspace should open its host
+  shell at the session's own cwd; that edge is still being fixed, and until it
+  lands the seat reports the fact instead of starting a shell elsewhere.
+- **This session · Workspace Write / Read Only** is the session's own terminal,
+  confined by whatever policy that session runs. The two seats exist because
+  confinement is the *session's* policy with no per-terminal override: under
+  `workspace-write` the host wraps the shell in bwrap (`--ro-bind / /`,
+  `--unshare-pid`, `--tmpfs /tmp`, and only the workspace bound writable), so
+  the filesystem is read-only to it and `htop` sees only its own PID namespace.
+  The host shell is the escape from that, per workspace, without moving the mode
+  of the session the user is working in.
+- Each seat chip carries the policy in force in it ("Host shell · Full access",
+  "This session · Workspace Write"), which is what replaces a one-off "this
+  terminal is sandboxed" notice: the shell in front of you is named by what it
+  can touch, and the chips are re-labelled when the session's access mode moves.
+- The grid is one `Canvas` with a block cursor — a 100×40 screen is 4,000 cells
+  and `htop` repaints most of them several times a second — with a key row for
+  the keys a soft keyboard cannot produce: `Esc`, `Tab`, `^C`, `^D`, a `Ctrl`
+  latch, the arrows, `PgUp`/`PgDn` and `Home`/`End`. A session that retains more
+  than one terminal gets a chip per terminal; one grid is on screen at a time.
+- The VT core (`app/src/main/java/uk/xa0/dsh/term/`) is hand-written and
+  Android-free: incremental UTF-8 across chunk boundaries, cursor addressing,
+  EL/ED, insert/delete line and char, DECSTBM scroll regions, `?1049` alternate
+  screen with save/restore, `?25`/`?7`/`?6`/`?1` and ANSI insert mode, SGR
+  through 16/256/truecolor, the `ESC(0` ACS line-drawing table, DSR/DA answers
+  written back to the PTY, and a bounded scrollback.
+- **Verified on the emulator** — the qualification is the point: the grid follows
+  the panel (`stty size` agreed at 16×56 against the panel's 56×16), a 287-column
+  line wraps, after `seq 1 60` the last sixteen rows are visible with the prompt
+  on the bottom, `htop` renders unconfined in the host shell (159 tasks, box
+  characters, no phantom cursor), `exit` reports a stopped shell, and the
+  terminal picker distinguishes two terminals. **Re-attach after a network drop
+  is unverified**: the emulator's `svc wifi/data` do not touch the path this app
+  uses (eth0/10.0.2.15), so a drop-and-resume has not been exercised.
 
 ### The composer
 
@@ -267,9 +330,13 @@ socket resumes streaming instead of silently freezing the UI.
 - A typed note alongside a single-select question is sent together with the pick
   (`{selected, custom}`); the web clears one when you touch the other.
 - Settings is read-only apart from client-local preferences (see above).
-- Not implemented: the terminal panel (`terminal/follow`), the right-panel tab
-  strip beyond Files, drag-to-reorder and the drawer's bottom fade, and
-  Markdown images/citations/mermaid/math.
+- Not implemented in the terminal: scrollback *rendering* — the tail is retained
+  but not drawn — mouse reporting, terminal search, more than one terminal on
+  screen at a time, sixel/kitty graphics, OSC 8 hyperlinks, bracketed paste and
+  IME composition regions.
+- Not implemented elsewhere: the right-panel tab strip beyond Files,
+  drag-to-reorder and the drawer's bottom fade, and Markdown
+  images/citations/mermaid/math.
 - One host-side limitation the app cannot fix: a waterfall is fanned out to
   every registered `$events` client and settles only once each has answered, so
   a Skip or an approval is decisive only while this app is the sole event client
@@ -280,14 +347,16 @@ socket resumes streaming instead of silently freezing the UI.
 ```
 app/src/main/java/uk/xa0/dsh/
   data/    Encrypted config store: host, credentials, theme, drawer preferences
-  net/     DshClient (cookies + unary RPC), RemoteMux (WebSocket multiplexer), PersistentCookieJar
+  net/     DshClient (cookies + unary RPC), RemoteMux (the stream mux), TerminalClient (the terminal namespace), PersistentCookieJar
+  term/    The VT core and the terminal's own rules: emulator, key encodings, seats, stream gates — no Android, so the JVM suite can drive it
   model/   Journal → renderable rows: transcript reducer, trajectory, files, search, stats, tool tree
-  ui/      Compose screens and components: chat, drawer, settings, setup, trajectory, theme, markdown
+  ui/      Compose screens and components: chat, drawer, settings, setup, trajectory, terminal, theme, markdown
+app/src/test/java/uk/xa0/dsh/term/   JVM tests for the VT parser, the protocol gates and the key tables
 docs/      HANDOFF.md (working state), PARITY.md (parity ledger), research/ (reverse-engineered spec)
-tools/     install.sh, device, adb/emulator init scripts and helpers
+tools/     install.sh (APK install), dsh-api.mjs (one gateway RPC over loopback), gh-secrets.py (Actions secrets); the adb/emulator services and the device lease are generic host infrastructure and live outside this checkout
 build.sh   Gradle entry point; pins the toolchain, the caches and the build lock
 docs/images/  the screenshots above
-.github/   Build and Release workflows: an installable APK per push, and a
+.github/   Build and Release workflows: the JVM suite and an installable APK per push, and a
            published release per version tag
 app/build.gradle.kts, settings.gradle.kts, gradle.properties, local.properties   Gradle and SDK config
 ```
