@@ -2429,7 +2429,12 @@ private fun ErrorBanner(
 private fun ConnectionPill(label: String, modifier: Modifier = Modifier) {
     val colors = DshTheme.colors
     Row(
+        // The side inset lives here rather than at the three call sites: the pill is
+        // centred, so without it a longer label ("Reconnecting to the host…") runs
+        // edge to edge and reads as a clipped bar rather than a chip. Padding before
+        // the clip insets the whole pill; after it, it would only shrink the fill.
         modifier
+            .padding(horizontal = DshSpacing.xl)
             .clip(RoundedCornerShape(DshRadius.pill))
             .background(colors.tip)
             .padding(horizontal = DshSpacing.md, vertical = DshSpacing.xs),
@@ -2439,7 +2444,13 @@ private fun ConnectionPill(label: String, modifier: Modifier = Modifier) {
         // re-dials whether the mux is mid-handshake or waiting out a backoff.
         StateDot(state = DotState.ONGOING, size = 8.dp)
         Spacer(Modifier.width(DshSpacing.sm))
-        Text(text = label, style = DshType.bodySmall, color = colors.labelSecondary)
+        Text(
+            text = label,
+            style = DshType.bodySmall,
+            color = colors.labelSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
