@@ -56,6 +56,7 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -445,7 +446,15 @@ private fun TerminalSurface(
                         .alpha(0f)
                         .focusRequester(focusRequester),
                     textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
-                    keyboardOptions = KeyboardOptions(autoCorrect = false),
+                    // A password field is the one flavour most IMEs will not
+                    // compose, suggest or autocorrect in, which is exactly what a
+                    // terminal wants from its keystroke source: every key arrives as
+                    // a committed edit, so it is echoed at once instead of waiting
+                    // for a word to commit. It is invisible either way.
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrect = false,
+                    ),
                 )
                 // Tapping the grid puts the keyboard back after a hardware key or a
                 // focus loss; the tap must not be swallowed by the Canvas.

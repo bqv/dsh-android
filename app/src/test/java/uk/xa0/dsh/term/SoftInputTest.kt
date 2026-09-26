@@ -115,6 +115,27 @@ class SoftInputTest {
     }
 
     /**
+     * The pair that matters for a chord: the same edit, held without an armed Ctrl
+     * and sent with one.
+     *
+     * A soft keyboard composes a lone letter as a word, so arming Ctrl and typing
+     * `d` left the `d` sitting in the IME's composing region with nothing written.
+     * Ctrl+D is EOT and has to leave the phone now, not when a word that may never
+     * commit finally commits.
+     */
+    @Test
+    fun `ctrl reaches the shell while the IME is still composing`() {
+        val held = SoftInput.editOf("${anchor}d", composing = true)
+        assertEquals("", typed(held))
+        assertTrue(held.composing)
+
+        val chord = SoftInput.editOf("${anchor}d", composing = true, ctrl = true)
+        assertEquals("\u0004", typed(chord))
+        assertTrue(chord.ctrlUsed)
+        assertFalse(chord.composing)
+    }
+
+    /**
      * The arithmetic above assumes one anchor character: an edit that removes it
      * leaves exactly the empty string, and an edit that keeps it leaves the commit
      * as the suffix after exactly one character.

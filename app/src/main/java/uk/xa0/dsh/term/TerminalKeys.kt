@@ -168,7 +168,16 @@ object SoftInput {
      * @param ctrl true when the panel's Ctrl key is armed
      */
     fun editOf(nextText: String, composing: Boolean, ctrl: Boolean = false): SoftEdit {
-        if (composing) return SoftEdit(write = "", composing = true, ctrlUsed = false)
+        // An armed Ctrl is a chord, not a word.
+        //
+        // The IME composes a lone letter as a word, and a composition is held until
+        // it commits because typing half a word into a shell is worse than a delay.
+        // A chord has the opposite requirement: it must go out *now*, and for a
+        // single letter there may be no commit to wait for at all — which is how
+        // Ctrl+D could sit in the composing region forever and never reach the PTY.
+        // So an armed Ctrl bypasses composition; the panel drops the field back to
+        // its rest value, which is also what cancels the composition.
+        if (composing && !ctrl) return SoftEdit(write = "", composing = true, ctrlUsed = false)
         val anchor = nextText.indexOf(ANCHOR)
         if (anchor < 0) {
             // No anchor and nothing else: the IME deleted it, which is a backspace.
