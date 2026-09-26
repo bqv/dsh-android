@@ -1620,6 +1620,24 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+
+        // A bell is a program asking for the reader, and what is in front of them is
+        // not necessarily this panel — a long build rings when it is done, with the
+        // phone in a pocket. So it gets exactly what a question gets: the attention
+        // notification, deep-linking to the session, suppressed while that session is
+        // the one on screen (`alert` owns that test). The count is compared, not the
+        // fact, so two bells are two alerts and a re-attach is not one.
+        val bells = session.emulator.bellCount
+        if (bells > session.bellsSeen) {
+            session.bellsSeen = bells
+            val sessionId = _terminal.value.sessionId
+            alert(
+                id = Attention.bellId(sessionId),
+                sessionId = sessionId,
+                title = "Terminal bell",
+                text = "${session.info?.title ?: "A terminal"} rang",
+            )
+        }
         return null
     }
 

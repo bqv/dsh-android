@@ -576,6 +576,35 @@ private fun DrawScope.drawTerminalGrid(
     val visibleRows = minOf(emulator.rows, (size.height / cellHeight).toInt())
     for (row in 0 until visibleRows) {
         val line = emulator.row(row)
+        val rowTop = row * cellHeight
+
+        // Backgrounds first, as rects on the character grid: one rect per run of
+        // cells that share a background. `htop`'s selected row and its header bar are
+        // the case that matters, and the default background is skipped because the
+        // panel already paints it.
+        var runStart = 0
+        var runColor = backgroundOf(line.cells[0], palette, defaultFg, defaultBg)
+        for (column in 1 until columns) {
+            val next = backgroundOf(line.cells[column], palette, defaultFg, defaultBg)
+            if (next == runColor) continue
+            if (runColor != defaultBg) {
+                drawRect(
+                    color = runColor,
+                    topLeft = Offset(runStart * cellWidth, rowTop),
+                    size = Size((column - runStart) * cellWidth, cellHeight),
+                )
+            }
+            runStart = column
+            runColor = next
+        }
+        if (runColor != defaultBg) {
+            drawRect(
+                color = runColor,
+                topLeft = Offset(runStart * cellWidth, rowTop),
+                size = Size((columns - runStart) * cellWidth, cellHeight),
+            )
+        }
+
         val builder = AnnotatedString.Builder()
         var spanStart = 0
         var current: SpanStyle? = null
@@ -595,7 +624,7 @@ private fun DrawScope.drawTerminalGrid(
         }
         current?.let { builder.addStyle(it, spanStart, builder.length) }
         val layout = measurer.measure(builder.toAnnotatedString(), style = baseStyle, softWrap = false)
-        drawText(layout, topLeft = Offset(0f, row * cellHeight))
+        drawText(layout, topLeft = Offset(0f, rowTop))
     }
 
     if (!emulator.cursorVisible || emulator.cursorRow >= visibleRows) return
@@ -614,7 +643,33 @@ private fun DrawScope.drawTerminalGrid(
     drawText(layout, topLeft = Offset(left, top))
 }
 
-/** Resolves one cell's colours and attributes into a span. */
+/** Resolves one cell's background, after reverse video and DIM, as it will be painted. */
+private fun backgroundOf(
+    cell: uk.xa0.dsh.term.TerminalCell,
+    palette: IntArray,
+    defaultFg: Color,
+    defaultBg: Color,
+): Color {
+    var fg = resolveColor(cell.fg, defaultFg, palette)
+    var bg = resolveColor(cell.bg, defaultBg, palette)
+    if (cell.attrs and ATTR_REVERSE != 0) {
+        val swap = fg
+        fg = bg
+        bg = swap
+    }
+    return bg
+}
+
+/**
+ * Resolves one cell's *foreground* and attributes into a span.
+ *
+ * The background is deliberately not here: it is painted as a rect on the character
+ * grid by [drawTerminalGrid]. A span's background is drawn from the text layout's own
+ * box, which is the font's line box and not the cell, and the two disagree — measured
+ * on the emulator, `htop`'s selected row came out as a 37px band against a 37px cell
+ * pitch but sitting 3px high, so the glyphs, which *are* centred in the cell, hugged
+ * the band's bottom edge. A rect is the same maths the block cursor already uses.
+ */
 private fun spanStyleOf(
     cell: uk.xa0.dsh.term.TerminalCell,
     palette: IntArray,
@@ -622,18 +677,13 @@ private fun spanStyleOf(
     defaultBg: Color,
 ): SpanStyle {
     var fg = resolveColor(cell.fg, defaultFg, palette)
-    var bg = resolveColor(cell.bg, defaultBg, palette)
+    val bg = resolveColor(cell.bg, defaultBg, palette)
     // Reverse video is how `htop` draws its selected row and its headers, and how
     // a mid-screen program shows a highlighted region.
-    if (cell.attrs and ATTR_REVERSE != 0) {
-        val swap = fg
-        fg = bg
-        bg = swap
-    }
+    if (cell.attrs and ATTR_REVERSE != 0) fg = bg
     if (cell.attrs and ATTR_DIM != 0) fg = fg.copy(alpha = 0.6f)
     return SpanStyle(
         color = fg,
-        background = bg,
         fontWeight = if (cell.attrs and ATTR_BOLD != 0) FontWeight.Bold else null,
         fontStyle = if (cell.attrs and ATTR_ITALIC != 0) androidx.compose.ui.text.font.FontStyle.Italic else null,
         textDecoration = when {

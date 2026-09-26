@@ -64,6 +64,14 @@ object Attention {
         if (sessionId.isNullOrEmpty()) ID_QUESTION else 5_000_000 + (sessionId.hashCode() and 0xFFFFF)
 
     /**
+     * A terminal's BEL, per session. It gets its own range rather than sharing the
+     * question one: a bell and a question can be waiting at the same time, and the
+     * one that arrived last must not erase the other from the shade.
+     */
+    fun bellId(sessionId: String?): Int =
+        if (sessionId.isNullOrEmpty()) 1005 else 6_000_000 + (sessionId.hashCode() and 0xFFFFF)
+
+    /**
      * Both channels must exist before the first post. Creating them on every app
      * start is idempotent, so there is nothing to guard for — and the check has
      * to be per channel anyway, because an upgrade adds the connection channel to

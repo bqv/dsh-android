@@ -407,6 +407,15 @@ class TerminalAttachmentSession(
     var measured: Pair<Int, Int>? = null
         private set
 
+    /**
+     * The emulator's bell count when this attachment started.
+     *
+     * Seeded from the emulator rather than zero: the screen is reused across
+     * attachments, so an attachment that started at zero would alert on every bell
+     * the terminal had *ever* rung the moment it re-attached.
+     */
+    var bellsSeen: Int = emulator.bellCount
+
     init {
         resizeGate.adopt(info)
     }

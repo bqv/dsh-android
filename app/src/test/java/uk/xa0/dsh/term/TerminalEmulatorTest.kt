@@ -938,4 +938,26 @@ class TerminalEmulatorTest {
         assertEquals(bytes.line(0), text.line(0))
         assertNotEquals("caf", text.line(0))
     }
+
+    /**
+     * A BEL is counted, and an OSC's BEL terminator is not a bell.
+     *
+     * That distinction is the whole test: both are the byte 0x07, the second is
+     * consumed by the string parser before the C0 handler ever sees it, and a counter
+     * that missed it would notify the reader every time a program set its window
+     * title — which `htop` does on every repaint.
+     */
+    @Test
+    fun `a bell is counted but a string terminator is not a bell`() {
+        val term = emulator()
+        term.append("\u001B]0;htop\u0007")
+        assertEquals(0, term.bellCount)
+
+        term.append("\u0007")
+        assertEquals("one bell is one", 1, term.bellCount)
+
+        term.append("x\u0007\u0007")
+        assertEquals("two more bells are two more", 3, term.bellCount)
+        assertEquals("and the text still rendered", "x", term.line(0))
+    }
 }

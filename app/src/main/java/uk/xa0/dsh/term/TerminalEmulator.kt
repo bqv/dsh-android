@@ -100,6 +100,17 @@ class TerminalEmulator(columns: Int, rows: Int, scrollback: Int = 1000) {
 
     // ------------------------------------------------------------------ parsing
 
+    /**
+     * How many times this screen has been rung with BEL.
+     *
+     * A counter and not a flag: two bells a second apart are two separate things to
+     * tell the reader about, and a consumer that compared booleans would see one. It
+     * never resets — the *reader* keeps the last count it alerted on, which is the
+     * only place that fact belongs.
+     */
+    var bellCount: Int = 0
+        private set
+
     private var state = GROUND
     private var lastPrintable: Char = '\u0000'
     private var osc = StringBuilder()
@@ -220,7 +231,12 @@ class TerminalEmulator(columns: Int, rows: Int, scrollback: Int = 1000) {
             '\r' -> { cursorCol = 0; pendingWrap = false }
             '\u000E' -> shiftedG1 = true
             '\u000F' -> shiftedG1 = false
-            else -> Unit // BEL/ENQ/DEL carry nothing this client acts on.
+            // BEL is the one way a program has of saying "come back": a build that
+            // finished, a prompt that wants you. It is counted rather than acted on
+            // here — the emulator has no idea whether anyone is looking — and the
+            // panel turns a rise in the count into the same alert a question gets.
+            '\u0007' -> bellCount++
+            else -> Unit // ENQ/DEL carry nothing this client acts on.
         }
     }
 
