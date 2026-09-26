@@ -137,3 +137,32 @@ fun indexSubagentRollups(
 fun subagentChildrenOf(sessions: List<SessionItem>, parentId: String): List<SessionItem> =
     sessions.filter { it.parentSessionId == parentId && it.isSubagent }
         .sortedByDescending { it.updatedAt }
+
+/**
+ * The session a subagent was spawned by — the way *up*, where [subagentChildrenOf]
+ * is the way down.
+ *
+ * The field is the roster's own `parentSessionId`, which is exactly what
+ * [indexSubagentRollups] already walks upward to credit ancestors. So the walk is
+ * not new; what was missing is that nothing let a reader *follow* it, and a nested
+ * subagent was a one-way trip: back out to the drawer and find the parent by hand.
+ *
+ * Null covers every way "up" can be absent, and the caller draws nothing when it is:
+ * the session is not a subagent, the host sent no parent id, the id is the session
+ * itself (a malformed roster must not turn a tap into a no-op that looks broken), or
+ * the parent is not in the roster at all. That last one is deliberate rather than a
+ * fallback: the roster is where a parent's *title* comes from, so a parent missing
+ * from it could only be opened blind — and the drawer, which lists archived sessions
+ * too, is the honest way to reach something this client cannot name.
+ */
+data class SubagentParent(val sessionId: String, val title: String)
+
+fun subagentParentOf(sessions: List<SessionItem>, sessionId: String?): SubagentParent? {
+    if (sessionId.isNullOrEmpty()) return null
+    val child = sessions.firstOrNull { it.id == sessionId } ?: return null
+    if (!child.isSubagent) return null
+    val parentId = child.parentSessionId?.takeIf { it.isNotEmpty() } ?: return null
+    if (parentId == sessionId) return null
+    val parent = sessions.firstOrNull { it.id == parentId } ?: return null
+    return SubagentParent(parentId, parent.title.ifBlank { parent.id })
+}

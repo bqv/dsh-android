@@ -55,7 +55,9 @@ import uk.xa0.dsh.model.SubagentCatalog
 import uk.xa0.dsh.model.SubagentCatalogEntry
 import uk.xa0.dsh.model.SubagentTarget
 import uk.xa0.dsh.model.TodoItem
+import uk.xa0.dsh.model.PreviewFormat
 import uk.xa0.dsh.model.WorkspaceFileLoader
+import uk.xa0.dsh.model.previewFormatOf
 import uk.xa0.dsh.model.TranscriptReducer
 import uk.xa0.dsh.model.arr
 import uk.xa0.dsh.model.bool
@@ -303,6 +305,16 @@ private const val REFRESH_MIN_SPIN_MS = 700L
  * for a source file while keeping a huge log from crossing the wire whole.
  */
 private const val FILE_PREVIEW_LINES = 2000
+
+/**
+ * The ceiling on an image preview, in bytes.
+ *
+ * Bigger than any icon or screenshot and small enough that decoding one cannot take
+ * a phone's heap with it; a file above this is reported as too large instead of
+ * being fetched in full. `readBytes` is asked for exactly this window, so the file
+ * is never transferred to find out.
+ */
+private const val MAX_PREVIEW_IMAGE_BYTES = 8 * 1024 * 1024
 
 /**
  * The web's pause between the last keystroke and a `session/search` request
@@ -5524,6 +5536,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 if (sessionId.isNullOrBlank()) {
                     return FilePreview.Unavailable("No open session to read it from.")
                 }
+                // A picture is fetched as *bytes*, which is the whole reason the format
+                // is decided from the path before anything is sent: `workspaceFiles/read`
+                // refuses non-UTF-8 outright (`workspace-file/not-text`), so asking it
+                // for a PNG would answer with the host's own "not text" wording where a
+                // picture was wanted. `readBytes` takes one bounded window, so an
+                // enormous file is refused by *us* rather than transferred in full.
+                val format = previewFormatOf(path)
+                if (format.isImage && format != PreviewFormat.SVG) {
+                    return loadImageBytes(sessionId, path, format)
+                }
                 val args = JSONObject()
                     .put("workspaceFileScopeId", sessionId)
                     .put("path", path)
@@ -5553,6 +5575,52 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     FilePreview.Unavailable(describe(error))
                 }
             }
+        }
+    }
+
+    /**
+     * One image's bytes, in a single window.
+     *
+     * The window is the format's own ceiling rather than the host's (`readAll` allows
+     * 32 MiB): a phone decoding a 32 MiB bitmap is a crash waiting for a file that
+     * large, and a preview that says "too large to preview" is more use than one that
+     * dies. The refusal is phrased as a fact about the file, because that is what it
+     * is — nothing about the read failed.
+     */
+    private suspend fun loadImageBytes(
+        sessionId: String,
+        path: String,
+        format: PreviewFormat,
+    ): FilePreview {
+        val args = JSONObject()
+            .put("workspaceFileScopeId", sessionId)
+            .put("path", path)
+            .put(
+                "range",
+                JSONObject()
+                    .put("offset", 0)
+                    .put("length", MAX_PREVIEW_IMAGE_BYTES),
+            )
+        return try {
+            val value = client.rpc("workspaceFiles/readBytes", args)
+            val bytes = Base64.decode(value.str("data"), Base64.DEFAULT)
+            if (!value.bool("eof", true)) {
+                return FilePreview.Unavailable(
+                    "Too large to preview (${value.int("bytes")} bytes).",
+                )
+            }
+            if (bytes.isEmpty()) {
+                return FilePreview.Unavailable("This file is empty.")
+            }
+            FilePreview.Image(
+                bytes = bytes,
+                format = format,
+                sizeBytes = value.int("bytes").takeIf { it > 0 },
+                absolutePath = value.str("absolutePath").takeIf { it.isNotEmpty() },
+            )
+        } catch (error: Throwable) {
+            if (error is DshAuthException) onAuthFailure("workspaceFiles/readBytes", error)
+            FilePreview.Unavailable(describe(error))
         }
     }
 

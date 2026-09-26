@@ -56,6 +56,81 @@ sealed interface FilePreview {
 
     /** The host refused the read; [message] is its own user-readable wording. */
     data class Unavailable(val message: String) : FilePreview
+
+    /**
+     * A picture: the file's own bytes, undecoded.
+     *
+     * Bytes rather than a bitmap, because decoding belongs to the platform and this
+     * model layer is pure Kotlin — the pane decodes off the main thread and holds the
+     * result for as long as the path is selected. [sizeBytes] is the host's reported
+     * file size, which is what the caption shows; it is not necessarily
+     * `bytes.size`, since only a bounded window is ever fetched.
+     */
+    data class Image(
+        val bytes: ByteArray,
+        val format: PreviewFormat,
+        val sizeBytes: Int? = null,
+        val absolutePath: String? = null,
+    ) : FilePreview {
+
+        override fun equals(other: Any?): Boolean =
+            other is Image && other.format == format && other.bytes.contentEquals(bytes)
+
+        override fun hashCode(): Int = 31 * format.hashCode() + bytes.contentHashCode()
+    }
+}
+
+/** What a path is, as far as previewing it goes. */
+enum class PreviewFormat {
+    TEXT,
+    PNG,
+    JPEG,
+    WEBP,
+    GIF,
+    BMP,
+    ICO,
+    /**
+     * HEIF/AVIF decode only from API 28 and 30 respectively, above this app's
+     * `minSdk` of 26 — where the decoder returns nothing and the pane says the image
+     * could not be decoded. That is the honest outcome: reading the *bytes* as text
+     * would be worse than saying so.
+     */
+    HEIC,
+    AVIF,
+    SVG,
+    ;
+
+    val isImage: Boolean get() = this != TEXT
+}
+
+/**
+ * The format a path names, by extension.
+ *
+ * Extension rather than sniffing the bytes, which is what the web's viewer does and
+ * what makes the *read* choice possible at all: a picture has to be fetched as bytes
+ * (`workspaceFiles/readBytes`) and a document as text, and that decision has to be
+ * made before the first byte arrives. The cost is that a misnamed file is previewed
+ * as what it claims to be — the panel says which it chose, and a decode that fails
+ * says so rather than showing nothing.
+ *
+ * Case-insensitive and query-less, because both occur: a `.PNG` off a camera and a
+ * `?raw=1` tail off a URL a session wrote.
+ */
+fun previewFormatOf(path: String): PreviewFormat {
+    val name = path.substringAfterLast('/').substringBefore('?').substringBefore('#')
+    val extension = name.substringAfterLast('.', "").lowercase()
+    return when (extension) {
+        "png", "apng" -> PreviewFormat.PNG
+        "jpg", "jpeg", "jpe", "jfif" -> PreviewFormat.JPEG
+        "webp" -> PreviewFormat.WEBP
+        "gif" -> PreviewFormat.GIF
+        "bmp" -> PreviewFormat.BMP
+        "ico" -> PreviewFormat.ICO
+        "heic", "heif" -> PreviewFormat.HEIC
+        "avif" -> PreviewFormat.AVIF
+        "svg" -> PreviewFormat.SVG
+        else -> PreviewFormat.TEXT
+    }
 }
 
 /**

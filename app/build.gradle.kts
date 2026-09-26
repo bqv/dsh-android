@@ -105,6 +105,11 @@ dependencies {
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // SVG previews. Android ships no SVG renderer, and a WebView is not an option in
+    // this app, so the drawing comes from the one small library that does this and
+    // nothing else. SVG is also text, which is why the panel offers both views.
+    implementation("com.caverock:androidsvg-aar:1.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // The module's first test source set. The terminal's VT parser and its

@@ -82,16 +82,15 @@ of where the app stands against them.
       refuses to recompose an agent after a turn). Missing: terminal recovery, schedule
       catalog, open-in-app.
 - [x] There is **no per-session overflow menu** — rename/fork/archive live on the sidebar row
-- [ ] **No way up from a subagent.** The lineage seat goes *down* (descendants, while any are
-      running) and the drawer nests a subagent under its parent — but a subagent's own screen
-      offers nothing that opens the session which spawned it, so a nested run is a one-way
-      trip: back to the drawer and find the parent by hand. Wanted: tapping the title (or the
-      lineage chip) walks up one level, repeatable to the top of the stack.
-      The data is already in hand, which is what makes this small: `session/list` carries
-      `parentSessionId` on subagent records, and `ui/SubagentRollup.kt` already walks that
-      chain upward — with the web's own cycle guard — to count ancestors. The one thing to
-      decide is what a *missing* parent does: the roster can hold a child whose parent is
-      gone, and `subagents/list` reports exactly that as `parentAvailable`.
+- [x] **A way up from a subagent.** The header's title is the tap: a leading arrow appears
+      only when the roster can name the parent (`SubagentParent` is null otherwise, so a
+      top-level session's title is not secretly clickable), and because the parent is itself
+      a session, the same affordance walks the stack. The data was already there —
+      `session/list`'s `parentSessionId`, the field `ui/SubagentRollup.kt` walks upward — so
+      this was an affordance, not a read. A parent *missing* from the roster draws nothing:
+      the roster is where its title comes from, so the tap would open a session the client
+      cannot name, and the drawer lists archived sessions anyway.
+
 - [x] No running-turn dot in the header, deliberately: the web's header utilities have no
       such contributor, and `JobsSeat` already draws the same `StateDot` a turn dot would
 
@@ -203,14 +202,17 @@ of where the app stands against them.
       after a network drop is **unverified**: the emulator's `svc wifi/data` do not
       touch the app's path
 - [x] Preview panel: the `text` preview that a deliverable or a file row opens into
-- [ ] **Preview is text only.** A file the session touched can be read as text
-      (`workspaceFiles/read`), but a PNG/JPEG/WebP/GIF opens as mojibake rather than as a
-      picture, and an SVG is one or the other with no choice. Wanted: images render, and an
-      SVG offers *both* views — the drawing and its source — since it is legitimately text.
-      The transcript already fetches and draws images the agent read
-      (`ui/components/ReadImageRow.kt`), so the data path exists; this is the Files panel and
-      the preview tab not using it. An SVG drawing needs a renderer the platform does not
-      ship (Coil-SVG or equivalent), which is the one new dependency to weigh
+- [x] **Preview renders pictures, and an SVG both ways.** The format is decided from the
+      path (`model/previewFormatOf`), which is what makes the read choice possible at all: a
+      raster image is fetched as bytes (`workspaceFiles/readBytes`, one window of at most
+      8 MiB — the host's own `readAll` allows 32 MiB, which is not a preview on a phone) and
+      everything else as text (`workspaceFiles/read`, which refuses non-UTF-8 outright). An
+      SVG is both, so it opens as the drawing and the header's toggle shows the markup.
+      The drawing comes from `com.caverock:androidsvg-aar` — Android ships no SVG renderer
+      and a WebView is not an option in this app — rendered onto the panel's own background,
+      because an SVG's transparent areas are the page's. The row icon uses the same one
+      table, which it did not before: `heic` and `avif` wore an image icon while being read
+      as text
 - **NOT a right-panel tab:** Deliverables registers nothing under `sidebar.right.*`. It is a
   conversation turn-tail row plus a `present` tool view, whose items open the text preview tab.
   The row is transcript-derived (successful `write` / `edit` / mutating `str_replace_editor`
@@ -251,8 +253,6 @@ host settings write stays a value with a disabled control.
 - **A question answers pick and typed text together** for single-select questions too. The
   wire accepts the pair; a typed note next to a pick is more useful than forcing a choice.
 - **Files panel lists touched files, not a directory tree** (see above).
-- **Previews are text only** — an image opens as bytes, and an SVG cannot be seen as both a
-  drawing and its source (the open item above).
 - **Conversation view strip gap** is tightened below the web's 36px, or the second label falls
   off a narrow phone.
 - **Search snippets wrap to two lines** instead of the web's single nowrap line, so the match

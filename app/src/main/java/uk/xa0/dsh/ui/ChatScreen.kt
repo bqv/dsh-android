@@ -40,6 +40,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Folder
@@ -454,6 +455,13 @@ fun ChatScreen(vm: DshViewModel) {
 
 
     val current = ui.sessions.firstOrNull { it.id == ui.currentSessionId }
+    // The way *up*, when this session is a subagent the roster can place: the header
+    // makes its title a tap that opens the parent, and because the parent is itself a
+    // session, opening it offers the same affordance again — so a nested run is a walk
+    // rather than a one-way trip back to the drawer.
+    val subagentParent = remember(ui.sessions, ui.currentSessionId) {
+        subagentParentOf(ui.sessions, ui.currentSessionId)
+    }
     // The pending seat's directory, for the hero's workspace chip. The target's own
     // path is preferred; a Workspace the registry has not delivered a path for yet
     // still resolves through the registry, and a Directory target *is* its path.
@@ -674,6 +682,8 @@ fun ChatScreen(vm: DshViewModel) {
                 },
                 lineage = current?.let { subagentRollups[it.id] },
                 onLineage = { showLineage = true },
+                parent = subagentParent,
+                onParent = { subagentParent?.let { vm.openSession(it.sessionId) } },
                 // Feeds the loading offset above: the header is the top half of
                 // the chrome, and its own height is not a constant.
                 modifier = Modifier.onSizeChanged { headerPx = it.height },
@@ -1610,6 +1620,12 @@ private fun ChatHeader(
     onFiles: () -> Unit = {},
     lineage: SubagentRollup? = null,
     onLineage: () -> Unit = {},
+    /**
+     * The session above this one, when the open session is a subagent whose parent the
+     * roster can name. The title becomes the way up; null draws no affordance at all.
+     */
+    parent: SubagentParent? = null,
+    onParent: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = DshTheme.colors
@@ -1632,13 +1648,41 @@ private fun ChatHeader(
             )
             Spacer(Modifier.width(HEADER_SEAT_GAP))
             Column(Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = DshType.messageBody.copy(fontWeight = FontWeight.Medium),
-                    color = colors.labelPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                // The title is the way *up* when this session is a subagent: the name is
+                // what the reader is looking at, and the lineage seat only ever goes
+                // down. The arrow is the whole hint — it is drawn only when the tap
+                // actually leads somewhere (`SubagentParent` is null otherwise, so a
+                // top-level session's title is not secretly clickable).
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = if (parent != null) {
+                        Modifier
+                            .clip(RoundedCornerShape(DshRadius.sm))
+                            .clickableNoRipple(onClick = onParent)
+                            .semantics {
+                                contentDescription = "Open parent session: ${parent.title}"
+                            }
+                    } else {
+                        Modifier
+                    },
+                ) {
+                    if (parent != null) {
+                        Icon(
+                            Icons.Rounded.ArrowUpward,
+                            contentDescription = null,
+                            tint = colors.labelTertiary,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = title,
+                        style = DshType.messageBody.copy(fontWeight = FontWeight.Medium),
+                        color = colors.labelPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 if (!cwd.isNullOrBlank()) {
                     Text(
                         text = shortenPath(cwd),
