@@ -307,14 +307,16 @@ private const val REFRESH_MIN_SPIN_MS = 700L
 private const val FILE_PREVIEW_LINES = 2000
 
 /**
- * The ceiling on an image preview, in bytes.
+ * The ceiling on an image preview, in bytes — **the host's**, not a preference.
  *
- * Bigger than any icon or screenshot and small enough that decoding one cannot take
- * a phone's heap with it; a file above this is reported as too large instead of
- * being fetched in full. `readBytes` is asked for exactly this window, so the file
- * is never transferred to find out.
+ * `workspaceFiles/readBytes` refuses a request for more than 2 MiB outright
+ * (`workspace-file/too-large`), and it measures the *requested* length rather than
+ * the file: asking for 8 MiB for a 300 KB PNG is refused just the same. Measured
+ * against the running host, so the number here is the cap it enforces, and the
+ * window it is asked for is exactly this. A file longer than the window comes back
+ * with `eof` false, which is what "too large to preview" means here.
  */
-private const val MAX_PREVIEW_IMAGE_BYTES = 8 * 1024 * 1024
+private const val MAX_PREVIEW_IMAGE_BYTES = 2 * 1024 * 1024
 
 /**
  * The web's pause between the last keystroke and a `session/search` request
@@ -5605,8 +5607,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             val value = client.rpc("workspaceFiles/readBytes", args)
             val bytes = Base64.decode(value.str("data"), Base64.DEFAULT)
             if (!value.bool("eof", true)) {
+                // The host omits `eof` when the window covered the file, and sends the
+                // file's own size in `bytes` either way.
+                val size = value.int("bytes")
                 return FilePreview.Unavailable(
-                    "Too large to preview (${value.int("bytes")} bytes).",
+                    if (size > 0) "Too large to preview ($size bytes)." else "Too large to preview.",
                 )
             }
             if (bytes.isEmpty()) {
