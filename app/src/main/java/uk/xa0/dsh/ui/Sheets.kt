@@ -349,9 +349,14 @@ fun ModelSheet(
 /**
  * Workspace picker for a new session.
  *
- * The host has no "change cwd" RPC, so a pick starts a *new* session in that
- * directory (reusing a blank one there if it exists). The web shows the same
- * control as a chip on the hero, above the composer.
+ * The host has no "change cwd" RPC, so a pick resolves the target through
+ * [uk.xa0.dsh.model.SessionTargets]: a blank the picked Workspace already holds
+ * is reused, a blank already rooted at that directory (including the one you are
+ * looking at) is adopted by both ids, and only otherwise is a session created.
+ * The limit is the host's, not the UI's — its identity check compares the stored
+ * `cwd` to the Workspace path, so a blank sitting in another directory cannot be
+ * carried across; the Workspace's own blank is the one that gets reused. The web
+ * shows the same control as a chip on the hero, above the composer.
  *
  * A registered row reports its **id** and a typed path reports its text: only the
  * id form attaches the session to the Workspace, and it still does so when the
