@@ -217,7 +217,12 @@ fun QueueDock(
                     }
                     drawPath(path, colors.borderL1, style = Stroke(width = stroke))
                 }
-                .padding(vertical = DshSpacing.xs),
+                // The bottom padding is the caller's tuck's hidden skirt: the
+                // panel's painted bottom edge has to reach past the composer
+                // card's 22dp corner arc (see the ChatScreen call site), but its
+                // top edge and rows must not move, so the extra 4dp of tuck is
+                // taken here rather than by growing the dock upward.
+                .padding(top = DshSpacing.xs, bottom = DshSpacing.md),
         ) {
             AnimatedVisibility(
                 visible = shown.size > 1,
