@@ -150,9 +150,15 @@ jobs:
             printf 'See the README for how to point it at a host and sign in.\n'
           } >> "$notes"
 
+          # An existing release is updated in place — and `--draft=false` is not
+          # decoration: deleting a tag turns its release into an *untagged draft*
+          # that the API hides from anonymous readers, and a re-run that only edits
+          # it would leave the release published to nobody. This makes a re-cut tag
+          # converge on one live release.
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" '${{ steps.apk.outputs.path }}' --clobber
-            gh release edit "$tag" --notes-file "$notes"
+            gh release edit "$tag" --notes-file "$notes" --draft=false \
+              --title "DSH for Android $tag"
           else
             gh release create "$tag" '${{ steps.apk.outputs.path }}' \
               --title "DSH for Android $tag" --notes-file "$notes"
