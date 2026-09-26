@@ -1,6 +1,5 @@
 package uk.xa0.dsh.ui
 
-import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -18,8 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -32,38 +29,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEvent
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isAltPressed
-import androidx.compose.ui.input.key.isCtrlPressed
-import androidx.compose.ui.input.key.isShiftPressed
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextMeasurer
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.collectAsState
 import uk.xa0.dsh.DshViewModel
 import uk.xa0.dsh.TerminalPhase
@@ -77,7 +60,6 @@ import uk.xa0.dsh.term.ATTR_STRIKE
 import uk.xa0.dsh.term.ATTR_UNDERLINE
 import uk.xa0.dsh.term.COLOR_DEFAULT
 import uk.xa0.dsh.term.COLOR_RGB_FLAG
-import uk.xa0.dsh.term.SoftInput
 import uk.xa0.dsh.term.TerminalEmulator
 import uk.xa0.dsh.term.TerminalInfo
 import uk.xa0.dsh.term.TerminalIssue
@@ -89,9 +71,6 @@ import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
-
-/** Input-boundary logging: a chord that never arrives and one that is dropped look identical. */
-private const val TAG = "DshTerm"
 
 /**
  * The session terminal: a real PTY for the open session, rendered natively.
@@ -318,7 +297,11 @@ private fun TerminalNotice(state: TerminalUiState) {
         // terminal at all, and it is the one sentence that has to survive the
         // placeholder underneath it.
         state.hostShellIssue != null -> state.hostShellIssue
-        issue != null -> terminalIssueFact(issue, state.limit)
+        // Append, never swap. A terminal that stopped sets NOT_RUNNING *and* an
+        // `error` carrying the exit code, so matching `error` first would throw the
+        // real issue away; and the same state can still hold a *previous* error,
+        // which must not be printed over the fact of this one.
+        issue != null -> terminalIssueFact(issue, state.limit) + (state.error?.let { " $it" } ?: "")
         state.error != null -> state.error
         state.phase == TerminalPhase.DISCONNECTED -> "The terminal stream stopped. Reconnect to attach again."
         state.phase == TerminalPhase.CLOSED -> "The shell was closed."
@@ -326,7 +309,7 @@ private fun TerminalNotice(state: TerminalUiState) {
             // Naming the seat matters here: "this session" would be wrong for the
             // workspace's own archived shell, which is a different session entirely.
             when (state.seat) {
-                TerminalSeat.HOST_SHELL -> "Opening this workspace's host shell\u2026"
+                TerminalSeat.HOST_SHELL -> "Opening the host shell\u2026"
                 TerminalSeat.THIS_SESSION -> "Starting a shell in this session\u2026"
             }
         state.phase == TerminalPhase.CONNECTING -> "Attaching to the shell\u2026"
@@ -403,10 +386,15 @@ private fun TerminalSurface(
     val cellHeight = metrics.size.height.toFloat().coerceAtLeast(1f)
 
     var ctrlArmed by remember { mutableStateOf(false) }
-    var softField by remember { mutableStateOf(softFieldAtRest()) }
-    val focusRequester = remember { FocusRequester() }
+    // The native editor, held so a tap can put focus (and the keyboard) back after a
+    // hardware key or a focus loss. It is 1dp and transparent — the grid is drawn
+    // behind it — but it is the view the IME actually talks to.
+    var editor by remember { mutableStateOf<TerminalInputView?>(null) }
 
-    LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
+    // Focus and keyboard on entry, and again if the view is ever rebuilt. The old
+    // panel did this with a `FocusRequester` on its hidden field; a native View is
+    // focused through the View API instead.
+    LaunchedEffect(editor) { editor?.showKeyboard() }
 
     Column(Modifier.fillMaxSize()) {
         BoxWithConstraints(
@@ -426,21 +414,19 @@ private fun TerminalSurface(
             Box(
                 Modifier
                     .fillMaxSize()
-                    // Preview, not `onKeyEvent`: this runs before the hidden text
-                    // field, so the keys a terminal owns never reach the IME's
-                    // editor, while ordinary letters fall through to it and arrive
-                    // as text deltas.
+                    // Preview, not `onKeyEvent`: this runs before the editor, and the
+                    // handler is the *same* one the editor's own `dispatchKeyEvent`
+                    // runs. Whichever of the two Android routes a key to, it is
+                    // handled exactly once — a key handled twice would be typed twice,
+                    // and one handled by neither would vanish.
                     .onPreviewKeyEvent { event ->
-                        // A backspace that arrives while the IME is composing belongs
-                        // to the composition — the IME is deleting a character the user
-                        // can still see in its candidate bar. Mapping it to DEL here
-                        // would delete a character in the shell instead, so it is left
-                        // to the field.
-                        if (softField.composition != null && event.key == Key.Backspace) {
-                            false
-                        } else {
-                            handleHardwareKey(event, emulator.applicationCursorKeys, onWrite)
-                        }
+                        handleTerminalKeyEvent(
+                            event = event.nativeKeyEvent,
+                            applicationCursorKeys = emulator.applicationCursorKeys,
+                            ctrlArmed = ctrlArmed,
+                            ctrlSpent = { ctrlArmed = false },
+                            write = onWrite,
+                        )
                     },
             ) {
                 Canvas(
@@ -464,60 +450,35 @@ private fun TerminalSurface(
                         }
                     },
                 )
-                // A soft keyboard cannot produce Esc, Ctrl or the arrows, so it only
-                // has to produce text; everything else is the key row below. It does
-                // not send key events, though — it edits this field — so the field is
-                // never empty: it holds one zero-width anchor, which is what gives an
-                // IME's own delete something to delete. [SoftInput] reads each edit.
-                BasicTextField(
-                    value = softField,
-                    onValueChange = { next ->
-                        val edit = SoftInput.editOf(
-                            nextText = next.text,
-                            composing = next.composition != null,
-                            ctrl = ctrlArmed,
-                        )
-                        // Every input boundary logs, because a chord that never arrives
-                        // and a chord that is dropped look identical from the outside.
-                        Log.d(
-                            TAG,
-                            "ime text=${next.text.map { if (it.code < 32 || it == '\u200B') '^' + (it.code + 64) else it }} " +
-                                "composing=${next.composition != null} ctrlArmed=$ctrlArmed " +
-                                "-> write=${edit.write.map { if (it.code < 32) '^' + (it.code + 64) else it }} " +
-                                "ctrlUsed=${edit.ctrlUsed}",
-                        )
-                        if (edit.composing) {
-                            // The composition belongs to the IME until it commits:
-                            // keep its value (clearing it would cancel the word the
-                            // user is still typing) and write nothing.
-                            softField = next
-                        } else {
-                            softField = softFieldAtRest()
-                            if (edit.ctrlUsed) ctrlArmed = false
-                            if (edit.write.isNotEmpty()) onWrite(edit.write)
+                // The keystroke source. It is an editor with no text: its
+                // `onCreateInputConnection` advertises TYPE_NULL and returns a
+                // connection that writes `commitText`, `sendKeyEvent` and
+                // `deleteSurroundingText` straight to the PTY, the way Termux does.
+                // Nothing here holds the user's keystrokes, so nothing can re-commit
+                // one of them (the `aabcdefgh` defect) and nothing hands the shell to
+                // an IME's composer (the `vI'm` defect).
+                AndroidView(
+                    factory = { context ->
+                        TerminalInputView(
+                            context = context,
+                            writeToPty = onWrite,
+                            ctrlArmed = { ctrlArmed },
+                            ctrlSpent = { ctrlArmed = false },
+                        ).also { view ->
+                            view.setApplicationCursorKeys { emulator.applicationCursorKeys }
+                            editor = view
                         }
                     },
                     modifier = Modifier
                         .size(1.dp)
-                        .alpha(0f)
-                        .focusRequester(focusRequester),
-                    textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
-                    // Ascii, not the default Text and not Password: a terminal wants
-                    // keystrokes, and the modifier keys a soft keyboard may offer
-                    // (Ctrl among them) have to survive whatever flavour the field is.
-                    // Password suppresses more than composition - some IMEs drop their
-                    // own Ctrl key in it - and this field is invisible either way.
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Ascii,
-                        autoCorrect = false,
-                    ),
+                        .alpha(0f),
                 )
                 // Tapping the grid puts the keyboard back after a hardware key or a
                 // focus loss; the tap must not be swallowed by the Canvas.
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .clickableNoRipple { runCatching { focusRequester.requestFocus() } },
+                        .clickableNoRipple { editor?.showKeyboard() },
                 )
             }
         }
@@ -529,17 +490,6 @@ private fun TerminalSurface(
         )
     }
 }
-
-/**
- * The hidden field's value between edits: the anchor, with the cursor after it.
- *
- * The cursor has to sit *after* the anchor. `deleteSurroundingText` deletes behind
- * the cursor, so an anchor in front of it is the character a soft backspace removes;
- * with the cursor before the anchor the IME would have nothing to delete and the
- * backspace would vanish again, anchor or no anchor.
- */
-private fun softFieldAtRest(): TextFieldValue =
-    TextFieldValue(SoftInput.ANCHOR, selection = TextRange(SoftInput.ANCHOR.length))
 
 /**
  * The keys a soft keyboard cannot type.
@@ -598,117 +548,6 @@ private fun KeyCap(label: String, active: Boolean = false, onClick: () -> Unit) 
             .clickableNoRipple(onClick = onClick)
             .padding(horizontal = DshSpacing.md, vertical = DshSpacing.sm),
     )
-}
-
-/** Maps the keys a terminal owns. Anything else is left to the IME. */
-private fun terminalKeyOf(key: Key): TerminalKey? = when (key) {
-    Key.DirectionUp -> TerminalKey.UP
-    Key.DirectionDown -> TerminalKey.DOWN
-    Key.DirectionLeft -> TerminalKey.LEFT
-    Key.DirectionRight -> TerminalKey.RIGHT
-    Key.MoveHome -> TerminalKey.HOME
-    Key.MoveEnd -> TerminalKey.END
-    Key.PageUp -> TerminalKey.PAGE_UP
-    Key.PageDown -> TerminalKey.PAGE_DOWN
-    Key.Insert -> TerminalKey.INSERT
-    Key.Delete -> TerminalKey.DELETE
-    Key.Tab -> TerminalKey.TAB
-    Key.Escape -> TerminalKey.ESCAPE
-    Key.Enter, Key.NumPadEnter -> TerminalKey.ENTER
-    Key.Backspace -> TerminalKey.BACKSPACE
-    Key.F1 -> TerminalKey.F1
-    Key.F2 -> TerminalKey.F2
-    Key.F3 -> TerminalKey.F3
-    Key.F4 -> TerminalKey.F4
-    Key.F5 -> TerminalKey.F5
-    Key.F6 -> TerminalKey.F6
-    Key.F7 -> TerminalKey.F7
-    Key.F8 -> TerminalKey.F8
-    Key.F9 -> TerminalKey.F9
-    Key.F10 -> TerminalKey.F10
-    Key.F11 -> TerminalKey.F11
-    Key.F12 -> TerminalKey.F12
-    else -> null
-}
-
-/**
- * True when the event was consumed and must not reach the text field.
- *
- * Ctrl chords arrive two ways depending on the key: as an already-mapped C0 code
- * (Android reports `\u0001` for Ctrl+A) or as the bare letter. Both are handled, so
- * neither a shell's Ctrl+A nor Ctrl+C is lost to the editor's own shortcuts.
- */
-/**
- * The character a Ctrl chord is *about*, from the key code rather than the text.
- *
- * Android's `KeyEvent.getUnicodeChar()` returns 0 for Ctrl+letter — the modifier
- * suppresses the character — and Compose's `utf16CodePoint` is that same value. So a
- * chord cannot be read from `utf16CodePoint` at all: a soft keyboard with its own
- * Ctrl key (the only way a phone can produce these) sends KEYCODE_D with metaState
- * CTRL and *no* unicode char, which the old code rejected one line before it looked
- * for a chord. Plain letters were unaffected, which is why the panel looked fine
- * while every Ctrl chord vanished.
- */
-private fun chordCharacterOf(key: Key): Char? {
-    val native = key.nativeKeyCode
-    return when (native) {
-        in 29..54 -> 'a' + (native - 29)   // KEYCODE_A..KEYCODE_Z
-        in 7..16 -> '0' + (native - 7)     // KEYCODE_0..KEYCODE_9
-        68 -> '`'
-        69 -> '-'
-        70 -> '='
-        71 -> '['
-        72 -> ']'
-        73 -> '\\'
-        74 -> ';'
-        75 -> '\''
-        76 -> '/'
-        77 -> '@'
-        else -> null
-    }
-}
-
-private fun handleHardwareKey(
-    event: KeyEvent,
-    applicationCursorKeys: Boolean,
-    write: (String) -> Unit,
-): Boolean {
-    if (event.type != KeyEventType.KeyDown) return false
-    terminalKeyOf(event.key)?.let { key ->
-        write(
-            TerminalKeys.key(
-                key = key,
-                ctrl = event.isCtrlPressed,
-                alt = event.isAltPressed,
-                shift = event.isShiftPressed,
-                applicationCursorKeys = applicationCursorKeys,
-            ),
-        )
-        return true
-    }
-    val code = event.utf16CodePoint
-    if (event.isCtrlPressed) {
-        // A chord arrives as a key code with no character (see `chordCharacterOf`),
-        // so it is resolved from the code first and the character second - some
-        // keyboards do populate it, and a raw C0 byte is passed straight through.
-        val chord = when (code) {
-            in 1..31 -> code.toChar()
-            else -> chordCharacterOf(event.key)?.let { TerminalKeys.controlOf(it) }
-        }
-        if (chord == null) {
-            Log.d(TAG, "ctrl chord ignored: key=${event.key} native=${event.key.nativeKeyCode} code=$code")
-            return false
-        }
-        Log.d(TAG, "ctrl chord -> ${chord.code} from key=${event.key.nativeKeyCode}")
-        write(chord.toString())
-        return true
-    }
-    if (code <= 0) return false
-    val character = code.toChar()
-    return when {
-        event.isAltPressed -> { write(TerminalKeys.typed(character, alt = true)); true }
-        else -> false
-    }
 }
 
 /**
