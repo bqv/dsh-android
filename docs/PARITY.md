@@ -193,6 +193,14 @@ of where the app stands against them.
       after a network drop is **unverified**: the emulator's `svc wifi/data` do not
       touch the app's path
 - [x] Preview panel: the `text` preview that a deliverable or a file row opens into
+- [ ] **Preview is text only.** A file the session touched can be read as text
+      (`workspaceFiles/read`), but a PNG/JPEG/WebP/GIF opens as mojibake rather than as a
+      picture, and an SVG is one or the other with no choice. Wanted: images render, and an
+      SVG offers *both* views — the drawing and its source — since it is legitimately text.
+      The transcript already fetches and draws images the agent read
+      (`ui/components/ReadImageRow.kt`), so the data path exists; this is the Files panel and
+      the preview tab not using it. An SVG drawing needs a renderer the platform does not
+      ship (Coil-SVG or equivalent), which is the one new dependency to weigh
 - **NOT a right-panel tab:** Deliverables registers nothing under `sidebar.right.*`. It is a
   conversation turn-tail row plus a `present` tool view, whose items open the text preview tab.
   The row is transcript-derived (successful `write` / `edit` / mutating `str_replace_editor`
@@ -233,6 +241,8 @@ host settings write stays a value with a disabled control.
 - **A question answers pick and typed text together** for single-select questions too. The
   wire accepts the pair; a typed note next to a pick is more useful than forcing a choice.
 - **Files panel lists touched files, not a directory tree** (see above).
+- **Previews are text only** — an image opens as bytes, and an SVG cannot be seen as both a
+  drawing and its source (the open item above).
 - **Conversation view strip gap** is tightened below the web's 36px, or the second label falls
   off a narrow phone.
 - **Search snippets wrap to two lines** instead of the web's single nowrap line, so the match
