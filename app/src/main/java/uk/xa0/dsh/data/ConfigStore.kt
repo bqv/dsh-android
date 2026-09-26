@@ -60,8 +60,9 @@ data class DshConfig(
      */
     val drawerCollapsedSections: Set<String> = emptySet(),
     /**
-     * Workspace id → the dedicated "Host shell" Session that workspace's unconfined
-     * terminal lives in.
+     * Root key → the dedicated "Host shell" Session that root's unconfined terminal
+     * lives in. The key is a Workspace id, or — for a session in no Workspace — the
+     * `cwd` the shell was rooted at (`uk.xa0.dsh.term.HostShellRoot.key`).
      *
      * Local, and not recoverable from the host, because that session is **archived**:
      * an archived session cannot be browsed to, so without this the app would build a

@@ -71,6 +71,7 @@ import uk.xa0.dsh.net.StreamEvent
 import uk.xa0.dsh.net.TerminalClient
 import uk.xa0.dsh.term.HostShellIssue
 import uk.xa0.dsh.term.HostShellProgress
+import uk.xa0.dsh.term.HostShellRoot
 import uk.xa0.dsh.term.HostShellStep
 import uk.xa0.dsh.term.HOST_SHELL_PRESET
 import uk.xa0.dsh.term.SeatOption
@@ -84,7 +85,9 @@ import uk.xa0.dsh.term.TerminalIssue
 import uk.xa0.dsh.term.TerminalProtocolException
 import uk.xa0.dsh.term.TerminalSeat
 import uk.xa0.dsh.term.TerminalState
+import uk.xa0.dsh.term.hostShellCreateRequest
 import uk.xa0.dsh.term.hostShellIssueFact
+import uk.xa0.dsh.term.hostShellRoot
 import uk.xa0.dsh.term.hostShellSessionName
 import uk.xa0.dsh.term.terminalIssueFact
 import uk.xa0.dsh.term.terminalIssueOf
@@ -513,9 +516,10 @@ data class UiState(
      */
     val drawerCollapsedSections: Set<String> = emptySet(),
     /**
-     * Workspace id → the archived Session that workspace's unconfined "Host shell"
-     * terminal lives in; persisted, because an archived session cannot be browsed to
-     * and the app would otherwise build a fresh one on every visit.
+     * Root key (a Workspace id, or a bare cwd) → the archived Session that root's
+     * unconfined "Host shell" terminal lives in; persisted, because an archived session
+     * cannot be browsed to and the app would otherwise build a fresh one on every visit.
+     * See [uk.xa0.dsh.term.HostShellRoot].
      */
     val hostShellSessions: Map<String, String> = emptyMap(),
     /** The new-session default the app passes to `session/create` (a stored setting). */
@@ -1126,9 +1130,39 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             TerminalSeat.HOST_SHELL -> materializeHostShell(sessionId)
         }
 
-    /** The Workspace a session is accounted to, which is what owns its host shell. */
+    /** The Workspace a session is accounted to, if any; a non-member is hosted at its cwd. */
     private fun workspaceOf(sessionId: String): WorkspaceItem? =
         _ui.value.workspaces.firstOrNull { sessionId in it.sessionIds }
+
+    /**
+     * The directory the app knows [sessionId] was created at.
+     *
+     * The roster is the normal source, and it carries archived sessions too, which is
+     * why it is enough for the archived throwaway a reader can open from the drawer.
+     * The header is the fallback for the window before `session/list` has landed, and
+     * it is evidence about the *current* session only: another session's header must
+     * never root this one's shell.
+     */
+    private fun cwdOf(sessionId: String): String? =
+        _ui.value.sessions.firstOrNull { it.id == sessionId }?.cwd
+            ?: header.value?.cwd?.takeIf { _ui.value.currentSessionId == sessionId }
+
+    /**
+     * The root this session's host shell belongs at, or null when the app knows no
+     * directory to open one in.
+     *
+     * A Workspace first, because its host shell is shared by its members; otherwise the
+     * session's own cwd, which `session/create` accepts exactly as it accepts a
+     * workspace id. The choice itself is [hostShellRoot], where the JVM tests reach it.
+     */
+    private fun hostShellRootFor(sessionId: String): HostShellRoot? {
+        val workspace = workspaceOf(sessionId)
+        return hostShellRoot(
+            workspaceId = workspace?.id,
+            workspaceTitle = workspace?.title,
+            cwd = cwdOf(sessionId),
+        )
+    }
 
     /**
      * The seats on offer for [sessionId], each labelled with the policy in force.
@@ -1141,7 +1175,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun terminalSeatsFor(sessionId: String): List<SeatOption> = terminalSeats(
         sessionId = sessionId,
         sessionPolicyLabel = permissionLabel(_ui.value.currentPermission),
-        hostShellSessionId = workspaceOf(sessionId)?.let { _ui.value.hostShellSessions[it.id] },
+        hostShellSessionId = hostShellRootFor(sessionId)?.let { _ui.value.hostShellSessions[it.key] },
     )
 
     /**
@@ -1156,7 +1190,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Builds (or adopts) the workspace's unconfined host shell and returns the Session
+     * Builds (or adopts) the session's unconfined host shell and returns the Session
      * a terminal may be created in, or null after publishing the fact that stopped it.
      *
      * **The order is the feature.** `session/create` → `/permission danger-full-access`
@@ -1179,25 +1213,29 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * asserted below before this returns.
      */
     private suspend fun materializeHostShell(sessionId: String): String? {
-        val workspace = workspaceOf(sessionId)
-        if (workspace == null) {
+        // A Workspace's directory when the session is a member of one, otherwise the
+        // cwd the host reports: an unconfined shell needs a directory, not a Workspace.
+        // Null here means the app knows no directory at all, which is the only case
+        // left that the refusal sentence describes.
+        val root = hostShellRootFor(sessionId)
+        if (root == null) {
             failHostShell(HostShellIssue.NO_WORKSPACE)
             return null
         }
-        val name = hostShellSessionName(workspace.title)
-        val remembered = _ui.value.hostShellSessions[workspace.id]
+        val name = hostShellSessionName(root.label)
+        val remembered = _ui.value.hostShellSessions[root.key]
         var progress = if (remembered == null) HostShellProgress() else HostShellProgress().withSession(remembered)
         // One rebuild at most: a remembered id the host no longer has is a stale
         // preference, and a second one would mean the host is refusing `session/create`
         // outright, which is the failure to report rather than to retry forever.
         var rebuilds = 0
         while (true) {
-            val step = progress.next(name, workspace.id) ?: break
+            val step = progress.next(name, root.key) ?: break
             publishTerminal(phase = TerminalPhase.CREATING)
             val failure = try {
                 when (step) {
                     is HostShellStep.CreateSession ->
-                        progress = progress.withSession(createHostShellSession(step.workspaceId))
+                        progress = progress.withSession(createHostShellSession(step.name, root))
                     is HostShellStep.SetAccessMode -> {
                         grantHostShellAccess(step.sessionId)
                         progress = progress.withModeSet()
@@ -1219,7 +1257,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             if (failure == null) continue
             if (isSessionGone(failure) && remembered != null && rebuilds == 0) {
                 rebuilds++
-                setHostShellSession(workspace.id, null)
+                setHostShellSession(root.key, null)
                 progress = HostShellProgress()
                 continue
             }
@@ -1233,18 +1271,47 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             "the host shell must be unconfined and archived before any terminal is created in it"
         }
         val shellSessionId = progress.sessionId
-        if (shellSessionId != remembered) setHostShellSession(workspace.id, shellSessionId)
+        if (shellSessionId != remembered) setHostShellSession(root.key, shellSessionId)
         return shellSessionId
     }
 
-    /** `session/create` in one Workspace: the host roots the session at its path. */
-    private suspend fun createHostShellSession(workspaceId: String): String {
-        val value = client.rpc(
-            "session/create",
-            JSONObject().put("request", JSONObject().put("workspaceId", workspaceId)),
-        )
+    /**
+     * `session/create` for one root, titled with [name].
+     *
+     * The request body is [hostShellCreateRequest], so a session in a Workspace is
+     * created by `workspaceId` and one in no Workspace by `cwd` — the host accepts one
+     * or the other and roots the session at `workspace?.path ?? cwd` either way
+     * (`commands.ts:88-101`).
+     *
+     * The title is a second call because `session/create` has no title field
+     * (`SessionCreateRequest`, `types.ts`): it is `session/rename`, the same RPC the
+     * drawer's own rename path ([renameSession]) sends. **Best-effort, deliberately.**
+     * `session/rename` is refused outright on a deployment that mounts no session-title
+     * service (`commands.ts:179`), and a name in the Archived list is not worth denying
+     * the reader the shell over — the bootstrap's failure facts stay reserved for the
+     * steps that decide whether a terminal may exist. Renaming happens here, before the
+     * mode step and the archive, while the session's agent is certainly live, because
+     * `rename` resolves it.
+     */
+    private suspend fun createHostShellSession(name: String, root: HostShellRoot): String {
+        val request = JSONObject()
+        for ((field, value) in hostShellCreateRequest(root)) request.put(field, value)
+        val value = client.rpc("session/create", JSONObject().put("request", request))
         val id = value.optString("sessionId")
         check(id.isNotEmpty()) { "session/create answered without a sessionId" }
+        try {
+            client.rpc(
+                "session/rename",
+                JSONObject().put(
+                    "request",
+                    JSONObject().put("sessionId", id).put("title", name),
+                ),
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            Log.w(TAG, "host shell session $id was created but not named: ${error.message}")
+        }
         return id
     }
 
@@ -1298,15 +1365,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Remembers (or, for null, forgets) the workspace's host-shell session.
+     * Remembers (or, for null, forgets) one root's host-shell session, keyed by
+     * [HostShellRoot.key].
      *
      * Written only once the bootstrap has completed, so a remembered id is evidence
      * that the mode step ran — see [materializeHostShell]. Forgetting is what a stale
      * id becomes, and it is also the manual recovery path: the drawer's Archived list
      * can restore or remove the session, and the next visit then builds a fresh one.
      */
-    private fun setHostShellSession(workspaceId: String, sessionId: String?) {
-        val sessions = _ui.value.hostShellSessions.withHostShellSession(workspaceId, sessionId)
+    private fun setHostShellSession(rootKey: String, sessionId: String?) {
+        val sessions = _ui.value.hostShellSessions.withHostShellSession(rootKey, sessionId)
         if (sessions == _ui.value.hostShellSessions) return
         configStore.save(configStore.load().copy(hostShellSessions = sessions))
         _ui.value = _ui.value.copy(hostShellSessions = sessions)
