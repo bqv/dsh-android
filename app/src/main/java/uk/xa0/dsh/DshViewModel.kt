@@ -38,6 +38,10 @@ import uk.xa0.dsh.model.SettingsWritePlan
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.HostSettings
 import uk.xa0.dsh.model.SessionStats
+import uk.xa0.dsh.model.SessionTarget
+import uk.xa0.dsh.model.SessionTargetCandidate
+import uk.xa0.dsh.model.SessionTargetPlan
+import uk.xa0.dsh.model.SessionTargets
 import uk.xa0.dsh.model.SUBAGENT_ACTIVITY_INACTIVE
 import uk.xa0.dsh.model.SUBAGENT_ACTIVITY_RUNNING
 import uk.xa0.dsh.model.SUBAGENT_ATTACHMENT_INVALID
@@ -319,6 +323,13 @@ private const val CATALOG_DEBOUNCE_MS = 500L
  * blink the open session's Stop button back to Send mid-turn.
  */
 private const val LIVE_QUIET_MS = 1500L
+
+/**
+ * The host's refusal when an idempotent adopt names a directory its stored header
+ * does not carry (`ApiSessionCwdConflict` in the host's `session-controller`).
+ * The only expected outcome of adopting from a roster that has gone stale.
+ */
+private const val SESSION_CONFLICT = "session/conflict"
 
 /** The one intermediate step of staging an attachment, before it is on the UI. */
 private data class StagedAttachment(val data: String?, val receiptId: String?, val bytes: Int)
@@ -2834,35 +2845,99 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Starts (or reuses) a blank session inside a registered workspace.
+     * Starts (or reuses, or adopts) a blank session inside a registered workspace.
      *
-     * Reuse demands *membership*, not just a matching directory: the host only puts
-     * a session in a workspace when it was created through `workspaceId`, so a blank
-     * sitting at the right cwd but attached to nothing is not the session the user
-     * means — the web draws the same distinction. An archived blank is skipped too,
-     * or "New Session" would reopen a session the user has just filed away.
+     * The choice itself lives in [SessionTargets.plan] so that this path, the
+     * drawer's New Session, the per-workspace `+` and a typed directory all take
+     * the same decision; what is left here is turning the plan into the one call
+     * it names. Reuse demands *membership*, not just a matching directory: the
+     * host only puts a session in a workspace when it was created through
+     * `workspaceId`, so a blank sitting at the right cwd but attached to nothing
+     * is not the session the user means — the web draws the same distinction. An
+     * archived blank is skipped too, or "New Session" would reopen a session the
+     * user has just filed away.
      */
     fun startSessionInWorkspace(workspaceId: String) {
         if (workspaceId.isBlank()) return
-        val workspace = _ui.value.workspaces.firstOrNull { it.id == workspaceId }
-        val archived = _ui.value.archivedSessionIds
-        val existing = workspace?.let { known ->
-            _ui.value.sessions.firstOrNull { session ->
-                session.blank && !session.isSubagent && session.id !in archived &&
-                    session.cwd == known.path && session.id in known.sessionIds
+        val path = _ui.value.workspaces.firstOrNull { it.id == workspaceId }?.path
+        startSessionAt(SessionTarget.Workspace(workspaceId, path))
+    }
+
+    /**
+     * Resolves a [SessionTarget] and performs the one action the plan names.
+     *
+     * `Adopt` is the idempotent `session/create` with both ids; `Reuse` opens a
+     * session that is already the one meant and sends nothing; `Create` is the
+     * only branch that can add a row to the drawer.
+     */
+    private fun startSessionAt(target: SessionTarget) {
+        val plan = SessionTargets.plan(target, _ui.value.currentSessionId, sessionTargetCandidates())
+        when (plan) {
+            is SessionTargetPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
+            is SessionTargetPlan.Reuse -> openSession(plan.sessionId)
+            is SessionTargetPlan.Create ->
+                createSessionNow(plan.cwd, newSessionPreset(), plan.workspaceId)
+        }
+    }
+
+    /**
+     * The roster the reuse decision reads, with Workspace membership joined in.
+     *
+     * Built fresh at each intent rather than cached: the archived set, membership
+     * and the `blank` flag all move under the user, and a stale copy is what makes
+     * a decision to reuse (or not) wrong at exactly the moment it matters.
+     */
+    private fun sessionTargetCandidates(): List<SessionTargetCandidate> {
+        val ui = _ui.value
+        return ui.sessions.map { session ->
+            SessionTargetCandidate(
+                id = session.id,
+                cwd = session.cwd,
+                blank = session.blank,
+                isSubagent = session.isSubagent,
+                archived = session.id in ui.archivedSessionIds,
+                workspaceIds = ui.workspaces.filter { session.id in it.sessionIds }
+                    .mapTo(mutableSetOf()) { it.id },
+            )
+        }
+    }
+
+    /** The stored new-session preset, or null when the host should pick its default. */
+    private fun newSessionPreset(): String? = _ui.value.agentPreset.takeIf { it.isNotBlank() }
+
+    /**
+     * `session/create` with both ids: the host's idempotent adopt.
+     *
+     * No `agentPreset` travels with it. The session already exists, so its preset
+     * is settled and a differing request would come back `agent-preset/conflict`
+     * — the preset is a choice about a *new* session, and this call is not making one.
+     *
+     * A `session/conflict` means the roster lied about the directory (a stale cwd
+     * string), not that the user's pick was wrong, so it falls back to the create
+     * the plan would have chosen; the pick still lands, it just costs the blank
+     * the roster promised could be adopted.
+     */
+    private fun adoptSession(sessionId: String, workspaceId: String) {
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
+            runCatching {
+                val request = JSONObject().put("sessionId", sessionId).put("workspaceId", workspaceId)
+                client.rpc("session/create", JSONObject().put("request", request))
+            }.onSuccess { value ->
+                val id = value.optString("sessionId").ifEmpty { sessionId }
+                _ui.value = _ui.value.copy(busy = false)
+                refreshSessions()
+                openSession(id)
+            }.onFailure { error ->
+                _ui.value = _ui.value.copy(busy = false)
+                if ((error as? DshRpcException)?.code == SESSION_CONFLICT) {
+                    refreshSessions()
+                    createSessionNow(null, newSessionPreset(), workspaceId)
+                } else {
+                    showFailure(error, "session/create")
+                }
             }
         }
-        if (existing != null) {
-            openSession(existing.id)
-            return
-        }
-        // No local copy of the workspace yet is fine: the host resolves the cwd
-        // from the id, so the create is still correct.
-        newSession(
-            cwd = null,
-            preset = _ui.value.agentPreset.takeIf { it.isNotBlank() },
-            workspaceId = workspaceId,
-        )
     }
 
     /**
@@ -3928,15 +4003,45 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Creates a session, either inside a registered workspace or at a plain `cwd`.
+     * Starts a session at [cwd] or in [workspaceId], reusing one when the intent
+     * already names a session.
      *
-     * The host takes one or the other and rejects both (`gateway/bad-request`), and
-     * only the workspace form **attaches** the session to that workspace's
-     * membership — which is exactly what puts it in that group in the sidebar.
-     * Creating by `cwd` alone leaves it Ungrouped, which is why adopting a workspace
-     * has to go through the id.
+     * The host takes a `cwd` or a `workspaceId` and rejects both
+     * (`gateway/bad-request`), and only the workspace form **attaches** the
+     * session to that workspace's membership — which is exactly what puts it in
+     * that group in the sidebar. Creating by `cwd` alone leaves it Ungrouped,
+     * which is why adopting a workspace has to go through the id.
+     *
+     * This is the raw entry point as much as the UI one, so it runs the same
+     * [SessionTargets.plan] decision every other path does: "New Session" must
+     * never mean "and also one more blank" when the host already holds one that
+     * is what the user asked for. [createSessionNow] is the branch that actually
+     * creates; it is private so no path can reach `session/create` without the
+     * plan above it.
      */
     fun newSession(cwd: String?, preset: String?, workspaceId: String? = null) {
+        val target = when {
+            !workspaceId.isNullOrBlank() -> SessionTarget.Workspace(
+                id = workspaceId,
+                path = _ui.value.workspaces.firstOrNull { it.id == workspaceId }?.path,
+            )
+            !cwd.isNullOrBlank() -> SessionTarget.Directory(cwd)
+            // No target at all: the host's own default directory. There is nothing
+            // to match against, so the plan has no opinion and a create is honest.
+            else -> null
+        }
+        when (val plan = target?.let {
+            SessionTargets.plan(it, _ui.value.currentSessionId, sessionTargetCandidates())
+        }) {
+            is SessionTargetPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
+            is SessionTargetPlan.Reuse -> openSession(plan.sessionId)
+            is SessionTargetPlan.Create -> createSessionNow(plan.cwd, preset, plan.workspaceId)
+            null -> createSessionNow(cwd, preset, workspaceId)
+        }
+    }
+
+    /** The unconditional `session/create`. The only code that can add a row. */
+    private fun createSessionNow(cwd: String?, preset: String?, workspaceId: String?) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
             runCatching {
@@ -4016,9 +4121,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      *
      * The host has no "change cwd" RPC — a session's working directory is fixed at
      * `session/create` and later differing requests raise `session/conflict` — so
-     * choosing a different workspace means adopting an existing blank session
-     * there or creating one. Reusing avoids piling up blanks, which is what the web
-     * client does when a workspace is connected.
+     * choosing a different directory means reusing a blank already rooted there,
+     * adopting one by both ids when it is, or creating one. Which of the three is
+     * [SessionTargets.plan]'s call; this only hands it the target.
      *
      * This is the path for a directory the user *typed*, which is not necessarily
      * registered; a picked Workspace goes through [startSessionInWorkspace] with its
@@ -4029,19 +4134,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         if (trimmed.isEmpty()) return
         // A registered workspace is addressed by id, because only that form attaches
         // the session to it.
-        _ui.value.workspaces.firstOrNull { it.path == trimmed }?.let { workspace ->
-            startSessionInWorkspace(workspace.id)
-            return
-        }
-        val archived = _ui.value.archivedSessionIds
-        val existing = _ui.value.sessions.firstOrNull {
-            it.blank && !it.isSubagent && it.id !in archived && it.cwd == trimmed
-        }
-        if (existing != null) {
-            openSession(existing.id)
-        } else {
-            newSession(trimmed, _ui.value.agentPreset.takeIf { it.isNotBlank() })
-        }
+        val workspace = _ui.value.workspaces.firstOrNull { it.path == trimmed }
+        startSessionAt(
+            if (workspace != null) SessionTarget.Workspace(workspace.id, workspace.path)
+            else SessionTarget.Directory(trimmed),
+        )
     }
 
     fun renameSession(sessionId: String, title: String) {
