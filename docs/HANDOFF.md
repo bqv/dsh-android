@@ -194,9 +194,9 @@ editing the live copy. There is no install step to forget.
   in `.probe/`; a surface with no capture there is unverified, and this note
   makes no claim either way.
 - **Feature gaps live in `docs/PARITY.md`** under "Open work": image and SVG
-  previews, markdown gaps, the interrupted assistant tail tag, sidebar
-  fade/reorder, workspace rename/delete, the missing header seats,
-  `settings/*`/skills, and the goal activation label. The drawer's content search
+  previews, walking up from a subagent to its parent, markdown gaps, the
+  interrupted assistant tail tag, sidebar fade/reorder, workspace rename/delete,
+  the missing header seats, `settings/*`/skills, and the goal activation label. The drawer's content search
   is **not** on that list any more: it is wired (`SessionsDrawer` calls
   `session/search` and keeps the availability flag), and this note listed it for
   several days after that was true.

@@ -82,6 +82,16 @@ of where the app stands against them.
       refuses to recompose an agent after a turn). Missing: terminal recovery, schedule
       catalog, open-in-app.
 - [x] There is **no per-session overflow menu** — rename/fork/archive live on the sidebar row
+- [ ] **No way up from a subagent.** The lineage seat goes *down* (descendants, while any are
+      running) and the drawer nests a subagent under its parent — but a subagent's own screen
+      offers nothing that opens the session which spawned it, so a nested run is a one-way
+      trip: back to the drawer and find the parent by hand. Wanted: tapping the title (or the
+      lineage chip) walks up one level, repeatable to the top of the stack.
+      The data is already in hand, which is what makes this small: `session/list` carries
+      `parentSessionId` on subagent records, and `ui/SubagentRollup.kt` already walks that
+      chain upward — with the web's own cycle guard — to count ancestors. The one thing to
+      decide is what a *missing* parent does: the roster can hold a child whose parent is
+      gone, and `subagents/list` reports exactly that as `parentAvailable`.
 - [x] No running-turn dot in the header, deliberately: the web's header utilities have no
       such contributor, and `JobsSeat` already draws the same `StateDot` a turn dot would
 
