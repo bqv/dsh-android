@@ -1,8 +1,10 @@
 package uk.xa0.dsh
 
+import uk.xa0.dsh.term.SeatOption
 import uk.xa0.dsh.term.TerminalEnvironmentInfo
 import uk.xa0.dsh.term.TerminalInfo
 import uk.xa0.dsh.term.TerminalIssue
+import uk.xa0.dsh.term.TerminalSeat
 import uk.xa0.dsh.term.TerminalState
 
 /**
@@ -36,6 +38,23 @@ enum class TerminalPhase {
  */
 data class TerminalUiState(
     val sessionId: String? = null,
+    /**
+     * Which seat the grid is showing.
+     *
+     * The panel draws one grid, so the seat is state rather than a second pane; the
+     * seat the user picked is what decides which session the terminal RPCs address.
+     */
+    val seat: TerminalSeat = TerminalSeat.HOST_SHELL,
+    /** The seats on offer, each labelled with the policy in force in it. */
+    val seats: List<SeatOption> = emptyList(),
+    /**
+     * The host shell could not be materialized, stated as the fact it is.
+     *
+     * Separate from [error] because it is not a terminal failure: no terminal exists to
+     * have failed, and the sentence has to say what did *not* happen (see
+     * `hostShellIssueFact`) rather than describe a shell that is not there.
+     */
+    val hostShellIssue: String? = null,
     val phase: TerminalPhase = TerminalPhase.IDLE,
     val environment: TerminalEnvironmentInfo? = null,
     /** `terminal/list` for this session, so a retained terminal is reused, not replaced. */

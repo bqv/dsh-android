@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import uk.xa0.dsh.term.decodeHostShellSessions
+import uk.xa0.dsh.term.encodeHostShellSessions
 
 /**
  * Everything the app needs to reach one DSH host.
@@ -57,6 +59,21 @@ data class DshConfig(
      * the drawer in a state the user did not ask for.
      */
     val drawerCollapsedSections: Set<String> = emptySet(),
+    /**
+     * Workspace id → the dedicated "Host shell" Session that workspace's unconfined
+     * terminal lives in.
+     *
+     * Local, and not recoverable from the host, because that session is **archived**:
+     * an archived session cannot be browsed to, so without this the app would build a
+     * second one on every visit and leave the first behind. It is written only once the
+     * whole bootstrap has succeeded (session created, mode set, archived), so a
+     * remembered id is evidence that the mode step ran — see
+     * [uk.xa0.dsh.term.HostShellProgress].
+     *
+     * The drawer's own "Archived" toggle is the recovery path: it is how the user finds
+     * and restores the session if they ever want it back, or wants it gone.
+     */
+    val hostShellSessions: Map<String, String> = emptyMap(),
 ) {
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
@@ -118,6 +135,7 @@ class ConfigStore(context: Context) {
         drawerCollapsedSections = prefs.getStringSet(KEY_DRAWER_COLLAPSED, null)
             ?.toSet()
             ?: emptySet(),
+        hostShellSessions = decodeHostShellSessions(prefs.getString(KEY_HOST_SHELLS, null)),
     )
 
     fun save(config: DshConfig) {
@@ -136,6 +154,9 @@ class ConfigStore(context: Context) {
             // the set, and the caller (a UiState copy) must not be able to mutate
             // what was stored. Pass a fresh copy.
             .putStringSet(KEY_DRAWER_COLLAPSED, config.drawerCollapsedSections.toSet())
+            // Same hazard, same answer: the encoding copies the entries into a fresh
+            // String, so nothing the caller still holds can reach the stored value.
+            .putString(KEY_HOST_SHELLS, encodeHostShellSessions(config.hostShellSessions))
             .apply()
     }
 
@@ -155,5 +176,6 @@ class ConfigStore(context: Context) {
         const val KEY_DRAWER_ORDER = "drawer_order_by_updated"
         const val KEY_DRAWER_ARCHIVED = "drawer_show_archived"
         const val KEY_DRAWER_COLLAPSED = "drawer_collapsed_sections"
+        const val KEY_HOST_SHELLS = "host_shell_sessions"
     }
 }
