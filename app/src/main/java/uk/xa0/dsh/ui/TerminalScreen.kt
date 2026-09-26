@@ -1,5 +1,6 @@
 package uk.xa0.dsh.ui
 
+import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -44,6 +45,7 @@ import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.utf16CodePoint
@@ -87,6 +89,9 @@ import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
+
+/** Input-boundary logging: a chord that never arrives and one that is dropped look identical. */
+private const val TAG = "DshTerm"
 
 /**
  * The session terminal: a real PTY for the open session, rendered natively.
@@ -472,6 +477,15 @@ private fun TerminalSurface(
                             composing = next.composition != null,
                             ctrl = ctrlArmed,
                         )
+                        // Every input boundary logs, because a chord that never arrives
+                        // and a chord that is dropped look identical from the outside.
+                        Log.d(
+                            TAG,
+                            "ime text=${next.text.map { if (it.code < 32 || it == '\u200B') '^' + (it.code + 64) else it }} " +
+                                "composing=${next.composition != null} ctrlArmed=$ctrlArmed " +
+                                "-> write=${edit.write.map { if (it.code < 32) '^' + (it.code + 64) else it }} " +
+                                "ctrlUsed=${edit.ctrlUsed}",
+                        )
                         if (edit.composing) {
                             // The composition belongs to the IME until it commits:
                             // keep its value (clearing it would cancel the word the
@@ -488,13 +502,13 @@ private fun TerminalSurface(
                         .alpha(0f)
                         .focusRequester(focusRequester),
                     textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
-                    // A password field is the one flavour most IMEs will not
-                    // compose, suggest or autocorrect in, which is exactly what a
-                    // terminal wants from its keystroke source: every key arrives as
-                    // a committed edit, so it is echoed at once instead of waiting
-                    // for a word to commit. It is invisible either way.
+                    // Ascii, not the default Text and not Password: a terminal wants
+                    // keystrokes, and the modifier keys a soft keyboard may offer
+                    // (Ctrl among them) have to survive whatever flavour the field is.
+                    // Password suppresses more than composition - some IMEs drop their
+                    // own Ctrl key in it - and this field is invisible either way.
                     keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
+                        keyboardType = KeyboardType.Ascii,
                         autoCorrect = false,
                     ),
                 )
@@ -624,6 +638,36 @@ private fun terminalKeyOf(key: Key): TerminalKey? = when (key) {
  * (Android reports `\u0001` for Ctrl+A) or as the bare letter. Both are handled, so
  * neither a shell's Ctrl+A nor Ctrl+C is lost to the editor's own shortcuts.
  */
+/**
+ * The character a Ctrl chord is *about*, from the key code rather than the text.
+ *
+ * Android's `KeyEvent.getUnicodeChar()` returns 0 for Ctrl+letter — the modifier
+ * suppresses the character — and Compose's `utf16CodePoint` is that same value. So a
+ * chord cannot be read from `utf16CodePoint` at all: a soft keyboard with its own
+ * Ctrl key (the only way a phone can produce these) sends KEYCODE_D with metaState
+ * CTRL and *no* unicode char, which the old code rejected one line before it looked
+ * for a chord. Plain letters were unaffected, which is why the panel looked fine
+ * while every Ctrl chord vanished.
+ */
+private fun chordCharacterOf(key: Key): Char? {
+    val native = key.nativeKeyCode
+    return when (native) {
+        in 29..54 -> 'a' + (native - 29)   // KEYCODE_A..KEYCODE_Z
+        in 7..16 -> '0' + (native - 7)     // KEYCODE_0..KEYCODE_9
+        68 -> '`'
+        69 -> '-'
+        70 -> '='
+        71 -> '['
+        72 -> ']'
+        73 -> '\\'
+        74 -> ';'
+        75 -> '\''
+        76 -> '/'
+        77 -> '@'
+        else -> null
+    }
+}
+
 private fun handleHardwareKey(
     event: KeyEvent,
     applicationCursorKeys: Boolean,
@@ -643,11 +687,25 @@ private fun handleHardwareKey(
         return true
     }
     val code = event.utf16CodePoint
+    if (event.isCtrlPressed) {
+        // A chord arrives as a key code with no character (see `chordCharacterOf`),
+        // so it is resolved from the code first and the character second - some
+        // keyboards do populate it, and a raw C0 byte is passed straight through.
+        val chord = when (code) {
+            in 1..31 -> code.toChar()
+            else -> chordCharacterOf(event.key)?.let { TerminalKeys.controlOf(it) }
+        }
+        if (chord == null) {
+            Log.d(TAG, "ctrl chord ignored: key=${event.key} native=${event.key.nativeKeyCode} code=$code")
+            return false
+        }
+        Log.d(TAG, "ctrl chord -> ${chord.code} from key=${event.key.nativeKeyCode}")
+        write(chord.toString())
+        return true
+    }
     if (code <= 0) return false
     val character = code.toChar()
     return when {
-        event.isCtrlPressed && code in 1..31 -> { write(character.toString()); true }
-        event.isCtrlPressed -> TerminalKeys.controlOf(character)?.let { write(it.toString()); true } ?: false
         event.isAltPressed -> { write(TerminalKeys.typed(character, alt = true)); true }
         else -> false
     }
