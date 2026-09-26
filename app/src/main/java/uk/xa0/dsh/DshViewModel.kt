@@ -1631,6 +1631,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         if (bells > session.bellsSeen) {
             session.bellsSeen = bells
             val sessionId = _terminal.value.sessionId
+            // Logged because every way this can fail is silent: a stream that is not
+            // attached, a notification the OS refuses, and the "already looking at it"
+            // rule all look like a bell that never rang.
+            Log.d(
+                TAG,
+                "terminal bell: count=$bells session=$sessionId " +
+                    "foreground=${app.foreground.resumed} current=${_ui.value.currentSessionId}",
+            )
             alert(
                 id = Attention.bellId(sessionId),
                 sessionId = sessionId,
@@ -2143,7 +2151,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun alert(id: Int, sessionId: String?, title: String, text: String) {
         val visible = app.foreground.resumed &&
             (sessionId == null || sessionId == _ui.value.currentSessionId)
-        if (visible) return
+        if (visible) {
+            Log.d(TAG, "alert suppressed (already on screen): $title")
+            return
+        }
+        Log.d(TAG, "alert posted: id=$id session=$sessionId title=$title")
         Attention.notify(app, id, title, text, sessionId)
     }
 

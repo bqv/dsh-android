@@ -38,6 +38,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
@@ -49,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.collectAsState
+import uk.xa0.dsh.R
 import uk.xa0.dsh.DshViewModel
 import uk.xa0.dsh.TerminalPhase
 import uk.xa0.dsh.TerminalUiState
@@ -378,8 +380,20 @@ private fun TerminalSurface(
     // screen on every `htop` repaint. A full phone screen of rows plus the cell
     // metrics and the cursor glyph fits well inside this.
     val measurer = rememberTextMeasurer(cacheSize = 64)
+    // A terminal has one non-negotiable font requirement: the box-drawing and block
+    // characters a TUI draws its frames and bars with must be in the same face as the
+    // text, at the same advance, or the frame comes apart. The system monospace is
+    // whatever the OEM ships — on the test phone that is Roboto Mono, whose arrows
+    // are a fraction of the block and which has no braille at all. Inconsolata
+    // (SIL OFL, `docs/licenses/`) covers box drawing and block elements completely,
+    // and is narrow, which on a phone means more columns per line; its missing arrows
+    // and braille fall back per glyph, which is the right trade for a PTY.
+    val terminalFont = FontFamily(
+        Font(R.font.inconsolata_regular, FontWeight.Normal),
+        Font(R.font.inconsolata_bold, FontWeight.Bold),
+    )
     val baseStyle = remember {
-        TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 15.sp)
+        TextStyle(fontFamily = terminalFont, fontSize = 12.sp, lineHeight = 15.sp)
     }
     val metrics = remember(measurer, baseStyle) {
         measurer.measure(AnnotatedString("MMMMMMMMMM"), style = baseStyle)
