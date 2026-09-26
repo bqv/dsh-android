@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import uk.xa0.dsh.ui.BackGate
 import uk.xa0.dsh.ui.ChatScreen
 import uk.xa0.dsh.ui.SetupScreen
 import uk.xa0.dsh.ui.components.DshMark
@@ -90,6 +91,10 @@ class MainActivity : ComponentActivity() {
             }
 
             DshTheme(themeMode = ui.themeMode) {
+                // Composed before the screen so the screen's own Back handlers — the
+                // drawer, the sheets, the Files panel, a non-Chat view — are asked
+                // first; what reaches the gate is the press with nothing to dismiss.
+                BackGate(onExit = { finish() })
                 Box(
                     Modifier
                         .fillMaxSize()

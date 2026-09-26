@@ -8,6 +8,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -389,6 +390,15 @@ fun ChatScreen(vm: DshViewModel) {
     val subagentRollups = remember(ui.sessions, ui.subagentCatalogs) {
         indexSubagentRollups(ui.sessions, ui.subagentCatalogs)
     }
+
+    // Back closes the panel or the view before it is allowed anywhere near the app's
+    // exit: on a phone these are states, not screens, and a reader pressing Back in
+    // front of the Files panel means "close this", not "quit". Registered here rather
+    // than at the root because this is where the state lives, and they are asked
+    // before the root gate because a child's handler runs first. The sheets (jobs,
+    // lineage, settings, about) are modal and already dismiss themselves.
+    BackHandler(enabled = showFiles) { showFiles = false }
+    BackHandler(enabled = !showFiles && view != ChatView.CHAT) { view = ChatView.CHAT }
 
     val attachLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) vm.addAttachment(uri)
