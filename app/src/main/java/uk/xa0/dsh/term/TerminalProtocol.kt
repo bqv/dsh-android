@@ -155,6 +155,50 @@ fun isWritable(info: TerminalInfo?, attachmentId: String?): Boolean =
         info.state == TerminalState.RUNNING && info.controllerId == attachmentId
 
 /**
+ * The retained terminal a re-opening panel should adopt, or null to open a fresh one.
+ *
+ * `terminal/list` is how the panel adopts what the host still holds, and adopting is
+ * what stops a restart from leaving an orphan behind on every visit. But a terminal
+ * whose state is not `RUNNING` has no stream left to hold open: the host still answers
+ * a `follow` with a snapshot of its last screen, so the panel painted that screen as
+ * *connected* with no notice at all, and the first keystroke then published "another
+ * attachment took input control" — a read-only mystery about a shell that had simply
+ * stopped.
+ *
+ * Reproduced on `emulator-5554` (2026-09-26, build `8134ce6`): open the Shell tab of a
+ * subject session, `exit`, `am force-stop`, relaunch, open Shell again. The bar read
+ * `bash` / `running` with no notice (the prior screen's title and the stopped-shell
+ * sentence were both gone), and one keystroke produced the sentence "Another attachment
+ * took input control, so this panel is read-only. Reconnect to take it back." — with
+ * `terminalWrite dropped: … phase=CONNECTED attachment=adff6cef… controller=adff6cef…
+ * state=EXITED` in the log. The controller *was* this attachment; only the state was
+ * wrong.
+ *
+ * So only a `RUNNING` terminal may be adopted. `UNKNOWN` is not running either, and
+ * guessing at a state the host did not name is how the dead panel was born.
+ */
+fun terminalToAdopt(retained: List<TerminalInfo>): TerminalInfo? =
+    retained.firstOrNull { it.state == TerminalState.RUNNING }
+
+/**
+ * The retained terminals a panel opening a shell should retire.
+ *
+ * These are exactly the terminals [terminalToAdopt] refuses, and they are the reason
+ * "skip the dead ones" needs a second half: a terminal that has stopped can never be
+ * adopted again, so leaving it in the list would make every `exit`-and-reopen allocate
+ * one more shell until the host answers `terminal/limit-reached` — a fresh dead end in
+ * place of the old one. The host accepts `terminal/close` on an exited terminal and
+ * drops it from `terminal/list` (verified against the host, 2026-09-26).
+ *
+ * A terminal that failed to *start* is retired for the same reason: it has no screen
+ * worth keeping and cannot run.
+ */
+fun terminalReapList(retained: List<TerminalInfo>): List<TerminalInfo> =
+    retained.filter {
+        it.state == TerminalState.EXITED || it.state == TerminalState.FAILED
+    }
+
+/**
  * Drops resizes that would not change the grid.
  *
  * The panel is measured on every layout pass and the soft keyboard changes the

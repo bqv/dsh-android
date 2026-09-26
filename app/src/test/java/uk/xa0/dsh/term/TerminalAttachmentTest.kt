@@ -19,8 +19,9 @@ class TerminalAttachmentTest {
         rows: Int = 24,
         state: TerminalState = TerminalState.RUNNING,
         controllerId: String? = "att-1",
+        id: String = "term-1",
     ) = TerminalInfo(
-        id = "term-1",
+        id = id,
         title = "shell",
         shell = "/bin/bash",
         cwd = "/workspace",
@@ -29,6 +30,57 @@ class TerminalAttachmentTest {
         state = state,
         controllerId = controllerId,
     )
+
+    // -------------------------------------------------- retained-terminal adoption
+
+    @Test
+    fun `the running retained terminal is the one adopted`() {
+        val retained = listOf(
+            info(id = "dead", state = TerminalState.EXITED),
+            info(id = "live", state = TerminalState.RUNNING),
+        )
+        assertEquals("live", terminalToAdopt(retained)?.id)
+    }
+
+    @Test
+    fun `nothing is adopted when every retained terminal has stopped`() {
+        // The defect: this used to fall back to `firstOrNull()`, so the panel adopted
+        // the exited host shell, the host answered the follow with its last screen, and
+        // the bar said "running" while the keyboard could not type.
+        val retained = listOf(
+            info(id = "dead", state = TerminalState.EXITED),
+            info(id = "failed", state = TerminalState.FAILED),
+        )
+        assertEquals(null, terminalToAdopt(retained))
+    }
+
+    @Test
+    fun `an unknown state is not running and is not adopted`() {
+        assertEquals(null, terminalToAdopt(listOf(info(state = TerminalState.UNKNOWN))))
+    }
+
+    @Test
+    fun `an empty roster adopts nothing`() {
+        assertEquals(null, terminalToAdopt(emptyList()))
+    }
+
+    @Test
+    fun `stopped terminals are retired and running ones are not`() {
+        val retained = listOf(
+            info(id = "live", state = TerminalState.RUNNING),
+            info(id = "dead", state = TerminalState.EXITED),
+            info(id = "failed", state = TerminalState.FAILED),
+            info(id = "unknown", state = TerminalState.UNKNOWN),
+        )
+        // A running terminal is another attachment's shell and is left alone; an
+        // UNKNOWN state is not evidence of a stop, so nothing is assumed about it.
+        assertEquals(listOf("dead", "failed"), terminalReapList(retained).map { it.id })
+    }
+
+    @Test
+    fun `a roster of only running terminals is retired by nothing`() {
+        assertEquals(emptyList<TerminalInfo>(), terminalReapList(listOf(info(), info(id = "term-2"))))
+    }
 
     // -------------------------------------------------------- input attachment
 
