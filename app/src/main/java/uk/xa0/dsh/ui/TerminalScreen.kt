@@ -30,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -49,6 +50,7 @@ import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
@@ -72,7 +74,9 @@ import uk.xa0.dsh.term.ATTR_STRIKE
 import uk.xa0.dsh.term.ATTR_UNDERLINE
 import uk.xa0.dsh.term.COLOR_DEFAULT
 import uk.xa0.dsh.term.COLOR_RGB_FLAG
+import uk.xa0.dsh.term.SoftInput
 import uk.xa0.dsh.term.TerminalEmulator
+import uk.xa0.dsh.term.TerminalInfo
 import uk.xa0.dsh.term.TerminalIssue
 import uk.xa0.dsh.term.TerminalKey
 import uk.xa0.dsh.term.TerminalKeys
@@ -109,9 +113,19 @@ fun TerminalScreen(
     // shell alive by design, and this is the whole of "leaving must not close it".
     DisposableEffectOnLeave(sessionId) { vm.leaveTerminal() }
 
+    // The panel keeps one screen for every terminal in the session, and a snapshot
+    // reset deliberately keeps its OSC title, so a title read right after a switch can
+    // still be the one the terminal we just left had set. Until it changes, the honest
+    // name is the host's own — `active.title`, the shell's name. A stale "vim" over the
+    // bash you just switched to would be exactly the kind of lie this panel must not tell.
+    val activeTerminalId = state.active?.id
+    val inheritedTitle = remember(activeTerminalId) { emulator?.title.orEmpty() }
+    val screenTitle = emulator?.title.orEmpty().takeIf { it != inheritedTitle }.orEmpty()
+
     Column(modifier.fillMaxWidth().background(DshTheme.colors.bgBase)) {
         TerminalBar(
             state = state,
+            screenTitle = screenTitle,
             onNew = vm::newTerminal,
             onClose = vm::closeActiveTerminal,
             onRetry = vm::retryTerminal,
@@ -145,6 +159,7 @@ private fun DisposableEffectOnLeave(key: Any?, onLeave: () -> Unit) {
 @Composable
 private fun TerminalBar(
     state: TerminalUiState,
+    screenTitle: String,
     onNew: () -> Unit,
     onClose: () -> Unit,
     onRetry: () -> Unit,
@@ -157,7 +172,11 @@ private fun TerminalBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = state.title.ifBlank { "Terminal" },
+                // The OSC 0/2 title the screen parsed names what is actually running
+                // ("vim", "user@host: ~/src"), where the host's own title is only ever
+                // the shell's name. It exists for the attached terminal only, which is
+                // exactly this header's subject.
+                text = screenTitle.ifBlank { state.title }.ifBlank { "Terminal" },
                 style = DshType.bodySmall.copy(fontWeight = FontWeight.Medium),
                 color = colors.labelPrimary,
                 maxLines = 1,
@@ -191,7 +210,7 @@ private fun TerminalBar(
                 state.terminals.forEach { item ->
                     val active = item.id == state.active?.id
                     Text(
-                        text = item.title.ifBlank { item.id.take(8) },
+                        text = terminalChipLabel(item, screenTitle.takeIf { active }.orEmpty()),
                         style = DshType.micro,
                         color = if (active) colors.link else colors.labelTertiary,
                         maxLines = 1,
@@ -206,6 +225,23 @@ private fun TerminalBar(
         }
         TerminalNotice(state)
     }
+}
+
+/**
+ * What the picker calls one terminal.
+ *
+ * The host names every terminal after the shell it runs, so two shells in one
+ * session are both "bash" and `title` alone cannot tell them apart. The OSC title
+ * the attached screen already parsed is the specific name — the running program, or
+ * the shell's own `user@host: ~/dir` — and the short id suffix is what keeps two
+ * entries of the same *name* distinct. `TerminalClient.rename` is not called: the
+ * panel has no place to ask the user for a name, and an id suffix needs no round
+ * trip and cannot go stale on a reconnect.
+ */
+private fun terminalChipLabel(item: TerminalInfo, screenTitle: String): String {
+    val shell = item.title.ifBlank { "shell" }
+    val name = screenTitle.takeIf { it.isNotBlank() && it != shell } ?: shell
+    return "$name \u00b7 ${item.id.take(4)}"
 }
 
 @Composable
@@ -228,6 +264,12 @@ private fun BarAction(label: String, onClick: () -> Unit, enabled: Boolean = tru
  * An issue is stated as the fact it is — "no live agent, send a prompt" — rather
  * than left to a spinner, because a session with no live agent will never connect
  * on its own.
+ *
+ * A phase word never promises a recovery the app cannot make. A `DISCONNECTED`
+ * stream whose end the host reported has already had its registration dropped by the
+ * mux, so nothing replays it and no reconnect happens by itself: the sentence names
+ * the button that does it instead. Only a lost sequence re-attaches on its own, and
+ * that case arrives with its own issue sentence.
  */
 @Composable
 private fun TerminalNotice(state: TerminalUiState) {
@@ -236,7 +278,7 @@ private fun TerminalNotice(state: TerminalUiState) {
     val message = when {
         issue != null -> terminalIssueFact(issue, state.limit)
         state.error != null -> state.error
-        state.phase == TerminalPhase.DISCONNECTED -> "The terminal stream dropped. Reconnecting to the host…"
+        state.phase == TerminalPhase.DISCONNECTED -> "The terminal stream stopped. Reconnect to attach again."
         state.phase == TerminalPhase.CLOSED -> "The shell was closed."
         state.phase == TerminalPhase.LOADING || state.phase == TerminalPhase.CREATING ->
             "Starting a shell in this session…"
@@ -298,7 +340,11 @@ private fun TerminalSurface(
 ) {
     val colors = DshTheme.colors
     val palette = remember { xtermPalette() }
-    val measurer = rememberTextMeasurer()
+    // One measured string per visible row per frame, all of them different, so the
+    // default 8-entry cache would miss on nearly every row and re-shape the whole
+    // screen on every `htop` repaint. A full phone screen of rows plus the cell
+    // metrics and the cursor glyph fits well inside this.
+    val measurer = rememberTextMeasurer(cacheSize = 64)
     val baseStyle = remember {
         TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 15.sp)
     }
@@ -309,7 +355,7 @@ private fun TerminalSurface(
     val cellHeight = metrics.size.height.toFloat().coerceAtLeast(1f)
 
     var ctrlArmed by remember { mutableStateOf(false) }
-    var softField by remember { mutableStateOf(TextFieldValue("")) }
+    var softField by remember { mutableStateOf(softFieldAtRest()) }
     val focusRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
@@ -319,6 +365,9 @@ private fun TerminalSurface(
             Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                // The grid is drawn, not composed, so nothing else stops a row or a
+                // block cursor from painting past this box and over the key row.
+                .clipToBounds()
                 .background(colors.bgBase),
         ) {
             val columns = (constraints.maxWidth / cellWidth).toInt().coerceAtLeast(2)
@@ -334,7 +383,16 @@ private fun TerminalSurface(
                     // editor, while ordinary letters fall through to it and arrive
                     // as text deltas.
                     .onPreviewKeyEvent { event ->
-                        handleHardwareKey(event, emulator.applicationCursorKeys, onWrite)
+                        // A backspace that arrives while the IME is composing belongs
+                        // to the composition — the IME is deleting a character the user
+                        // can still see in its candidate bar. Mapping it to DEL here
+                        // would delete a character in the shell instead, so it is left
+                        // to the field.
+                        if (softField.composition != null && event.key == Key.Backspace) {
+                            false
+                        } else {
+                            handleHardwareKey(event, emulator.applicationCursorKeys, onWrite)
+                        }
                     },
             ) {
                 Canvas(
@@ -359,31 +417,27 @@ private fun TerminalSurface(
                     },
                 )
                 // A soft keyboard cannot produce Esc, Ctrl or the arrows, so it only
-                // has to produce text; everything else is the key row below. The
-                // field is kept empty and each change is treated as input, which is
-                // what makes backspace/interference-free typing possible at all.
+                // has to produce text; everything else is the key row below. It does
+                // not send key events, though — it edits this field — so the field is
+                // never empty: it holds one zero-width anchor, which is what gives an
+                // IME's own delete something to delete. [SoftInput] reads each edit.
                 BasicTextField(
                     value = softField,
                     onValueChange = { next ->
-                        // The field is emptied on every change, so each callback is
-                        // one burst of typing and `next.text` is exactly what the IME
-                        // just produced. A shrinking value means the IME's own delete.
-                        val previous = softField.text
-                        softField = TextFieldValue("")
-                        when {
-                            next.text.length > previous.length -> {
-                                val added = next.text.substring(previous.length)
-                                val data = if (ctrlArmed) {
-                                    ctrlArmed = false
-                                    added.map { TerminalKeys.typed(it, ctrl = true) }.joinToString("")
-                                } else {
-                                    added
-                                }
-                                onWrite(data)
-                            }
-                            next.text.length < previous.length -> {
-                                repeat(previous.length - next.text.length) { onWrite("\u007F") }
-                            }
+                        val edit = SoftInput.editOf(
+                            nextText = next.text,
+                            composing = next.composition != null,
+                            ctrl = ctrlArmed,
+                        )
+                        if (edit.composing) {
+                            // The composition belongs to the IME until it commits:
+                            // keep its value (clearing it would cancel the word the
+                            // user is still typing) and write nothing.
+                            softField = next
+                        } else {
+                            softField = softFieldAtRest()
+                            if (edit.ctrlUsed) ctrlArmed = false
+                            if (edit.write.isNotEmpty()) onWrite(edit.write)
                         }
                     },
                     modifier = Modifier
@@ -410,6 +464,17 @@ private fun TerminalSurface(
         )
     }
 }
+
+/**
+ * The hidden field's value between edits: the anchor, with the cursor after it.
+ *
+ * The cursor has to sit *after* the anchor. `deleteSurroundingText` deletes behind
+ * the cursor, so an anchor in front of it is the character a soft backspace removes;
+ * with the cursor before the anchor the IME would have nothing to delete and the
+ * backspace would vanish again, anchor or no anchor.
+ */
+private fun softFieldAtRest(): TextFieldValue =
+    TextFieldValue(SoftInput.ANCHOR, selection = TextRange(SoftInput.ANCHOR.length))
 
 /**
  * The keys a soft keyboard cannot type.
@@ -551,7 +616,11 @@ private fun DrawScope.drawTerminalGrid(
     cellHeight: Float,
 ) {
     val columns = emulator.columns
-    val visibleRows = minOf(emulator.rows, (size.height / cellHeight).toInt() + 1)
+    // Exactly the rows the viewport can show, with no partial row past its bottom
+    // edge: the panel reports `rows` to the host from the same division, so a row
+    // beyond it is not part of the grid the PTY believes in, and drawing it would
+    // paint outside this box.
+    val visibleRows = minOf(emulator.rows, (size.height / cellHeight).toInt())
     for (row in 0 until visibleRows) {
         val line = emulator.row(row)
         val builder = AnnotatedString.Builder()

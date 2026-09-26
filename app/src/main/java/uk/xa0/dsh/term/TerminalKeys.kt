@@ -9,6 +9,11 @@ package uk.xa0.dsh.term
  * in application mode, a missing `1;5` modifier on Ctrl+Arrow), and a JVM test can
  * pin every one of them. `ui/TerminalScreen.kt` maps `android.view.Key` onto
  * [TerminalKey] and nothing more.
+ *
+ * [SoftInput] is the same class of thing one level up — what the *soft* keyboard's
+ * edits mean on the wire — and lives here for the same reason: the panel's hidden
+ * text field can only be exercised by hand, but the decision it makes on every
+ * edit is plain arithmetic over strings.
  */
 
 enum class TerminalKey {
@@ -118,3 +123,81 @@ object TerminalKeys {
         return if (alt) "\u001B$body" else body
     }
 }
+
+/**
+ * The soft keyboard's half of the typing path.
+ *
+ * A soft keyboard does not send key events; it *edits a text field*. So the panel
+ * keeps one invisible [ANCHOR] character in its hidden field, with the cursor after
+ * it, and reads every callback as an edit against that anchor:
+ *
+ * - the anchor is gone and the field is empty: something deleted the character in
+ *   front of the cursor. That is a backspace, and it is the *only* reading that
+ *   makes one reliable, because every mechanism an IME can use —
+ *   `deleteSurroundingText`, an unpaired `KEYCODE_DEL`, an edit that removes the
+ *   last character — needs a character to remove first. An empty field is exactly
+ *   why a soft backspace used to do nothing at all.
+ * - the anchor plus text: that text was committed, so it is typed.
+ * - the anchor alone: nothing was typed.
+ *
+ * While the IME reports a composition (every CJK keyboard, gesture typing, most
+ * autocorrect flows) the text in the field is *not* committed. Writing it would
+ * type half-formed words into the shell and clear the field out from under the
+ * composer, so the panel holds it and writes nothing until the composition ends.
+ * `autoCorrect = false` does not turn composition off.
+ */
+object SoftInput {
+
+    /**
+     * Zero-width space: the one character the hidden field holds at rest.
+     *
+     * Zero-width because the field is invisible but never empty, and the anchor has
+     * to be a character an IME will happily delete or insert around without
+     * treating it as a word.
+     */
+    const val ANCHOR: String = "\u200B"
+
+    /** What an IME's own delete means on the wire: DEL, the same byte as the key row. */
+    const val DELETE: String = "\u007F"
+
+    /**
+     * Reads one edit of the hidden field.
+     *
+     * @param nextText the field's new text, exactly as the IME reported it
+     * @param composing true while the IME reports an in-progress composition
+     * @param ctrl true when the panel's Ctrl key is armed
+     */
+    fun editOf(nextText: String, composing: Boolean, ctrl: Boolean = false): SoftEdit {
+        if (composing) return SoftEdit(write = "", composing = true, ctrlUsed = false)
+        val anchor = nextText.indexOf(ANCHOR)
+        if (anchor < 0) {
+            // No anchor and nothing else: the IME deleted it, which is a backspace.
+            if (nextText.isEmpty()) return SoftEdit(DELETE, composing = false, ctrlUsed = false)
+            // No anchor but text: the IME replaced the field's whole value instead
+            // of editing around the anchor. Nothing was visibly deleted, so the text
+            // is the commit and no DEL is invented for it.
+            return SoftEdit(applyCtrl(nextText, ctrl), composing = false, ctrlUsed = ctrl)
+        }
+        val committed = nextText.substring(anchor + ANCHOR.length)
+        if (committed.isEmpty()) return SoftEdit("", composing = false, ctrlUsed = false)
+        return SoftEdit(applyCtrl(committed, ctrl), composing = false, ctrlUsed = ctrl)
+    }
+
+    private fun applyCtrl(text: String, ctrl: Boolean): String =
+        if (!ctrl) text else text.map { TerminalKeys.typed(it, ctrl = true) }.joinToString("")
+}
+
+/**
+ * What one edit of the soft keyboard's hidden field means for the PTY.
+ *
+ * @property write the bytes to write; empty when the edit committed nothing
+ * @property composing true while the IME is mid-composition, in which case the panel
+ *   must keep the value the IME reported and [write] is empty
+ * @property ctrlUsed true when an armed Ctrl was spent on [write], so the panel can
+ *   drop the armed state; a backspace never spends it
+ */
+data class SoftEdit(
+    val write: String,
+    val composing: Boolean,
+    val ctrlUsed: Boolean,
+)
