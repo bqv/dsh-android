@@ -69,9 +69,12 @@ of where the app stands against them.
 
 - [x] Session title + shortened cwd crumb
 - [x] Hidden entirely for a blank/hero session
-- [x] View tabs strip — exactly two tabs, order `Chat` (0) then `Trajectory` (10);
+- [x] View tabs strip — three tabs, order `Chat` (0), `Trajectory` (10) then `Shell`;
       default `chat`; active = 2dp business-blue underline (not a pill); the strip
-      renders only when the session has a transcript (`ui/ChatScreen.kt: ChatView`, `ViewTabs`)
+      renders only when the session has a transcript (`ui/ChatScreen.kt: ChatView`, `ViewTabs`).
+      `Chat` and `Trajectory` are the host's registered `conversation.view` entries;
+      `Shell` is this client's own view over the host's `terminal` Remote namespace,
+      not a host-registered view
 - [~] Header seats: agent-preset label, terminal recovery (error-only), schedule catalog,
       background jobs, open-in-app, right-panel expand, subagent lineage.
       Present: background jobs, right panel (Files), subagent lineage (while descendants
@@ -177,7 +180,15 @@ of where the app stands against them.
       (`workspaceFiles/list` is never called), and reads content on demand through
       `workspaceFiles/read` (`model/SessionFiles.kt`, `model/WorkspaceFileLoader.kt`,
       `ui/components/FilesPanel.kt`)
-- [ ] Terminal panel — xterm-style over `terminal/follow` on the same `/api/remote.mux`
+- [x] Terminal panel — the **Shell** tab, a real PTY over the host's `terminal`
+      Remote namespace (`environment`, `shells`, `list`, `create`, `follow`, `write`,
+      `resize`, `rename`, `close` in `net/TerminalClient.kt`), `follow` on the same
+      `/api/remote.mux`. Not xterm.js: the grid is one `Canvas` with a block cursor
+      over a hand-written Android-free VT core (`ui/TerminalScreen.kt`, `term/`), and
+      the panel offers two seats — the unconfined host shell and this session's own
+      confined terminal (`term/HostShell.kt: TerminalSeat`, `DshViewModel`). Re-attach
+      after a network drop is **unverified**: the emulator's `svc wifi/data` do not
+      touch the app's path
 - [x] Preview panel: the `text` preview that a deliverable or a file row opens into
 - **NOT a right-panel tab:** Deliverables registers nothing under `sidebar.right.*`. It is a
   conversation turn-tail row plus a `present` tool view, whose items open the text preview tab.
@@ -258,7 +269,11 @@ Ordered by value, not by size:
 1. **Wire the drawer's content search.** The ViewModel, the merge and the status copy are
    built; the `SessionsDrawer(...)` call site passes no search state, so
    `session/search` is never sent from the UI today.
-2. **Terminal panel** (`terminal/follow`) — the last unported dockkit surface.
+2. **Terminal panel** (`terminal/follow`) — ported as the **Shell** tab, so it is no
+   longer an unported dockkit surface. What remains in it is narrower: scrollback
+   *rendering* (the tail is retained but not drawn), mouse reporting, terminal
+   search, more than one terminal on screen at a time, sixel/kitty graphics, OSC 8
+   hyperlinks, bracketed paste, and IME composition regions.
 3. **Markdown gaps** — inline images, `@file` mention chips, citations, tags, mermaid/math.
 4. **Interrupted assistant tail tag** — a frozen partial block with `interrupted: true` has no
    tag; only the `turn/end` notices mark a cut-off turn.
