@@ -957,7 +957,27 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val agentId = terminalAgentId ?: return
         val id = terminalId ?: return
         val session = terminalSession ?: return
-        if (!_terminal.value.writable) return
+        // Never drop input silently.
+        //
+        // Every one of these guards used to `return` and say nothing, so a panel
+        // that could not write looked exactly like a shell that was ignoring the
+        // keyboard - which is exactly how "Ctrl-C and Ctrl-D do nothing, but
+        // everything else works" presents. A refusal is a fact the user has to be
+        // able to see, and the log line is how a device can be diagnosed without
+        // guessing which link broke.
+        if (!_terminal.value.writable) {
+            Log.w(
+                TAG,
+                "terminalWrite dropped: writable=false phase=${_terminal.value.phase} " +
+                    "attachment=${session.attachmentId} controller=" +
+                    "${_terminal.value.active?.controllerId} state=${_terminal.value.active?.state}",
+            )
+            publishTerminal(
+                issue = TerminalIssue.READ_ONLY,
+                error = terminalIssueFact(TerminalIssue.READ_ONLY),
+            )
+            return
+        }
         val attachment = session.attachmentId
         val bytes = data.toByteArray(Charsets.UTF_8).size
         // The host's own budget, counted the way the web client counts it: queued
@@ -976,7 +996,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         enqueueTerminalWrite {
             try {
                 if (terminalSession?.attachmentId == attachment) {
+                    Log.d(TAG, "terminalWrite ${bytes}B to $id via $attachment")
                     terminalClient.write(agentId, id, attachment, data)
+                } else {
+                    Log.w(
+                        TAG,
+                        "terminalWrite dropped late: attachment moved from $attachment to " +
+                            "${terminalSession?.attachmentId}",
+                    )
                 }
             } finally {
                 budget.release(bytes)
