@@ -101,6 +101,12 @@ fun DshTextField(
     keyboardType: KeyboardType = KeyboardType.Text,
     singleLine: Boolean = true,
     minHeight: Dp = 44.dp,
+    /**
+     * The field's own vertical inset around its text. A drawer's search box wants
+     * less than a form field does — it sits directly under the brand lockup, whose
+     * centred content already contributes a band of whitespace.
+     */
+    verticalPadding: Dp = DshSpacing.lg,
     /** When set, the caller drives focus — the directory browser auto-focuses its editors. */
     focusRequester: FocusRequester? = null,
 ) {
@@ -122,7 +128,7 @@ fun DshTextField(
                 .clip(shape)
                 .background(colors.selector)
                 .border(0.5.dp, colors.borderL2, shape)
-                .padding(horizontal = 14.dp, vertical = DshSpacing.lg),
+                .padding(horizontal = 14.dp, vertical = verticalPadding),
         ) {
             if (value.isEmpty()) {
                 Text(placeholder, style = DshType.messageBody, color = colors.labelCaption)

@@ -426,11 +426,14 @@ fun SessionsDrawer(
             .navigationBarsPadding()
             .padding(start = DshSpacing.lg, end = DshSpacing.lg, bottom = DshSpacing.sm),
     ) {
-        // Brand lockup — 60dp row, matching the web sidebar.
+        // Brand lockup — 48dp, a little tighter than the web sidebar's 60px row:
+        // its content is centred, so every dp of row height becomes dp of empty
+        // band above "Search sessions..." on a phone, where the drawer has no
+        // second row of chrome to fill it.
         Row(
             Modifier
                 .fillMaxWidth()
-                .height(60.dp),
+                .height(48.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             DshMark(size = 20.dp)
@@ -464,7 +467,10 @@ fun SessionsDrawer(
         // registered has no group at all. Left visible in the grouped case it was
         // the button that created a blank first and asked "where?" second.
         val newShape = RoundedCornerShape(DshRadius.card)
-        if (!groupByWorkspace || workspaces.isEmpty()) {
+        // The button's own visibility gates the separator below it: in the common
+        // case there is no button, so there is nothing to separate from the field.
+        val showNewButton = !groupByWorkspace || workspaces.isEmpty()
+        if (showNewButton) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -482,19 +488,21 @@ fun SessionsDrawer(
         }
         }
 
-        // Tight to what is above it. In the common case (grouped, a host with
-        // Workspaces) the New Session button is not drawn at all, so this gap is
-        // the whole distance from the 60dp brand lockup to the field — at 12dp it
-        // plus the lockup's own centred whitespace read as a band of nothing above
-        // "Search sessions...". Halved rather than removed: with the button drawn
-        // it is still the separator between it and the field.
-        Spacer(Modifier.height(DshSpacing.sm))
+        // Only a separator, and only when there is something to separate. With the
+        // New Session button drawn this sits between it and the field; in the common
+        // case (grouped, a host with Workspaces) that button is not drawn at all, and
+        // the band above "Search sessions..." used to be the lockup's own centred
+        // whitespace plus this spacer plus the field's inset — ~34dp of nothing.
+        if (showNewButton) Spacer(Modifier.height(DshSpacing.md))
 
         DshTextField(
             value = query,
             onValueChange = { query = it },
             placeholder = "Search sessions...",
             minHeight = 40.dp,
+            // Tighter than a form field: the drawer's chrome above it is a 48dp
+            // centred lockup, so its own inset is most of the remaining gap.
+            verticalPadding = DshSpacing.md,
         )
 
         Spacer(Modifier.height(DshSpacing.md))
