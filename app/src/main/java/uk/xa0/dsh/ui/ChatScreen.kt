@@ -1026,13 +1026,27 @@ fun ChatScreen(vm: DshViewModel) {
                     )
                 }
 
-                // Queue (dock order 20). Its bottom 3dp are tucked under the
+                // Queue (dock order 20). Its bottom edge is tucked under the
                 // composer card — the web's negative margin — so the two read as
                 // one surface; Column paints the later child over the earlier
                 // one, which is what hides the seam. The dock stays composed when
                 // the queue is empty so it can animate itself away, and its offset
                 // spans the composer's top gap as well: that keeps the composer
                 // still while the dock unfolds and sinks above it.
+                //
+                // How deep that tuck has to be is set by the card's own corner
+                // arc, not by the web's 3px. The dock is inset `md` (8dp) from the
+                // card on each side and the card is a `DshRadius.bubble` (22dp)
+                // capsule, so at the dock's own edge the arc already stands
+                //   `22 - sqrt(22^2 - (22 - 8)^2) = 5.03dp`
+                // below the card's flat top. A 3dp tuck therefore left background
+                // showing in the corner — measured at 420dpi (2.625 px/dp), a
+                // 4px-tall by 6px-wide wedge at each end (1.5dp x 2.3dp) where the
+                // dock's square corner and the card's arc curve away from each
+                // other. 7dp clears the 5.03dp arc at every density (both are dp)
+                // and leaves ~2dp of margin. QueueDock pays the extra 4dp out of
+                // its *bottom padding*, so the panel's visible top edge and its
+                // rows do not move; only the part the card covers grows.
                 //
                 // The extra `md` inset on each side is the web's
                 // `--dsh-composer-dock-inset` (8px): the panel is deliberately
@@ -1046,7 +1060,7 @@ fun ChatScreen(vm: DshViewModel) {
                 Box(
                     Modifier
                         .padding(horizontal = DshSpacing.xl + DshSpacing.md)
-                        .offset(y = DshSpacing.sm + 3.dp),
+                        .offset(y = DshSpacing.sm + 7.dp),
                 ) {
                     QueueDock(
                         items = ui.queue,

@@ -159,7 +159,14 @@ fun Composer(
                 .clip(shape)
                 .background(colors.inputMajor)
                 .border(0.5.dp, colors.borderL2, shape)
-                .padding(top = DshSpacing.md),
+                // 10dp, not `DshSpacing.md` (8dp) nor `lg` (12dp): the user asked
+                // for "the tiniest bit more" above the text row, and 10dp is the
+                // deliberate half-step between the two tokens. The card grows 2dp
+                // taller at its top only — the row below it keeps its seat, so
+                // the text does not move and the pills under the card are
+                // untouched. Measured at 420dpi: the card's top edge rises 5px
+                // (2dp) while the placeholder's cap row stays at the same y.
+                .padding(top = 10.dp),
         ) {
             if (attachments.isNotEmpty()) {
                 AttachmentRail(
