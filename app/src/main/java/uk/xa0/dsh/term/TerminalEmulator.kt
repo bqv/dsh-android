@@ -111,6 +111,16 @@ class TerminalEmulator(columns: Int, rows: Int, scrollback: Int = 1000) {
     var bellCount: Int = 0
         private set
 
+    /**
+     * `?2004`: the program wants pasted text marked as pasted.
+     *
+     * Off until a program asks, which is what makes it safe to wrap unconditionally
+     * when it is on: bracketed paste is opt-in precisely because a reader that does
+     * not know about it would otherwise see the markers as literal characters.
+     */
+    var bracketedPaste: Boolean = false
+        private set
+
     private var state = GROUND
     private var lastPrintable: Char = '\u0000'
     private var osc = StringBuilder()
@@ -432,6 +442,9 @@ class TerminalEmulator(columns: Int, rows: Int, scrollback: Int = 1000) {
                     1049 -> if (enabled) enterAlternateScreen() else leaveAlternateScreen()
                     47, 1047 -> if (enabled) enterAlternateScreen() else leaveAlternateScreen()
                     1048 -> if (enabled) saveCursor() else restoreCursor()
+                    // Bracketed paste: the program is asking for pasted text to be
+                    // marked as pasted. Read by the panel's Paste action.
+                    2004 -> bracketedPaste = enabled
                     else -> Unit // Mouse reporting and focus events are accepted and ignored.
                 }
             } else {

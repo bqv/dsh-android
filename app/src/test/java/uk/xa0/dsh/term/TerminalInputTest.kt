@@ -121,6 +121,28 @@ class TerminalInputTest {
 
     // --------------------------------------------------------------------- deletes
 
+    /**
+     * A paste is text, not keystrokes, and the two differences are the point.
+     *
+     * Newlines go out as CR — the byte a terminal's Enter is — so a Windows-style
+     * clipboard does not paste `\r\n` as two line breaks; and a program that asked
+     * for bracketed paste gets the markers, without which an editor re-indents the
+     * paste and a shell runs it line by line as it arrives.
+     */
+    @Test
+    fun `a paste is CR-delimited and bracketed only when the program asked`() {
+        assertEquals("ls -l\r", TerminalInput.pasteText("ls -l\n", bracketed = false))
+        assertEquals("a\rb", TerminalInput.pasteText("a\r\nb", bracketed = false))
+        assertEquals(
+            "\u001B[200~a\rb\u001B[201~",
+            TerminalInput.pasteText("a\nb", bracketed = true),
+        )
+        assertEquals("", TerminalInput.pasteText("", bracketed = true))
+        // Nothing to paste is nothing written, markers included: an empty bracketed
+        // paste would otherwise send a pair of escapes at a live prompt.
+        assertEquals("", TerminalInput.pasteText("", bracketed = false))
+    }
+
     /** DEL, never BS: the same choice `TerminalKeys` makes for the key row. */
     @Test
     fun `one delete is one DEL`() {

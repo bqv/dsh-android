@@ -24,6 +24,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -61,6 +62,7 @@ import uk.xa0.dsh.term.ATTR_UNDERLINE
 import uk.xa0.dsh.term.COLOR_DEFAULT
 import uk.xa0.dsh.term.COLOR_RGB_FLAG
 import uk.xa0.dsh.term.TerminalEmulator
+import uk.xa0.dsh.term.TerminalInput
 import uk.xa0.dsh.term.TerminalInfo
 import uk.xa0.dsh.term.TerminalIssue
 import uk.xa0.dsh.term.TerminalKey
@@ -487,6 +489,9 @@ private fun TerminalSurface(
             onCtrl = { ctrlArmed = !ctrlArmed },
             onKey = { key -> onWrite(TerminalKeys.key(key, applicationCursorKeys = emulator.applicationCursorKeys)) },
             onWrite = onWrite,
+            // Read when Paste is tapped, not when the row is composed: a full-screen
+            // program turns bracketed paste on and off as it starts and exits.
+            bracketedPaste = { emulator.bracketedPaste },
         )
     }
 }
@@ -504,7 +509,9 @@ private fun TerminalKeyRow(
     onCtrl: () -> Unit,
     onKey: (TerminalKey) -> Unit,
     onWrite: (String) -> Unit,
+    bracketedPaste: () -> Boolean,
 ) {
+    val clipboard = LocalClipboardManager.current
     val colors = DshTheme.colors
     Row(
         Modifier
@@ -524,6 +531,13 @@ private fun TerminalKeyRow(
         // covers the rest of the alphabet for anyone who wants Ctrl+A or Ctrl+Z.
         KeyCap("^D") { onWrite("\u0004") }
         KeyCap("Ctrl", active = ctrlArmed, onClick = onCtrl)
+        // Paste is a cap because nothing else can do it here: the editor is
+        // `TYPE_NULL`, so a keyboard's own clipboard button never offers itself, and
+        // the long-press paste menu belongs to a text field this view is not.
+        KeyCap("Paste") {
+            val text = clipboard.getText()?.text
+            if (!text.isNullOrEmpty()) onWrite(TerminalInput.pasteText(text, bracketedPaste()))
+        }
         KeyCap("\u2190") { onKey(TerminalKey.LEFT) }
         KeyCap("\u2191") { onKey(TerminalKey.UP) }
         KeyCap("\u2193") { onKey(TerminalKey.DOWN) }

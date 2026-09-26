@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -925,6 +926,13 @@ fun ChatScreen(vm: DshViewModel) {
                     }
                     items(items = rows, key = { it.key }) { row ->
                             Box(Modifier.widthIn(max = 920.dp)) {
+                              // Text in a Compose row is not selectable until it is
+                              // inside a SelectionContainer, and on the web every one
+                              // of these rows is. It is per row rather than around the
+                              // list: a selection that spans two lazily-composed
+                              // items loses its ends when either is recycled, and
+                              // "copy this answer" is the case that matters.
+                              SelectionContainer {
                               Column {
                                 when (row) {
                                     is DisplayRow.Single -> when (val entry = row.entry) {
@@ -991,6 +999,7 @@ fun ChatScreen(vm: DshViewModel) {
                                         },
                                     )
                                 }
+                              }
                               }
                             }
                         }

@@ -158,6 +158,28 @@ object TerminalInput {
     }
 
     /**
+     * Clipboard text as the PTY should receive it.
+     *
+     * Two decisions, and a naive `write(clipboard)` gets both wrong:
+     *
+     * - Newlines become carriage returns. A terminal's Enter *is* CR, and that is what
+     *   a program in raw mode is reading for; the shell's line discipline maps one to
+     *   the other in canonical mode, so CR is right in both. Windows-style text
+     *   therefore does not paste a `\r\n` pair as two line breaks.
+     * - When the program has asked for **bracketed paste** (`?2004`) the text is
+     *   wrapped in `ESC[200~ … ESC[201~`. Without the markers a paste is
+     *   indistinguishable from typing, so an editor auto-indents every line of it and
+     *   a shell runs it line by line as it arrives.
+     *
+     * @param bracketed the terminal's `?2004` state — the *program's* request, not ours
+     */
+    fun pasteText(clipboard: String, bracketed: Boolean): String {
+        val text = clipboard.replace("\r\n", "\r").replace('\n', '\r')
+        if (text.isEmpty()) return text
+        return if (bracketed) "\u001B[200~$text\u001B[201~" else text
+    }
+
+    /**
      * The bytes a `deleteSurroundingText` request means.
      *
      * One DEL per character to the left. The stock Samsung keyboard with "Auto check
