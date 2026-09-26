@@ -112,16 +112,21 @@ fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
     // abbreviated to "Cache" for the same reason — 20dp of headroom — and the
     // panel spells the full wording out.
     //
-    // Start-aligned (not centred) and aligned to the composer card's own edges,
-    // as before: centring a two-chip row left it floating with ~103dp of dead
-    // space on each side while sitting 6dp from the card above and 6dp from the
-    // navigation inset below.
+    // Each chip is also pinned to its own end of the card: the counts chip begins
+    // at the composer card's left edge and the usage chip ends at its right edge,
+    // with the slack absorbed between them. Two chips left-aligned with dead space
+    // to their right read as a stranded pair rather than as the card's own footer,
+    // and centring the pair was measured worse still — ~103dp of dead space on
+    // each side. The fill only exists while both chips are drawn: a lone chip
+    // keeps the left edge rather than being pushed right by an empty middle.
+    val showCounts = stats.steps > 0
+    val showUsage = stats.hasTokenActivity
     Row(
         modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(DshSpacing.md),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (stats.steps > 0) {
+        if (showCounts) {
             val counts = "${stats.turns} turns ${stats.steps} steps"
             val speed = stats.tokensPerSecondText
             StatPillButton(
@@ -146,7 +151,8 @@ fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
                 }
             }
         }
-        if (stats.hasTokenActivity) {
+        if (showCounts && showUsage) Spacer(Modifier.weight(1f))
+        if (showUsage) {
             val cacheHit = stats.cacheHitPercent
             StatPillButton(
                 icon = Icons.Rounded.Storage,
