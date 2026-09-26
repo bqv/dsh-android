@@ -28,6 +28,7 @@ import uk.xa0.dsh.data.BusyEnter
 import uk.xa0.dsh.data.DshConfig
 import uk.xa0.dsh.data.ThemeMode
 import uk.xa0.dsh.model.ChatEntry
+import uk.xa0.dsh.model.JobsMarker
 import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.MessageAttachment
 import uk.xa0.dsh.model.PendingSessionTarget
@@ -532,8 +533,10 @@ data class UiState(
     /** Background jobs the host reports for the open session. */
     val jobs: List<JobItem> = emptyList(),
     /**
-     * A job finished since the list was last opened — the jobs seat's green dot.
-     * Purely client-side, like the session rows' finished-unseen marker.
+     * A job finished in the **open** session since its list was last opened — the
+     * jobs seat's green dot. Purely client-side, like the session rows'
+     * finished-unseen marker, and per session: the unseen sessions are held in a
+     * set and only the open one's membership is published here.
      */
     val jobsFinishedUnseen: Boolean = false,
     val attachments: List<PendingAttachment> = emptyList(),
@@ -1700,6 +1703,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private val pendingSubmissions = java.util.concurrent.ConcurrentHashMap<String, List<QueuedMessage>>()
     /** Latest background jobs per session, from the same stream. */
     private val jobsBySession = java.util.concurrent.ConcurrentHashMap<String, List<JobItem>>()
+    /**
+     * Sessions whose jobs settled since their list was last opened.
+     *
+     * Per session, not one app-wide flag: a job finishing in another session must
+     * not light the seat of the session on screen. The open session's membership
+     * is what [UiState.jobsFinishedUnseen] publishes. Written only from the control
+     * stream and the UI, both on the main dispatcher; the update rules themselves
+     * live in [JobsMarker].
+     */
+    private var finishedUnseenSessions: Set<String> = emptySet()
     /** Folded projection values for the open session, merged from control deltas. */
     private var liveProjections: JSONObject? = null
     private var lastEventAt: Long = 0L
@@ -2486,23 +2499,29 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             "baseline" -> {
                 val payload = value.obj("value") ?: return
                 queues.clear()
-                // A baseline is the whole world: any session missing from it has
-                // no jobs, so keeping the old map would strand finished rows.
-                jobsBySession.clear()
                 payload.obj("queues")?.let { all ->
                     all.keys().forEach { sessionId ->
                         queues[sessionId] = parseQueue(all.optJSONArray(sessionId))
                     }
                 }
-                val openSession = _ui.value.currentSessionId
-                if (openSession != null) {
-                    payload.obj("jobs")?.let { all ->
-                        all.keys().forEach { sessionId ->
-                            jobsBySession[sessionId] = parseJobs(all.optJSONArray(sessionId))
-                        }
+                // A baseline is an observation too: a job that settled across a
+                // reconnect should light its own seat. So the map is compared and
+                // then pruned, not cleared first — clearing would erase the
+                // outgoing list before [observeJobs] could compare against it.
+                val seeded = HashSet<String>()
+                val jobsBlock = payload.obj("jobs")
+                if (jobsBlock != null) {
+                    jobsBlock.keys().forEach { sessionId ->
+                        seeded.add(sessionId)
+                        observeJobs(sessionId, parseJobs(jobsBlock.optJSONArray(sessionId)))
                     }
-                    publishJobsForCurrent()
                 }
+                // A baseline is the whole world: any session missing from it has no
+                // jobs, so keeping the old entry would strand finished rows. That is
+                // a drop, not a settle — the session is gone from the host registry,
+                // so there is no seat left to mark.
+                jobsBySession.keys.retainAll(seeded)
+                publishJobsForCurrent()
                 // Seed the open session's folded projections so a control delta
                 // that only carries one key still has its siblings in hand.
                 val current = _ui.value.currentSessionId
@@ -2525,8 +2544,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
             "jobs" -> {
                 val sessionId = value.str("sessionId")
-                if (sessionId.isEmpty() || sessionId != _ui.value.currentSessionId) return
-                publishJobs(parseJobs(value.arr("jobs")))
+                if (sessionId.isEmpty()) return
+                // Recorded for every session, not only the open one: the host
+                // pushes one `jobs` frame per changed session, and that is the only
+                // way a job finishing elsewhere can light *its* seat rather than
+                // this one's.
+                recordJobs(sessionId, parseJobs(value.arr("jobs")))
             }
 
             "projection" -> {
@@ -2659,28 +2682,47 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------- jobs
 
     /**
-     * Publishes one `jobs` frame for the open session.
+     * Records one observation of a session's job list.
      *
-     * A job that finishes while the list is closed raises the seat's finished
-     * marker, the same convention the session rows use for a turn that ended
-     * while you were elsewhere.
+     * The finished transition is judged here, against **this session's own**
+     * previous list — [jobsBySession] still holds it when the new one is written
+     * — never against the list currently published. Comparing against the
+     * published list is what made the first `jobs` frame after a switch read as a
+     * finish: it was the *other* session's list on the left of the comparison.
+     *
+     * A session's first observation has no previous list, so it never settles
+     * ([JobsMarker.settled]); a session you have never viewed is marked only when
+     * a later observation shows it losing its running job.
      */
-    private fun publishJobs(items: List<JobItem>) {
-        val current = _ui.value.currentSessionId ?: return
-        jobsBySession[current] = items
-        publishJobsForCurrent()
+    private fun observeJobs(sessionId: String, items: List<JobItem>) {
+        val previous = jobsBySession.put(sessionId, items).orEmpty()
+        finishedUnseenSessions = JobsMarker.observed(finishedUnseenSessions, sessionId, previous, items)
     }
 
-    /** Publishes whichever job list belongs to the session now on screen. */
+    /**
+     * Records one `jobs` frame and republishes when it belongs to the open
+     * session. Frames for other sessions are kept too: their transition is what
+     * lights their own seat.
+     */
+    private fun recordJobs(sessionId: String, items: List<JobItem>) {
+        observeJobs(sessionId, items)
+        if (sessionId == _ui.value.currentSessionId) publishJobsForCurrent()
+    }
+
+    /**
+     * Publishes the open session's list and whether *its* seat carries the
+     * finished marker.
+     *
+     * No open session (the pending hero from deferred creation) publishes an
+     * empty list and no dot, so a session switched away from cannot leave its
+     * jobs — or its marker — on screen.
+     */
     private fun publishJobsForCurrent() {
         val current = _ui.value.currentSessionId
         val items = current?.let { jobsBySession[it] }.orEmpty()
-        val previous = _ui.value.jobs
-        val finishedNow = previous.any { it.running } && items.none { it.running }
-        _ui.value = _ui.value.copy(
-            jobs = items,
-            jobsFinishedUnseen = _ui.value.jobsFinishedUnseen || finishedNow,
-        )
+        val unseen = JobsMarker.unseenFor(finishedUnseenSessions, current)
+        if (items == _ui.value.jobs && unseen == _ui.value.jobsFinishedUnseen) return
+        _ui.value = _ui.value.copy(jobs = items, jobsFinishedUnseen = unseen)
     }
 
     private fun parseJobs(array: JSONArray?): List<JobItem> {
@@ -2699,11 +2741,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Opening the jobs list clears its finished marker. */
+    /**
+     * Opening one session's jobs list clears that session's finished marker.
+     *
+     * Only the viewed session's membership leaves [finishedUnseenSessions];
+     * another session's dot survives being passed over.
+     */
     fun markJobsSeen() {
-        if (_ui.value.jobsFinishedUnseen) {
-            _ui.value = _ui.value.copy(jobsFinishedUnseen = false)
-        }
+        val current = _ui.value.currentSessionId ?: return
+        finishedUnseenSessions = JobsMarker.seen(finishedUnseenSessions, current)
+        if (_ui.value.jobsFinishedUnseen) publishJobsForCurrent()
     }
 
     // ------------------------------------------------------------- references
@@ -2975,11 +3022,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             errorNeedsSignIn = false,
             queue = emptyList(),
             queueBusy = null,
-            jobs = emptyList(),
             // Uploads are bound to the session they were staged for, so a receipt
             // from the session being left would be refused by the host.
             attachments = emptyList(),
         )
+        // No session is open, so the seat publishes an empty list and no dot. The
+        // jobs the session being left had, and its marker, stay keyed to it.
+        publishJobsForCurrent()
         app.attention.visibleSessionId = null
     }
 
@@ -4067,6 +4116,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // unknown until the read below lands.
             subagentParentAvailable = null,
         )
+        // Re-publish this session's jobs and its own finished marker. Without this
+        // the seat kept the previous session's list — and judged the first `jobs`
+        // frame after the switch against it — until that session happened to send.
+        publishJobsForCurrent()
         _todos.value = emptyList()
         app.attention.visibleSessionId = sessionId
         // The follow snapshot carries this session's projections; drop the
