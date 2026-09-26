@@ -30,6 +30,8 @@ import uk.xa0.dsh.data.ThemeMode
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.MessageAttachment
+import uk.xa0.dsh.model.PendingSessionTarget
+import uk.xa0.dsh.model.SessionIntentPlan
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
 import uk.xa0.dsh.model.SessionSearch
@@ -62,6 +64,7 @@ import uk.xa0.dsh.model.obj
 import uk.xa0.dsh.model.parseSessionSearchResults
 import uk.xa0.dsh.model.parseSessionStats
 import uk.xa0.dsh.model.parseHostSettings
+import uk.xa0.dsh.model.permissionCommandMode
 import uk.xa0.dsh.model.parseSubagentCatalog
 import uk.xa0.dsh.model.str
 import uk.xa0.dsh.model.subagentInterruptArgs
@@ -417,6 +420,16 @@ data class PendingQuestionSet(
     val subjectIsSubagent: Boolean = false,
 )
 
+/**
+ * A submit's text, handed back to the composer because it was never delivered.
+ *
+ * The composer owns the draft and clears it on the tap, so a failed
+ * materialisation (or a failed prompt) would otherwise lose what the user typed.
+ * [nonce] distinguishes two failures carrying the same sentence, so the composer's
+ * `LaunchedEffect` re-runs for the second one instead of treating it as unchanged.
+ */
+data class DraftRestore(val text: String, val nonce: Long)
+
 data class UiState(
     val phase: AppPhase = AppPhase.LOADING,
     val busy: Boolean = false,
@@ -445,6 +458,24 @@ data class UiState(
     val sessionSearchError: String? = null,
     val sessionSearchHasMore: Boolean = false,
     val currentSessionId: String? = null,
+    /**
+     * The new-session seat with **no session behind it**: a recorded target.
+     *
+     * Distinct from `currentSessionId == null`, which also covers a cold start with
+     * nothing to reopen and the instant while sessions swap. When this is set the
+     * hero is showing a session that has deliberately not been created yet —
+     * `session/create` is deferred to the seat's first real use (see
+     * [uk.xa0.dsh.model.SessionTargets.intent] / [materializePending]). Null means
+     * the hero is not asking for a new session at all.
+     */
+    val pendingSession: PendingSessionTarget? = null,
+    /**
+     * Text handed back to the composer after a submit that never reached a session,
+     * so a send made from the pending seat is not swallowed by a failed
+     * `session/create`. [DraftRestore.nonce] makes two identical failures both
+     * land, which a bare String could not.
+     */
+    val draftRestore: DraftRestore? = null,
     val running: Boolean = false,
     /**
      * The journal has closed this session's own turn, whatever the agent registry
@@ -706,6 +737,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * an unrelated (often empty) session.
      */
     private var explicitSession: String? = null
+
+    /**
+     * Monotone tag for [UiState.draftRestore]. The composer restores on change, and
+     * two identical failed sends must both land — a bare String would compare equal
+     * and the second restore would be ignored.
+     */
+    private var draftRestoreNonce = 0L
 
     /** True while a resume re-sync is running, so two resumes cannot stack. */
     private var resumeResyncInFlight = false
@@ -1990,6 +2028,21 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Hands [text] back to the composer after a send that never landed on a host
+     * session. Blank text is nothing to give back — a failed attachment-only send
+     * still has its receipt on the rail.
+     */
+    private fun restoreDraft(text: String) {
+        if (text.isBlank()) return
+        _ui.value = _ui.value.copy(draftRestore = DraftRestore(text, ++draftRestoreNonce))
+    }
+
+    /** The composer has taken the restored draft; clear it so it cannot re-apply. */
+    fun consumeDraftRestore() {
+        _ui.value = _ui.value.copy(draftRestore = null)
+    }
+
+    /**
      * The banner's action for an auth failure: go to sign-in with the stored
      * host and username already in the fields.
      *
@@ -2380,6 +2433,17 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             if (target != null) {
                 if (explicit != null) Log.d(TAG, "connect honoured explicit session $explicit")
                 openSession(target)
+            } else {
+                // The host holds no session at all: show the pending seat for the
+                // default Workspace rather than an empty hero. Nothing is created —
+                // the seat's target is only recorded, and the first send (or the
+                // first command, or the first staged file) is what creates.
+                preferredWorkspaceId()?.let { workspaceId ->
+                    val path = _ui.value.workspaces.firstOrNull { it.id == workspaceId }?.path
+                    enterPendingSession(
+                        PendingSessionTarget(SessionTarget.Workspace(workspaceId, path)),
+                    )
+                }
             }
         }
     }
@@ -2847,10 +2911,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Starts (or reuses, or adopts) a blank session inside a registered workspace.
      *
-     * The choice itself lives in [SessionTargets.plan] so that this path, the
+     * The choice itself lives in [SessionTargets.intent] so that this path, the
      * drawer's New Session, the per-workspace `+` and a typed directory all take
-     * the same decision; what is left here is turning the plan into the one call
-     * it names. Reuse demands *membership*, not just a matching directory: the
+     * the same decision. A blank the Workspace already holds is opened, a blank
+     * rooted at its path is adopted, and **nothing is created**: the workspace
+     * becomes the pending hero's recorded target, and `session/create` waits for
+     * first use. Reuse demands *membership*, not just a matching directory: the
      * host only puts a session in a workspace when it was created through
      * `workspaceId`, so a blank sitting at the right cwd but attached to nothing
      * is not the session the user means — the web draws the same distinction. An
@@ -2864,20 +2930,97 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Resolves a [SessionTarget] and performs the one action the plan names.
+     * Resolves a [SessionTarget] and performs the one action the intent names.
      *
-     * `Adopt` is the idempotent `session/create` with both ids; `Reuse` opens a
-     * session that is already the one meant and sends nothing; `Create` is the
-     * only branch that can add a row to the drawer.
+     * `Adopt` is the idempotent `session/create` with both ids; `Open` opens a
+     * session that is already the one meant and sends nothing; `Record` is the
+     * branch that used to create — it now **shows the pending hero** and issues no
+     * request at all, which is what stops a workspace pick from littering a blank.
      */
     private fun startSessionAt(target: SessionTarget) {
-        val plan = SessionTargets.plan(target, _ui.value.currentSessionId, sessionTargetCandidates())
+        val plan = SessionTargets.intent(
+            target = target,
+            preset = newSessionPreset(),
+            currentSessionId = _ui.value.currentSessionId,
+            candidates = sessionTargetCandidates(),
+        )
         when (plan) {
-            is SessionTargetPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
-            is SessionTargetPlan.Reuse -> openSession(plan.sessionId)
-            is SessionTargetPlan.Create ->
-                createSessionNow(plan.cwd, newSessionPreset(), plan.workspaceId)
+            is SessionIntentPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
+            is SessionIntentPlan.Open -> openSession(plan.sessionId)
+            is SessionIntentPlan.Record -> enterPendingSession(plan.pending)
         }
+    }
+
+    /**
+     * Shows the new-session hero over [pending] and creates nothing.
+     *
+     * Leaving a session this way is deliberately quiet: the session that *was* open
+     * is not touched (it exists, and the host has no delete RPC), but its follow
+     * stream is cancelled and the reducer reset so the pending hero is not painted
+     * with the previous session's transcript. This is the only path that sets
+     * [UiState.pendingSession], and it is the whole of "the drawer's `+` no longer
+     * leaves an empty session behind".
+     */
+    private fun enterPendingSession(pending: PendingSessionTarget) {
+        if (_ui.value.currentSessionId == null && _ui.value.pendingSession == pending) return
+        followJob?.cancel()
+        historyJob?.cancel()
+        reducer.reset()
+        publishTranscript()
+        _ui.value = _ui.value.copy(
+            currentSessionId = null,
+            pendingSession = pending,
+            running = false,
+            error = null,
+            errorNeedsSignIn = false,
+            queue = emptyList(),
+            queueBusy = null,
+            jobs = emptyList(),
+            // Uploads are bound to the session they were staged for, so a receipt
+            // from the session being left would be refused by the host.
+            attachments = emptyList(),
+        )
+        app.attention.visibleSessionId = null
+    }
+
+    /**
+     * Creates (or reuses) the session the pending seat recorded, and opens it.
+     *
+     * This is **first use**: the one place a deferred [SessionIntentPlan.Record]
+     * can turn into a session. Order is load-bearing — the plan is re-resolved
+     * against the live roster, the one call it names runs, the seat is cleared, and
+     * only then is the session opened, so no caller can observe a pending seat on
+     * top of an open session. Returns the session id, or null after surfacing the
+     * failure through the banner (the caller must not deliver into a null id).
+     */
+    private suspend fun materializePending(pending: PendingSessionTarget): String? {
+        _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
+        val plan = SessionTargets.materialize(pending, sessionTargetCandidates())
+        val id = try {
+            when (plan) {
+                is SessionTargetPlan.Reuse -> plan.sessionId
+                is SessionTargetPlan.Adopt -> adoptSessionNow(plan.sessionId, plan.workspaceId)
+                is SessionTargetPlan.Create -> createSessionRequest(plan.cwd, pending.preset, plan.workspaceId)
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            _ui.value = _ui.value.copy(busy = false)
+            showFailure(error, "session/create")
+            return null
+        }
+        if (id == null) return null
+        // The recorded access mode is applied before anything is sent, because a
+        // mode change is refused while a turn is in flight; a refusal is reported
+        // but does not lose the send.
+        pending.permission?.let { mode ->
+            runCatching { runCommandFor(id, "/permission $mode").getOrThrow() }
+                .onSuccess { _ui.value = _ui.value.copy(currentPermission = mode) }
+                .onFailure { showFailure(it, "commands/execute", "Could not switch access mode: ") }
+        }
+        _ui.value = _ui.value.copy(busy = false, pendingSession = null)
+        openSession(id)
+        return id
     }
 
     /**
@@ -2920,23 +3063,41 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun adoptSession(sessionId: String, workspaceId: String) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
-            runCatching {
-                val request = JSONObject().put("sessionId", sessionId).put("workspaceId", workspaceId)
-                client.rpc("session/create", JSONObject().put("request", request))
-            }.onSuccess { value ->
-                val id = value.optString("sessionId").ifEmpty { sessionId }
-                _ui.value = _ui.value.copy(busy = false)
-                refreshSessions()
-                openSession(id)
-            }.onFailure { error ->
-                _ui.value = _ui.value.copy(busy = false)
-                if ((error as? DshRpcException)?.code == SESSION_CONFLICT) {
-                    refreshSessions()
-                    createSessionNow(null, newSessionPreset(), workspaceId)
-                } else {
+            runCatching { adoptSessionNow(sessionId, workspaceId) }
+                .onSuccess { id ->
+                    _ui.value = _ui.value.copy(busy = false)
+                    if (id != null) openSession(id)
+                }
+                .onFailure { error ->
+                    // A `session/conflict` never reaches here: [adoptSessionNow]
+                    // turns it into the create the plan would have chosen.
+                    _ui.value = _ui.value.copy(busy = false)
                     showFailure(error, "session/create")
                 }
-            }
+        }
+    }
+
+    /**
+     * The adopt call itself, suspending so [materializePending] can await it.
+     *
+     * A `session/conflict` means the roster lied about the directory — the adopt
+     * was refused before the workspace attach — so it falls back to the create the
+     * plan would have chosen; the pick still lands, it just costs the blank the
+     * roster promised could be adopted.
+     */
+    private suspend fun adoptSessionNow(sessionId: String, workspaceId: String): String? {
+        val request = JSONObject().put("sessionId", sessionId).put("workspaceId", workspaceId)
+        return try {
+            val value = client.rpc("session/create", JSONObject().put("request", request))
+            val id = value.optString("sessionId").ifEmpty { sessionId }
+            refreshSessions()
+            id
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: DshRpcException) {
+            if (error.code != SESSION_CONFLICT) throw error
+            refreshSessions()
+            createSessionRequest(null, newSessionPreset(), workspaceId)
         }
     }
 
@@ -3885,6 +4046,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         Log.d(TAG, "openSession $sessionId")
         _ui.value = _ui.value.copy(
             currentSessionId = sessionId,
+            // The seat is spent the moment a real session is on screen; leaving it
+            // set would let a later send try to materialise over an open session.
+            pendingSession = null,
             running = _ui.value.sessions.firstOrNull { it.id == sessionId }?.running ?: false,
             error = null,
             errorNeedsSignIn = false,
@@ -4027,41 +4191,65 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             )
             !cwd.isNullOrBlank() -> SessionTarget.Directory(cwd)
             // No target at all: the host's own default directory. There is nothing
-            // to match against, so the plan has no opinion and a create is honest.
+            // to record and nothing to match against, so the plan has no opinion and
+            // a create is honest. No UI path reaches this — every entry point in the
+            // app names a Workspace or a directory — so it stays the one eager form.
             else -> null
         }
-        when (val plan = target?.let {
-            SessionTargets.plan(it, _ui.value.currentSessionId, sessionTargetCandidates())
-        }) {
-            is SessionTargetPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
-            is SessionTargetPlan.Reuse -> openSession(plan.sessionId)
-            is SessionTargetPlan.Create -> createSessionNow(plan.cwd, preset, plan.workspaceId)
-            null -> createSessionNow(cwd, preset, workspaceId)
+        if (target == null) {
+            createSessionNow(cwd, preset, workspaceId)
+            return
+        }
+        when (
+            val plan = SessionTargets.intent(
+                target = target,
+                preset = preset,
+                currentSessionId = _ui.value.currentSessionId,
+                candidates = sessionTargetCandidates(),
+            )
+        ) {
+            is SessionIntentPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
+            is SessionIntentPlan.Open -> openSession(plan.sessionId)
+            is SessionIntentPlan.Record -> enterPendingSession(plan.pending)
         }
     }
 
-    /** The unconditional `session/create`. The only code that can add a row. */
+    /**
+     * The unconditional `session/create`, suspending. **The only code that can add
+     * a session row.**
+     *
+     * Split from the firing [createSessionNow] so [materializePending] can await the
+     * one call that must happen before a send, and surface its failure on the send's
+     * own terms.
+     */
+    private suspend fun createSessionRequest(cwd: String?, preset: String?, workspaceId: String?): String {
+        val request = JSONObject()
+        if (!workspaceId.isNullOrBlank()) {
+            request.put("workspaceId", workspaceId)
+        } else if (!cwd.isNullOrBlank()) {
+            request.put("cwd", cwd)
+        }
+        if (!preset.isNullOrBlank()) request.put("agentPreset", preset)
+        val value = client.rpc("session/create", JSONObject().put("request", request))
+        val id = value.optString("sessionId")
+        check(id.isNotEmpty()) { "session/create answered without a sessionId" }
+        refreshSessions()
+        return id
+    }
+
+    /** The unconditional `session/create`, launched. The only code that can add a row. */
     private fun createSessionNow(cwd: String?, preset: String?, workspaceId: String?) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
-            runCatching {
-                val request = JSONObject()
-                if (!workspaceId.isNullOrBlank()) {
-                    request.put("workspaceId", workspaceId)
-                } else if (!cwd.isNullOrBlank()) {
-                    request.put("cwd", cwd)
+            runCatching { createSessionRequest(cwd, preset, workspaceId) }
+                .onSuccess { id ->
+                    _ui.value = _ui.value.copy(busy = false)
+                    openSession(id)
                 }
-                if (!preset.isNullOrBlank()) request.put("agentPreset", preset)
-                client.rpc("session/create", JSONObject().put("request", request))
-            }.onSuccess { value ->
-                val id = value.optString("sessionId")
-                _ui.value = _ui.value.copy(busy = false)
-                refreshSessions()
-                if (id.isNotEmpty()) openSession(id)
-            }.onFailure { error ->
-                _ui.value = _ui.value.copy(busy = false)
-                showFailure(error, "session/create")
-            }
+                .onFailure { error ->
+                    _ui.value = _ui.value.copy(busy = false)
+                    showFailure(error, "session/create")
+                }
         }
     }
 
@@ -4076,6 +4264,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * Ungrouped — the host only accounts a session to a Workspace when it was
      * created through `workspaceId`. [cwd] is only the fallback for a host with no
      * registered Workspace at all, where Ungrouped is the correct home.
+     *
+     * Like every other entry point this **records** the resolved target: a tap on
+     * New Session from the hero cannot leave a blank in the Workspace being left.
      */
     fun startSession(cwd: String? = null) {
         preferredWorkspaceId()?.let { workspaceId ->
@@ -4187,13 +4378,69 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * On an addressed child the same call goes out as `subagents/prompt` with
      * [mode] travelling as `delivery`: that is what makes a child's composer
      * reach the child, instead of a `session/prompt` the host has no route for.
+     *
+     * With no open session this is the pending seat's **first use**: the session
+     * is created, opened, and only then is this very prompt delivered — see
+     * [sendFromPending]. Text and attachments are captured here, before the
+     * session switch clears them, so neither can be dropped.
      */
     fun send(text: String, mode: String = BusyEnter.QUEUE) {
-        val sessionId = _ui.value.currentSessionId ?: return
         val riding = _ui.value.attachments
         // An attachment on its own is a complete message: a screenshot with no
         // caption is an ordinary thing to send.
         if (text.isBlank() && riding.isEmpty()) return
+        val sessionId = _ui.value.currentSessionId
+        if (sessionId != null) {
+            dispatchSend(sessionId, text, riding, mode, restoreOnFailure = false)
+            return
+        }
+        val pending = _ui.value.pendingSession ?: return
+        sendFromPending(pending, text, riding, mode)
+    }
+
+    /**
+     * The **first use** of a pending seat: create (or reuse) the session in the
+     * recorded target, open it, and only then deliver the very same text and
+     * attachments.
+     *
+     * The order is the guarantee. `session/create` → `openSession` →
+     * `session/prompt`, with `text` and `riding` captured by [send] *before*
+     * materialisation so a session switch (which clears `attachments`) cannot drop
+     * them. A failure at the create/adopt step is surfaced through the banner and
+     * the text is handed back to the composer, so the send is neither lost nor
+     * half-applied: nothing was echoed and nothing was sent.
+     */
+    private fun sendFromPending(
+        pending: PendingSessionTarget,
+        text: String,
+        riding: List<PendingAttachment>,
+        mode: String,
+    ) {
+        viewModelScope.launch {
+            val id = materializePending(pending)
+            if (id == null) {
+                // `materializePending` has already published the banner; the one
+                // thing left is not to swallow what the user typed.
+                restoreDraft(text)
+                return@launch
+            }
+            dispatchSend(id, text, riding, mode, restoreOnFailure = true)
+        }
+    }
+
+    /**
+     * Echos one submission and sends it. [restoreOnFailure] hands the text back to
+     * the composer when the prompt itself is refused — set for a send that came off
+     * the pending seat, where the reader has already had one failure mode reported
+     * and the draft is the only copy of what they wrote.
+     */
+    private fun dispatchSend(
+        sessionId: String,
+        text: String,
+        riding: List<PendingAttachment>,
+        mode: String,
+        restoreOnFailure: Boolean,
+    ) {
         val requestId = UUID.randomUUID().toString()
         // The content is built before anything is echoed, because an addressed
         // child refuses a staged file *client-side* and must not pretend to have
@@ -4290,6 +4537,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 bumpTranscript()
                 _ui.value = _ui.value.copy(running = false)
                 showFailure(error, if (child != null) "subagents/prompt" else "session/prompt")
+                if (restoreOnFailure) restoreDraft(text)
             }
             refreshSessionsSoon()
         }
@@ -4797,6 +5045,19 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * the name the host resolves its live agent from; the preset is `agentPreset`.
      */
     fun selectAgentPreset(id: String) {
+        // On the pending seat there is no agent to select for: the choice is
+        // recorded and travels as `agentPreset` on the `session/create` that first
+        // use makes. Picking a preset by itself must not create the session.
+        val pending = _ui.value.pendingSession
+        if (_ui.value.currentSessionId == null && pending != null) {
+            _ui.value = _ui.value.copy(
+                pendingSession = pending.copy(preset = id),
+                currentAgentPreset = id,
+                error = null,
+                errorNeedsSignIn = false,
+            )
+            return
+        }
         val sessionId = _ui.value.currentSessionId ?: return
         val blank = _ui.value.sessions.firstOrNull { it.id == sessionId }?.blank == true
         if (!blank) {
@@ -4919,6 +5180,19 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setPermission(preset: String) {
+        // On the pending seat there is no session to run `/permission` in. The mode
+        // is *recorded* and applied by [materializePending] before anything is sent,
+        // so choosing access by itself never creates a session.
+        val pending = _ui.value.pendingSession
+        if (_ui.value.currentSessionId == null && pending != null) {
+            _ui.value = _ui.value.copy(
+                pendingSession = pending.copy(permission = preset),
+                currentPermission = preset,
+                error = null,
+                errorNeedsSignIn = false,
+            )
+            return
+        }
         viewModelScope.launch {
             runCommand("/permission $preset")
                 .onSuccess {
@@ -4931,8 +5205,30 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Runs a bare slash command from the composer's command menu. */
+    /**
+     * Runs a bare slash command from the composer's command menu.
+     *
+     * On the pending seat `/permission <mode>` is recorded instead (the chip's own
+     * path, above); anything else is a command that needs a session to run in, so
+     * it **materialises** the seat first. That is this path's answer to "what is
+     * first use": a command the reader chose is work, not a configuration tap.
+     */
     fun executeCommand(line: String) {
+        val pending = _ui.value.pendingSession
+        if (_ui.value.currentSessionId == null && pending != null) {
+            val mode = permissionCommandMode(line)
+            if (mode != null) {
+                setPermission(mode)
+                return
+            }
+            viewModelScope.launch {
+                val id = materializePending(pending) ?: return@launch
+                runCommandFor(id, line).onFailure {
+                    showFailure(it, "commands/execute", "Command failed: ")
+                }
+            }
+            return
+        }
         viewModelScope.launch {
             runCommand(line).onFailure {
                 showFailure(it, "commands/execute", "Command failed: ")
@@ -4957,9 +5253,27 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * envelope and response shape are known, so failures surface as structured
      * host errors instead of an opaque HTTP code. The cost is base64 inflation,
      * which is why there is a size cap.
+     *
+     * An upload is scoped to a session (`agentId`), so staging a file from the
+     * pending seat is **first use**: the seat is materialised, and the file is
+     * staged in the session that resulted. Deferring the upload instead would mean
+     * holding file bytes and a content URI across a create, which is more state
+     * than the one guarantee (no orphan session) needs.
      */
     fun addAttachment(uri: Uri) {
-        val sessionId = _ui.value.currentSessionId ?: return
+        val sessionId = _ui.value.currentSessionId
+        if (sessionId == null) {
+            val pending = _ui.value.pendingSession ?: return
+            viewModelScope.launch {
+                val id = materializePending(pending) ?: return@launch
+                stageAttachment(id, uri)
+            }
+            return
+        }
+        stageAttachment(sessionId, uri)
+    }
+
+    private fun stageAttachment(sessionId: String, uri: Uri) {
         val resolver = getApplication<Application>().contentResolver
         val id = UUID.randomUUID().toString()
         val name = queryDisplayName(resolver, uri) ?: "file"

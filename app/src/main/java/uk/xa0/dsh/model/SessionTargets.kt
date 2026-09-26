@@ -27,6 +27,12 @@ package uk.xa0.dsh.model
  *     exactly the duplicate this rule exists to prevent.
  *  4. **Create**, and only then.
  *
+ * Since the host has no session-delete RPC, even this rule cannot make a wrong
+ * "New Session" tap recoverable — an orphaned blank stays a blank forever. So the
+ * intent entry point ([intent]) does not run step 4 at all: it hands the caller a
+ * [SessionIntentPlan.Record] instead, and step 4 is deferred to the seat's first
+ * real use ([materialize]).
+ *
  * A session that is not [SessionTargetCandidate.blank] is never touched: it has
  * history, its directory is part of that history, and "New Session" must not
  * silently hand the reader somebody else's conversation. Subagent children and
@@ -72,6 +78,56 @@ sealed interface SessionTarget {
     data class Directory(val path: String) : SessionTarget
 }
 
+/**
+ * The new-session seat **before any session exists**: a recorded target, no
+ * `session/create` behind it.
+ *
+ * This is the app's answer to the host's missing session-delete RPC. A session
+ * cannot be unmade, so the only way not to litter one is never to make the seat
+ * into one until the user actually needs a session. `currentSessionId == null` is
+ * deliberately *not* overloaded for this: a null open session also means "cold
+ * start with nothing to reopen" and "the screen while a session is being swapped",
+ * and every one of those would then look like a pending seat. Modelling it as its
+ * own value makes "there is nothing behind this hero" a fact a caller can test.
+ *
+ * [preset] and [permission] are the hero's own configuration seats. Both need a
+ * session id to have any effect (`agentPresets/select`, `/permission`), so on a
+ * pending seat they are *recorded* here and applied in the same order at
+ * materialisation — a chip tap must not be what creates the session.
+ */
+data class PendingSessionTarget(
+    /** Where the session will be created when the seat is first used. */
+    val target: SessionTarget,
+    /** `agentPreset` to create it with; null means the host's own default. */
+    val preset: String? = null,
+    /** Access mode to apply right after creation; null means leave the default. */
+    val permission: String? = null,
+)
+
+/**
+ * What one "start a session here" intent does, now that creation is deferred.
+ *
+ * This is [SessionTargetPlan] pushed one level up: it keeps the plan's reuse and
+ * adopt rules intact and replaces its one eager branch — `Create` — with a
+ * [Record] that issues nothing at all. Every path that used to call
+ * `session/create` eagerly (the drawer's New Session, a per-workspace `+`, the
+ * composer's workspace chip, the browser's "Open here") runs this instead, so
+ * "create nothing until first use" is decided in one place.
+ */
+sealed interface SessionIntentPlan {
+    /** A blank already is this intent: open it. Issues no `session/create`. */
+    data class Open(val sessionId: String) : SessionIntentPlan
+
+    /**
+     * The host holds a blank at the target directory: adopt it by both ids (an
+     * idempotent `session/create` that adds no session).
+     */
+    data class Adopt(val sessionId: String, val workspaceId: String) : SessionIntentPlan
+
+    /** Nothing fits yet: show the hero with this seat and issue nothing. */
+    data class Record(val pending: PendingSessionTarget) : SessionIntentPlan
+}
+
 /** How one "new session" intent resolves: one `session/create`, or none. */
 sealed interface SessionTargetPlan {
     /**
@@ -112,6 +168,47 @@ object SessionTargets {
             is SessionTarget.Directory -> planDirectory(target.path, blanks)
         }
     }
+
+    /**
+     * Resolves one "start a session" intent **without creating anything**.
+     *
+     * A blank that fits is opened or adopted exactly as [plan] decides; the only
+     * branch that would have added a session ([SessionTargetPlan.Create]) is turned
+     * into [SessionIntentPlan.Record], which carries the target forward instead.
+     * [preset] and [permission] ride along so the hero's chips survive the wait.
+     *
+     * "Nothing is created before first use" is this function's whole contract: the
+     * returned value names a session id only when one already exists.
+     */
+    fun intent(
+        target: SessionTarget,
+        preset: String? = null,
+        permission: String? = null,
+        currentSessionId: String?,
+        candidates: List<SessionTargetCandidate>,
+    ): SessionIntentPlan = when (val resolved = plan(target, currentSessionId, candidates)) {
+        is SessionTargetPlan.Adopt -> SessionIntentPlan.Adopt(resolved.sessionId, resolved.workspaceId)
+        is SessionTargetPlan.Reuse -> SessionIntentPlan.Open(resolved.sessionId)
+        is SessionTargetPlan.Create -> SessionIntentPlan.Record(
+            PendingSessionTarget(target = target, preset = preset, permission = permission),
+        )
+    }
+
+    /**
+     * What the **first real use** of a deferred seat does: the same decision,
+     * re-run against the roster as it is *now*.
+     *
+     * [currentSessionId] is deliberately null. The hero holds no session, so there
+     * is nothing to adopt from the seat itself; the choice is between reusing a
+     * blank the host has meanwhile acquired at the target and creating one. The
+     * roster is re-read rather than remembered because a materialisation can be
+     * seconds after the tap, and the reuse rules must hold at the moment the one
+     * call that can add a row is actually made.
+     */
+    fun materialize(
+        pending: PendingSessionTarget,
+        candidates: List<SessionTargetCandidate>,
+    ): SessionTargetPlan = plan(pending.target, currentSessionId = null, candidates)
 
     private fun planWorkspace(
         target: SessionTarget.Workspace,
@@ -157,3 +254,22 @@ object SessionTargets {
         return SessionTargetPlan.Create(null, path)
     }
 }
+
+/**
+ * The access mode named by a `/permission <mode>` line, or null when the line is
+ * not that command.
+ *
+ * The hero has no session for `commands/execute` to run in, and access is one of
+ * the two configuration seats the pending hero owns. Recognising the command here
+ * is what lets `/permission` be **recorded** on the pending seat (and applied at
+ * materialisation) instead of being the act that creates the session. Anything
+ * that is not exactly this two-token form — bare `/permission`, another command,
+ * prose the reader typed — returns null, so the caller materialises as usual.
+ */
+fun permissionCommandMode(line: String): String? {
+    val parts = line.trim().split(WHITESPACE)
+    if (parts.size != 2 || parts[0] != "/permission") return null
+    return parts[1].takeIf { it.isNotBlank() }
+}
+
+private val WHITESPACE = Regex("\\s+")
