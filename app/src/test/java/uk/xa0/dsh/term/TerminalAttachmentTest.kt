@@ -179,6 +179,19 @@ class TerminalAttachmentTest {
         assertTrue(fact.contains("control"))
     }
 
+    /**
+     * The lost-sequence fact is only ever shown once the attach loop's bounded
+     * re-attach retries are spent (a retry publishes DISCONNECTED with no issue), so
+     * it has to name the reader's action rather than narrate a restart that has
+     * already given up.
+     */
+    @Test
+    fun `the lost-sequence fact names the action it needs`() {
+        val fact = terminalIssueFact(TerminalIssue.OUTPUT_INVALID)
+        assertTrue(fact.lowercase().contains("reconnect"))
+        assertFalse(fact.lowercase().contains("was restarted"))
+    }
+
     @Test
     fun `every issue has copy`() {
         TerminalIssue.entries.forEach { issue ->

@@ -268,6 +268,174 @@ fun terminalIssueFact(issue: TerminalIssue, limit: Int? = null): String = when (
     TerminalIssue.MISSING_TERMINAL -> "This terminal is no longer in the session's list."
     TerminalIssue.INPUT_FULL -> "Keystrokes are queuing faster than the host accepts them, and some were dropped."
     TerminalIssue.ATTACHMENT_ENDED -> "The host ended this terminal's output stream."
-    TerminalIssue.OUTPUT_INVALID -> "The terminal output lost its sequence, so it was restarted from a fresh screen."
+    // Shown only once the attach loop's bounded re-attach retries are spent: while
+    // it is retrying, the panel is DISCONNECTED with no issue. So this must name the
+    // action, not narrate a restart that has already given up.
+    TerminalIssue.OUTPUT_INVALID -> "The terminal output lost its sequence. Reconnect for a fresh screen."
     TerminalIssue.UNKNOWN -> "The terminal call failed."
+}
+
+// ------------------------------------------------------------------ attachment
+
+/** What the view model must do after [TerminalAttachmentSession.accept]. */
+sealed interface TerminalFrameAction {
+    /** A complete screen: publish `CONNECTED`, then feed [screen] to the emulator. */
+    data class Repaint(val info: TerminalInfo, val screen: String) : TerminalFrameAction
+
+    /** Ordered output, already fed to the emulator. Bump the panel's revision. */
+    data object Output : TerminalFrameAction
+
+    /** Metadata only; [info] is the newest the host reported. */
+    data class Metadata(val info: TerminalInfo) : TerminalFrameAction
+}
+
+/** A fresh attachment to open, and how long to wait before opening it. */
+data class TerminalRestart(val attachmentId: String, val delayMs: Long)
+
+/**
+ * Bounded retry/backoff for an attachment the host broke.
+ *
+ * One restart is often the whole repair: the host answers a new `follow` with a
+ * fresh snapshot. A host that answers *every* re-attach with another gap, or ends
+ * the stream immediately after each snapshot, would otherwise spin, so the budget
+ * is finite. It is spent and never refilled by a frame — a snapshot→end loop must
+ * not be able to top it up — and is reset only by a fresh user-initiated attach.
+ */
+class TerminalReattachPolicy(
+    private val maxAttempts: Int = 3,
+    private val baseDelayMs: Long = 1_000L,
+    private val maxDelayMs: Long = 8_000L,
+) {
+    /** Restarts already asked for. */
+    var attempts: Int = 0
+        private set
+
+    /** The wait before the next attachment, or null once the budget is spent. */
+    fun next(): Long? {
+        if (attempts >= maxAttempts) return null
+        val delay = (baseDelayMs shl attempts).coerceAtMost(maxDelayMs)
+        attempts++
+        return delay
+    }
+}
+
+/**
+ * One attachment's screen state: the emulator, the ordering gate, the resize gate
+ * and the copy of input control.
+ *
+ * Plain Kotlin — no Android and no JSON — because `DshViewModel` is an
+ * `AndroidViewModel` and cannot be constructed on the JVM. W1 (a model that never
+ * learned the panel's grid) and W2 (a broken sequence that latched forever) both
+ * lived in that untested gap; this is the half the JVM tests can drive.
+ *
+ * **Grid rule (W1).** The model is the reader's window onto the PTY, so it must be
+ * the width the incoming bytes were wrapped for.
+ *  - A snapshot was laid out for the grid in its own `info`, so a snapshot always
+ *    sizes the model to that grid before the screen is fed in.
+ *  - Between snapshots the *panel's measurement* is authoritative: it is the only
+ *    thing that knows how much screen the user can actually see, and the resize it
+ *    triggers is already in flight, so the model must not lag behind it.
+ *  - A `state` frame is metadata and must not move the model off a measured grid.
+ *    The panel routinely measures — and sends its resize — before the host
+ *    confirms it, so the frame still carrying the old grid is the *older* report,
+ *    and the host rejects an oversized grid rather than clamping one: a
+ *    disagreement here is a stale report, not a new truth. Before the panel has
+ *    measured, the host's grid is the only source and is adopted.
+ */
+class TerminalAttachmentSession(
+    val emulator: TerminalEmulator,
+    private val environment: TerminalEnvironmentInfo,
+    info: TerminalInfo,
+    private val reattach: TerminalReattachPolicy = TerminalReattachPolicy(),
+) {
+
+    /** The attachment the host is following. [restart] rotates it to re-take input. */
+    var attachmentId: String = newAttachmentId()
+        private set
+
+    private val gate = TerminalStreamGate()
+    private val resizeGate = TerminalResizeGate()
+
+    var info: TerminalInfo? = info
+        private set
+
+    /** The grid the panel last asked for; null until it has measured. */
+    var measured: Pair<Int, Int>? = null
+        private set
+
+    init {
+        resizeGate.adopt(info)
+    }
+
+    /** True while this attachment owns input; see [isWritable]. */
+    val writable: Boolean get() = isWritable(info, attachmentId)
+
+    /** True once the host has said the shell is no longer running. */
+    val stopped: Boolean
+        get() = info?.state == TerminalState.EXITED || info?.state == TerminalState.FAILED
+
+    /**
+     * Records the panel's measurement and sizes the model to it (W1).
+     *
+     * Returns the grid to put on the wire, or null when the host already has it.
+     */
+    fun measure(columns: Int, rows: Int): Pair<Int, Int>? {
+        val (cols, limitRows) = clampGrid(columns, rows, environment)
+        measured = cols to limitRows
+        emulator.resize(cols, limitRows)
+        return if (resizeGate.shouldSend(cols, limitRows)) cols to limitRows else null
+    }
+
+    /**
+     * Accepts one frame.
+     *
+     * Throws [TerminalProtocolException] when the stream breaks the ordering
+     * contract; the caller's answer to that is [restart].
+     */
+    fun accept(frame: TerminalFrame): TerminalFrameAction = when (gate.accept(frame)) {
+        TerminalGateOutcome.NEW_GENERATION -> {
+            val snapshot = frame as TerminalFrame.Snapshot
+            // The screen was serialised for the host's grid; match it before feeding.
+            emulator.resize(snapshot.info.cols, snapshot.info.rows)
+            emulator.resetForSnapshot()
+            resizeGate.adopt(snapshot.info)
+            info = snapshot.info
+            TerminalFrameAction.Repaint(snapshot.info, snapshot.screen)
+        }
+
+        TerminalGateOutcome.OUTPUT -> {
+            emulator.append((frame as TerminalFrame.Output).data)
+            TerminalFrameAction.Output
+        }
+
+        TerminalGateOutcome.STATE -> {
+            val state = (frame as TerminalFrame.State).info
+            resizeGate.adopt(state)
+            info = state
+            if (measured == null) emulator.resize(state.cols, state.rows)
+            TerminalFrameAction.Metadata(state)
+        }
+    }
+
+    /**
+     * The repair for a stream the host broke (W2).
+     *
+     * A sequence gap leaves a hole in the screen, and the only honest recovery is a
+     * *fresh attachment*: the host answers a new `follow` with a fresh snapshot,
+     * which re-baselines the sequence — that is what makes the "restarted from a
+     * fresh screen" copy true. The id rotates because the host gives input to the
+     * newest attachment, so a re-attach is also how the panel genuinely takes
+     * control back. Both gates reset, so the next frame must be a snapshot.
+     *
+     * Returns null once the retry budget is spent, so a broken host cannot spin.
+     */
+    fun restart(): TerminalRestart? {
+        val delay = reattach.next() ?: return null
+        gate.reset()
+        resizeGate.clear()
+        attachmentId = newAttachmentId()
+        return TerminalRestart(attachmentId, delay)
+    }
+
+    private fun newAttachmentId(): String = java.util.UUID.randomUUID().toString()
 }
