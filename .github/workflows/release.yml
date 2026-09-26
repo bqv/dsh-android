@@ -7,7 +7,10 @@ name: Release
 # repository. The APK this attaches is the *release* build (id `uk.xa0.dsh`, no
 # `.debug` suffix), signed with a real release key when one is supplied.
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# The release body is `docs/releases/<tag>.md` when that file exists, with the
+# generated download/size/version/SHA-256 block appended below it.
 #
 # Keystore, if you want a properly signed release rather than a debug-key one:
 # base64 a keystore and set repository secrets
@@ -127,23 +130,32 @@ jobs:
         run: |
           set -euo pipefail
           tag='${{ steps.apk.outputs.tag }}'
-          notes=$(cat <<EOF
-          Native Android client for DeepSeek Harness.
+          notes_file="docs/releases/${tag}.md"
+          notes="$RUNNER_TEMP/notes.md"
 
-          **Download:** \`${{ steps.apk.outputs.path }}\` (${{ steps.apk.outputs.size }})
-
-          - Version \`${{ steps.apk.outputs.version }}\`, minSdk 26, built from \`${GITHUB_SHA::7}\`.
-          - Package \`uk.xa0.dsh\` — a release build, so it installs alongside a
-            debug build rather than over it.
-          - SHA-256: \`${{ steps.apk.outputs.sha256 }}\`
-
-          See the README for how to point it at a host and sign in.
-          EOF
-          )
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${{ steps.apk.outputs.path }}" --clobber
-            gh release edit "$tag" --notes "$notes"
+          # The prose belongs in the repository, next to the code it describes, so
+          # `docs/releases/<tag>.md` is the body when it exists. The facts below are
+          # generated because only the build knows them. Written with printf rather
+          # than a heredoc: a heredoc inside a `run:` block carries the block's own
+          # indentation into the release body, which renders it as a code block.
+          if [ -f "$notes_file" ]; then
+            cat "$notes_file" > "$notes"
+            printf '\n---\n\n' >> "$notes"
           else
-            gh release create "$tag" "${{ steps.apk.outputs.path }}" \
-              --title "DSH for Android $tag" --notes "$notes"
+            printf 'Native Android client for DeepSeek Harness.\n\n' > "$notes"
+          fi
+          {
+            printf '**Download:** `%s` (%s)\n\n' '${{ steps.apk.outputs.path }}' '${{ steps.apk.outputs.size }}'
+            printf -- '- Version `%s`, minSdk 26, built from `%s`.\n' '${{ steps.apk.outputs.version }}' "${GITHUB_SHA::7}"
+            printf -- '- Package `uk.xa0.dsh` — a release build, so it installs alongside a debug build rather than over it.\n'
+            printf -- '- SHA-256: `%s`\n\n' '${{ steps.apk.outputs.sha256 }}'
+            printf 'See the README for how to point it at a host and sign in.\n'
+          } >> "$notes"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" '${{ steps.apk.outputs.path }}' --clobber
+            gh release edit "$tag" --notes-file "$notes"
+          else
+            gh release create "$tag" '${{ steps.apk.outputs.path }}' \
+              --title "DSH for Android $tag" --notes-file "$notes"
           fi
