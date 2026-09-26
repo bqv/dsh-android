@@ -238,6 +238,21 @@ private class TerminalInputConnection(
     }
 
     /**
+     * The keyboard's own Ctrl key, down as of the key *before* this one.
+     *
+     * Gboard's Ctrl button is a key in its own right: holding it sends
+     * `KEYCODE_CTRL_LEFT` ACTION_DOWN, then the chorded key, then the ups — measured
+     * on a phone, where tapping a plain `x` arrives as `commitText` instead. So the
+     * chord is the key that *follows* a Ctrl down, and the flag is one-shot: it is
+     * read by the next key and cleared, which also means a keyboard that never sends
+     * the Ctrl *up* cannot strand it over the following keystrokes.
+     */
+    private var imeCtrlArmed = false
+
+    private fun isCtrlKey(keyCode: Int): Boolean =
+        keyCode == KeyEvent.KEYCODE_CTRL_LEFT || keyCode == KeyEvent.KEYCODE_CTRL_RIGHT
+
+    /**
      * A key event the IME synthesised. On `TYPE_NULL` this is the *ordinary* path for
      * Gboard, which sends key events with `deviceId = -1` instead of calling
      * `commitText` (Termux's comment on the same branch); Hacker's Keyboard,
@@ -247,22 +262,24 @@ private class TerminalInputConnection(
      */
     override fun sendKeyEvent(event: KeyEvent): Boolean {
         Log.d(TAG, "ime sendKeyEvent $event")
-        if (
-            handleTerminalKeyEvent(
-                event = event,
-                applicationCursorKeys = view.cursorKeys(),
-                ctrlArmed = ctrlArmed(),
-                ctrlSpent = ctrlSpent,
-                write = writeToPty,
-                // Measured on the emulator's Gboard (Android 14, TYPE_NULL): every
-                // synthesised key event carries META_CTRL_ON. Tapping `c`, `a`, `t`
-                // arrived as keyCode 31/29/48 with `metaState=4096`. Trusting that bit
-                // would send ^C ^A ^T for the word `cat`.
-                trustMeta = false,
-            )
-        ) {
-            return true
-        }
+        // One-shot: the arm applies to the key that follows the Ctrl down. The Ctrl
+        // key's own event must not consume it, so it is read before the update below.
+        val chordKey = imeCtrlArmed && !isCtrlKey(event.keyCode)
+        val handled = handleTerminalKeyEvent(
+            event = event,
+            applicationCursorKeys = view.cursorKeys(),
+            ctrlArmed = ctrlArmed(),
+            ctrlSpent = ctrlSpent,
+            write = writeToPty,
+            // Measured on the emulator's Gboard (Android 14, TYPE_NULL): every
+            // synthesised key event carries META_CTRL_ON. Tapping `c`, `a`, `t`
+            // arrived as keyCode 31/29/48 with `metaState=4096`. Trusting that bit
+            // would send ^C ^A ^T for the word `cat`.
+            trustMeta = false,
+            imeCtrlHeld = chordKey,
+        )
+        imeCtrlArmed = isCtrlKey(event.keyCode) && event.action == KeyEvent.ACTION_DOWN
+        if (handled) return true
         return super.sendKeyEvent(event)
     }
 }
@@ -285,6 +302,10 @@ private class TerminalInputConnection(
  *   keyboard unusable. On that path the only Ctrl is the panel's own latch, and a
  *   keyboard that really means a chord can still supply the C0 byte itself (below),
  *   which is honoured whatever this says.
+ * @param imeCtrlHeld the keyboard's own Ctrl key is down for *this* key: Gboard
+ *   sends `KEYCODE_CTRL_LEFT` DOWN on the key before a chord and UP after it, which
+ *   is a signal it does not send for the spurious `META_CTRL_ON` its ordinary keys
+ *   carry. A soft keyboard's own Ctrl button therefore works without the panel.
  */
 internal fun handleTerminalKeyEvent(
     event: KeyEvent,
@@ -293,6 +314,7 @@ internal fun handleTerminalKeyEvent(
     ctrlSpent: () -> Unit,
     write: (String) -> Unit,
     trustMeta: Boolean = true,
+    imeCtrlHeld: Boolean = false,
 ): Boolean {
     if (event.action == KeyEvent.ACTION_MULTIPLE) {
         // A character with no key of its own arrives as text on a KEYCODE_UNKNOWN
@@ -335,8 +357,14 @@ internal fun handleTerminalKeyEvent(
 
     // The panel's Ctrl cap is panel state and is always honoured; the event's own
     // Ctrl bit only when the event came from the window system rather than from an
-    // IME that flags everything with it (see `trustMeta`).
-    val ctrl = TerminalInput.isChord(event.isCtrlPressed, eventMetaIsTrustworthy = trustMeta, latchArmed = ctrlArmed)
+    // IME that flags everything with it (see `trustMeta`) — or when the keyboard's
+    // own Ctrl key is down (`imeCtrlHeld`).
+    val ctrl = TerminalInput.isChord(
+        event.isCtrlPressed,
+        eventMetaIsTrustworthy = trustMeta,
+        latchArmed = ctrlArmed,
+        keyboardCtrlHeld = imeCtrlHeld,
+    )
     if (ctrl) {
         // A chord arrives as a key code with no character (see
         // `TerminalInput.chordCharacterOf`) — getUnicodeChar returns 0 with Ctrl held

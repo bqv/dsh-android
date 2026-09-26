@@ -111,9 +111,9 @@ object TerminalInput {
     /**
      * Whether a key event is a Ctrl chord.
      *
-     * Two sources, and they are not equivalent. The panel's Ctrl cap is our own state
-     * and always counts — it is the only Ctrl a phone without a hardware Ctrl key can
-     * produce. The event's own Ctrl bit counts only when the event came from the
+     * Three sources, and they are not equivalent. The panel's Ctrl cap is our own state
+     * and always counts — it is the only Ctrl a phone without a keyboard Ctrl button
+     * can produce. The event's own Ctrl bit counts only when the event came from the
      * window system: Gboard, on a `TYPE_NULL` editor, sets `META_CTRL_ON` on *every*
      * key event it synthesises. Measured on the emulator (Android 14, Gboard):
      * tapping `c`, `a` and `t` delivered
@@ -122,12 +122,25 @@ object TerminalInput {
      * bit turned the word `cat` into ^C ^A ^T; the same flag sits on the backspace
      * (`KEYCODE_DEL`) and would have made it a chord with no mapping.
      *
+     * [keyboardCtrlHeld] is how a soft keyboard's *own* Ctrl button is honoured
+     * despite that. Measured on a real phone (OnePlus Nord CE 3 Lite, Gboard), its
+     * Ctrl button is a key of its own: holding it and pressing `c` sends
+     * `KEYCODE_CTRL_LEFT` ACTION_DOWN, then `KEYCODE_C` with `metaState=12288`
+     * (`META_CTRL_ON|META_CTRL_LEFT_ON`) and **no character**, then the ups. That is
+     * a signal Gboard only sends for a chord, so the caller tracks it and passes it
+     * here; the modifier bit alone stays untrusted.
+     *
      * @param eventCtrl the event's own `isCtrlPressed`
      * @param eventMetaIsTrustworthy false for a key event an IME synthesised
      * @param latchArmed the panel's Ctrl cap
+     * @param keyboardCtrlHeld the keyboard's own Ctrl key is down (one-shot, see the caller)
      */
-    fun isChord(eventCtrl: Boolean, eventMetaIsTrustworthy: Boolean, latchArmed: Boolean): Boolean =
-        latchArmed || (eventCtrl && eventMetaIsTrustworthy)
+    fun isChord(
+        eventCtrl: Boolean,
+        eventMetaIsTrustworthy: Boolean,
+        latchArmed: Boolean,
+        keyboardCtrlHeld: Boolean = false,
+    ): Boolean = latchArmed || (eventCtrl && (eventMetaIsTrustworthy || keyboardCtrlHeld))
 
     /**
      * The character a key event types, or null when it types nothing.

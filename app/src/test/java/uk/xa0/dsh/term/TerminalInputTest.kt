@@ -180,6 +180,47 @@ class TerminalInputTest {
     }
 
     /**
+     * Gboard's *own* Ctrl button, measured on a phone: holding it and pressing `c`
+     * sends `KEYCODE_CTRL_LEFT` DOWN (keyCode 113, `metaState=12288`), then
+     * `KEYCODE_C` with `metaState=12288` and `unicode=0`, then the ups — while a
+     * plain `x` arrives as `commitText` instead. The Ctrl key-down in between is the
+     * signal, and it is what makes the modifier bit mean something on that one key.
+     *
+     * The pair matters: the untrusted bit alone must stay a *typing* key, or the
+     * keyboard is unusable, and the arm alone must not be needed for a chord that
+     * really carries the modifier from the window system.
+     */
+    @Test
+    fun `the keyboard's own ctrl key makes the modifier bit mean a chord`() {
+        assertTrue(
+            TerminalInput.isChord(
+                eventCtrl = true,
+                eventMetaIsTrustworthy = false,
+                latchArmed = false,
+                keyboardCtrlHeld = true,
+            ),
+        )
+        // The same key without the Ctrl key-down in front of it is the `cat` case.
+        assertFalse(
+            TerminalInput.isChord(
+                eventCtrl = true,
+                eventMetaIsTrustworthy = false,
+                latchArmed = false,
+                keyboardCtrlHeld = false,
+            ),
+        )
+        // The arm is not a free pass: a key with no Ctrl bit on it is still text.
+        assertFalse(
+            TerminalInput.isChord(
+                eventCtrl = false,
+                eventMetaIsTrustworthy = false,
+                latchArmed = false,
+                keyboardCtrlHeld = true,
+            ),
+        )
+    }
+
+    /**
      * Android's `KeyEvent.getUnicodeChar()` returns 0 whenever Ctrl is held — the
      * modifier suppresses the character — so a chord has to be read from the key
      * code. A handler that bails on the missing character first drops every Ctrl
