@@ -4,8 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -84,7 +82,6 @@ private enum class StatPill { TIME, USAGE }
  *   above and below match. The sides remain the host's `16dp`, matching the
  *   composer card's edges.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
     if (stats == null || !stats.visible) return
@@ -92,19 +89,37 @@ fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
     // the web's single `openPill` state does.
     var open by remember { mutableStateOf<StatPill?>(null) }
 
-    // A `FlowRow`, not a `Row`: the web lays these two chips out on one line
-    // because a desktop dock is wide enough for "661M tok · Cache hit 97%", and a
-    // phone is not — as a `Row` the second chip was simply clipped at the screen
-    // edge and its cache-hit figure was unreachable. Wrapping keeps both whole.
-    // Start-aligned, not centred: centring the wrapped lines left them floating
-    // with about 103dp of dead space on each side while sitting 12-16dp from the
-    // composer above and the navigation bar below — measured on a 411dp screen, so
-    // the block read as unbalanced rather than as part of the composer's stack.
-    // Aligned to the composer card's own edge, all four margins are of a size.
-    FlowRow(
+    // One row, always.
+    //
+    // This was a `FlowRow`, which fixed a real bug — as a plain `Row` the second
+    // chip was clipped at the screen edge and its cache-hit figure was
+    // unreachable — by letting the two wrap. On a phone that is worse than the
+    // disease: two chips on two lines read as a broken footer rather than as a
+    // composer dock, and the row's height then moved with the readings.
+    //
+    // So: a plain `Row` (which cannot wrap), the copy and the type shrunk to fit
+    // it, and *natural* widths rather than an equal split. An equal split is the
+    // trap here: measured from the font's advance widths (Roboto, kerning
+    // ignored, so these are conservative), "128 turns 512 steps · 123.4 tok/s" is
+    // ~196dp against the ~176dp half a 393dp phone would give it — it would
+    // ellipsise exactly when a session gets long enough to be interesting. Left
+    // at their natural widths the two chips come to ~343dp of the ~361dp row at
+    // that size, and the counts chip is never the one squeezed.
+    //
+    // If a reading ever does outgrow the row, the *last* chip is measured against
+    // what is left and its text ellipsises; the panel behind a tap still holds
+    // every figure, which is what keeps that degradation honest. "Cache hit" is
+    // abbreviated to "Cache" for the same reason — 20dp of headroom — and the
+    // panel spells the full wording out.
+    //
+    // Start-aligned (not centred) and aligned to the composer card's own edges,
+    // as before: centring a two-chip row left it floating with ~103dp of dead
+    // space on each side while sitting 6dp from the card above and 6dp from the
+    // navigation inset below.
+    Row(
         modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(DshSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(DshSpacing.xs),
+        horizontalArrangement = Arrangement.spacedBy(DshSpacing.md),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         if (stats.steps > 0) {
             val counts = "${stats.turns} turns ${stats.steps} steps"
@@ -136,7 +151,8 @@ fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
             StatPillButton(
                 icon = Icons.Rounded.Storage,
                 label = "${formatCompactTokens(stats.totalTokens)} tok",
-                suffix = cacheHit?.let { "Cache hit $it%" },
+                // "Cache hit" is the panel's wording; the row cannot hold it.
+                suffix = cacheHit?.let { "Cache $it%" },
                 expandable = true,
                 expanded = open == StatPill.USAGE,
                 onToggle = { open = if (open == StatPill.USAGE) null else StatPill.USAGE },
@@ -175,29 +191,33 @@ private fun StatPillButton(
     expandable: Boolean,
     expanded: Boolean,
     onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
     panel: @Composable () -> Unit,
 ) {
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(DshRadius.pill)
-    val pill: @Composable () -> Unit = {
+    // The chip's *placement* modifier, not its content's: the host `Row` hands
+    // down `weight(1f)`, and that has to land on the direct child of that row —
+    // this chip row, or the popup-anchor Box below when the chip opens a panel.
+    val pill: @Composable (Modifier) -> Unit = { placement ->
         Row(
-            Modifier
+            placement
                 .clip(shape)
                 .then(if (expandable || expanded) Modifier.clickableNoRipple(onClick = onToggle) else Modifier)
                 .background(if (expanded) colors.hover else Color.Transparent)
-                .padding(horizontal = DshSpacing.md, vertical = 1.dp),
+                .padding(horizontal = DshSpacing.sm, vertical = 1.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
                 tint = if (expanded) colors.labelSecondary else colors.labelTertiary,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(12.dp),
             )
             Spacer(Modifier.width(DshSpacing.sm))
             Text(
                 text = label,
-                style = DshType.bodyMedium,
+                style = DshType.bodySmall,
                 color = if (expanded) colors.labelSecondary else colors.labelTertiary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -205,13 +225,13 @@ private fun StatPillButton(
             if (suffix != null) {
                 Text(
                     text = "·",
-                    style = DshType.bodyMedium,
+                    style = DshType.bodySmall,
                     color = colors.borderL3,
-                    modifier = Modifier.padding(horizontal = DshSpacing.sm),
+                    modifier = Modifier.padding(horizontal = DshSpacing.xs),
                 )
                 Text(
                     text = suffix,
-                    style = DshType.bodyMedium,
+                    style = DshType.bodySmall,
                     color = if (expanded) colors.labelSecondary else colors.labelTertiary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -221,11 +241,11 @@ private fun StatPillButton(
     }
 
     if (!expandable) {
-        pill()
+        pill(modifier)
         return
     }
-    Box {
-        pill()
+    Box(modifier) {
+        pill(Modifier)
         if (expanded) {
             Popup(
                 onDismissRequest = onToggle,
