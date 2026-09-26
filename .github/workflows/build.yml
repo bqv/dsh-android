@@ -79,6 +79,12 @@ jobs:
           echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
           cat local.properties
 
+      - name: Run the JVM test suite
+        # The VT core, the terminal's attachment/sequence gates and the seat
+        # resolution are pure Kotlin precisely so they can run here. `assembleDebug`
+        # alone would let a regression in any of them land green.
+        run: bash build.sh :app:testDebugUnitTest
+
       - name: Build
         run: bash build.sh :app:assembleDebug
 
