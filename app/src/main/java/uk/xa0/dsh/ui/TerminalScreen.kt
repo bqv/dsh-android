@@ -554,6 +554,11 @@ private fun TerminalKeyRow(
         KeyCap("Esc") { onKey(TerminalKey.ESCAPE) }
         KeyCap("Tab") { onKey(TerminalKey.TAB) }
         KeyCap("^C") { onWrite("\u0003") }
+        // ^C and ^D are caps, not something the Ctrl latch has to produce: they are
+        // the two chords that matter at a prompt (interrupt, EOF), and a cap cannot
+        // be broken by whatever an IME does with an armed modifier. The latch still
+        // covers the rest of the alphabet for anyone who wants Ctrl+A or Ctrl+Z.
+        KeyCap("^D") { onWrite("\u0004") }
         KeyCap("Ctrl", active = ctrlArmed, onClick = onCtrl)
         KeyCap("\u2190") { onKey(TerminalKey.LEFT) }
         KeyCap("\u2191") { onKey(TerminalKey.UP) }
