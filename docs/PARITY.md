@@ -122,6 +122,9 @@ of where the app stands against them.
       (`ui/ChatScreen.kt: TurnRail`, `TurnPreviewCard`)
 - [x] Markdown: headings, paragraphs, bullet/numbered/nested lists, task lists, tables,
       quotes, rules, fenced code + banner + copy, inline code, bold/italic/strike, links
+- [x] Links open in the browser for `[text](url)` **and** for a bare `https://`/`http://`/
+      `www.` URL (`model/Markdown.parseInline`'s autolink, GFM's rule: word boundary,
+      sentence punctuation left out, a bracket belonging to the path kept)
 - [x] Syntax highlighting (heuristic tokenizer, DSH Shiki colours)
 - [ ] Markdown gaps: inline images, `@file` mentions as chips, citations, tags, mermaid/math
 - [ ] Interrupted assistant tail tag. A `turn/end` reason already draws the
