@@ -81,6 +81,7 @@ import uk.xa0.dsh.term.TerminalInfo
 import uk.xa0.dsh.term.TerminalIssue
 import uk.xa0.dsh.term.TerminalKey
 import uk.xa0.dsh.term.TerminalKeys
+import uk.xa0.dsh.term.TerminalSeat
 import uk.xa0.dsh.term.terminalIssueFact
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
@@ -131,6 +132,7 @@ fun TerminalScreen(
             onClose = vm::closeActiveTerminal,
             onRetry = vm::retryTerminal,
             onSelect = vm::selectTerminal,
+            onSeat = vm::selectSeat,
         )
         Box(Modifier.fillMaxWidth().weight(1f)) {
             if (emulator != null &&
@@ -165,6 +167,7 @@ private fun TerminalBar(
     onClose: () -> Unit,
     onRetry: () -> Unit,
     onSelect: (String) -> Unit,
+    onSeat: (TerminalSeat) -> Unit,
 ) {
     val colors = DshTheme.colors
     Column {
@@ -197,6 +200,35 @@ private fun TerminalBar(
             }
             BarAction("New", onNew)
             BarAction("Close", onClose, enabled = state.active != null)
+        }
+        // The two seats, each named with the policy it runs under. This *is* the
+        // "which shell am I in" answer that a one-off "this terminal is sandboxed"
+        // notice could only give once: the host shell is unconfined on purpose, the
+        // session's own terminal is confined by its policy, and the seat the reader
+        // picked says which one is on screen.
+        if (state.seats.isNotEmpty()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = DshSpacing.md),
+                horizontalArrangement = Arrangement.spacedBy(DshSpacing.sm),
+            ) {
+                state.seats.forEach { option ->
+                    val active = option.seat == state.seat
+                    Text(
+                        text = option.label,
+                        style = DshType.micro,
+                        color = if (active) colors.link else colors.labelTertiary,
+                        maxLines = 1,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(DshRadius.pill))
+                            .background(if (active) colors.active else colors.bgLayer2)
+                            .clickableNoRipple { onSeat(option.seat) }
+                            .padding(horizontal = DshSpacing.md, vertical = DshSpacing.xs),
+                    )
+                }
+            }
         }
         // A phone shows one grid, so a session with more than one terminal needs a
         // way back to the others that is not a second pane.
@@ -277,16 +309,26 @@ private fun TerminalNotice(state: TerminalUiState) {
     val colors = DshTheme.colors
     val issue = state.issue?.takeIf { it != TerminalIssue.UNKNOWN }
     val message = when {
+        // Before anything else: a refused host shell is the reason there is no
+        // terminal at all, and it is the one sentence that has to survive the
+        // placeholder underneath it.
+        state.hostShellIssue != null -> state.hostShellIssue
         issue != null -> terminalIssueFact(issue, state.limit)
         state.error != null -> state.error
         state.phase == TerminalPhase.DISCONNECTED -> "The terminal stream stopped. Reconnect to attach again."
         state.phase == TerminalPhase.CLOSED -> "The shell was closed."
         state.phase == TerminalPhase.LOADING || state.phase == TerminalPhase.CREATING ->
-            "Starting a shell in this session…"
-        state.phase == TerminalPhase.CONNECTING -> "Attaching to the shell…"
+            // Naming the seat matters here: "this session" would be wrong for the
+            // workspace's own archived shell, which is a different session entirely.
+            when (state.seat) {
+                TerminalSeat.HOST_SHELL -> "Opening this workspace's host shell\u2026"
+                TerminalSeat.THIS_SESSION -> "Starting a shell in this session\u2026"
+            }
+        state.phase == TerminalPhase.CONNECTING -> "Attaching to the shell\u2026"
         else -> null
     } ?: return
-    val bad = issue != null || state.error != null || state.phase == TerminalPhase.CLOSED
+    val bad = state.hostShellIssue != null || issue != null || state.error != null ||
+        state.phase == TerminalPhase.CLOSED
     Row(
         Modifier
             .fillMaxWidth()

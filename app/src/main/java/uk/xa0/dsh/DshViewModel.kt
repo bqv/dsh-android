@@ -69,6 +69,11 @@ import uk.xa0.dsh.net.DshUnreachableException
 import uk.xa0.dsh.net.MuxState
 import uk.xa0.dsh.net.StreamEvent
 import uk.xa0.dsh.net.TerminalClient
+import uk.xa0.dsh.term.HostShellIssue
+import uk.xa0.dsh.term.HostShellProgress
+import uk.xa0.dsh.term.HostShellStep
+import uk.xa0.dsh.term.HOST_SHELL_PRESET
+import uk.xa0.dsh.term.SeatOption
 import uk.xa0.dsh.term.TerminalAttachmentSession
 import uk.xa0.dsh.term.TerminalEmulator
 import uk.xa0.dsh.term.TerminalEnvironmentInfo
@@ -77,9 +82,14 @@ import uk.xa0.dsh.term.TerminalInfo
 import uk.xa0.dsh.term.TerminalInputBudget
 import uk.xa0.dsh.term.TerminalIssue
 import uk.xa0.dsh.term.TerminalProtocolException
+import uk.xa0.dsh.term.TerminalSeat
 import uk.xa0.dsh.term.TerminalState
+import uk.xa0.dsh.term.hostShellIssueFact
+import uk.xa0.dsh.term.hostShellSessionName
 import uk.xa0.dsh.term.terminalIssueFact
 import uk.xa0.dsh.term.terminalIssueOf
+import uk.xa0.dsh.term.terminalSeats
+import uk.xa0.dsh.term.withHostShellSession
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -502,6 +512,12 @@ data class UiState(
      * so a cold start restores the drawer's shape instead of expanding everything.
      */
     val drawerCollapsedSections: Set<String> = emptySet(),
+    /**
+     * Workspace id → the archived Session that workspace's unconfined "Host shell"
+     * terminal lives in; persisted, because an archived session cannot be browsed to
+     * and the app would otherwise build a fresh one on every visit.
+     */
+    val hostShellSessions: Map<String, String> = emptyMap(),
     /** The new-session default the app passes to `session/create` (a stored setting). */
     val agentPreset: String = "",
     /** Roster the host offers for a blank session (`agentPresets/list`). */
@@ -785,6 +801,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      */
     private var terminalSession: TerminalAttachmentSession? = null
     private var terminalId: String? = null
+    /**
+     * The Session id terminal RPCs address for the seat currently shown.
+     *
+     * Not the same thing as the *displayed* session: the host shell seat lives in the
+     * workspace's own archived Session, so `terminal/follow`, `write`, `resize`,
+     * `close` and `list` must all address that one while the panel still displays the
+     * session the user has open. Set by [attachTerminal] from the resolved seat.
+     */
+    private var terminalAgentId: String? = null
     private var terminalInput = TerminalInputBudget(64 * 1024)
     private var terminalJob: Job? = null
     /** Tail of the input chain; see [enqueueTerminalWrite]. */
@@ -813,7 +838,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             current.phase != TerminalPhase.CLOSED &&
             current.phase != TerminalPhase.FAILED
         if (live) return
-        startTerminal(sessionId, reuse = true)
+        startTerminal(sessionId, current.seat, reuse = true)
     }
 
     /**
@@ -828,24 +853,45 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         terminalJob = null
         terminalSession = null
         terminalId = null
+        terminalAgentId = null
         publishTerminal(phase = TerminalPhase.IDLE, writable = false, error = null, issue = null, limit = null)
     }
 
     /** Re-attaches for a fresh screen after a failure or a stream that ended. */
     fun retryTerminal() {
         val sessionId = _terminal.value.sessionId ?: return
-        startTerminal(sessionId, reuse = true)
+        startTerminal(sessionId, _terminal.value.seat, reuse = true)
     }
 
-    /** Explicitly allocates a second terminal in this session. */
+    /** Explicitly allocates a second terminal in the seat the panel is showing. */
     fun newTerminal() {
         val sessionId = _terminal.value.sessionId ?: return
-        startTerminal(sessionId, reuse = false)
+        startTerminal(sessionId, _terminal.value.seat, reuse = false)
     }
 
-    /** Switches the panel to another terminal the session already retains. */
-    fun selectTerminal(id: String) {
+    /**
+     * Switches the panel between its two seats.
+     *
+     * Selecting the seat that is already showing is a no-op only while it is live:
+     * after a failure the same tap is the retry, which is how a reader gets out of a
+     * refused host shell without leaving the tab. The other seat's shell is *not*
+     * closed — it stays on the host, and coming back adopts it again through
+     * `terminal/list`.
+     */
+    fun selectSeat(seat: TerminalSeat) {
         val sessionId = _terminal.value.sessionId ?: return
+        val current = _terminal.value
+        val live = current.seat == seat &&
+            current.phase != TerminalPhase.IDLE &&
+            current.phase != TerminalPhase.CLOSED &&
+            current.phase != TerminalPhase.FAILED
+        if (live) return
+        startTerminal(sessionId, seat, reuse = true)
+    }
+
+    /** Switches the panel to another terminal the seat already retains. */
+    fun selectTerminal(id: String) {
+        val agentId = terminalAgentId ?: return
         if (id == terminalId) return
         val info = _terminal.value.terminals.firstOrNull { it.id == id } ?: return
         terminalJob?.cancel()
@@ -857,8 +903,8 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         )
         terminalJob = viewModelScope.launch {
             try {
-                val environment = _terminal.value.environment ?: terminalClient.environment(sessionId)
-                attachTerminal(sessionId, info, environment)
+                val environment = _terminal.value.environment ?: terminalClient.environment(agentId)
+                attachTerminal(agentId, info, environment)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -874,7 +920,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * losing the socket, backgrounding the app — deliberately does not.
      */
     fun closeActiveTerminal() {
-        val sessionId = _terminal.value.sessionId ?: return
+        val agentId = terminalAgentId ?: return
         val id = terminalId ?: return
         terminalJob?.cancel()
         terminalJob = null
@@ -884,7 +930,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         publishTerminal(phase = TerminalPhase.CLOSING, writable = false, error = null, issue = null)
         viewModelScope.launch {
             try {
-                terminalClient.close(sessionId, id)
+                terminalClient.close(agentId, id)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -908,7 +954,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun terminalWrite(data: String) {
         if (data.isEmpty()) return
-        val sessionId = _terminal.value.sessionId ?: return
+        val agentId = terminalAgentId ?: return
         val id = terminalId ?: return
         val session = terminalSession ?: return
         if (!_terminal.value.writable) return
@@ -930,7 +976,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         enqueueTerminalWrite {
             try {
                 if (terminalSession?.attachmentId == attachment) {
-                    terminalClient.write(sessionId, id, attachment, data)
+                    terminalClient.write(agentId, id, attachment, data)
                 }
             } finally {
                 budget.release(bytes)
@@ -950,7 +996,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * keyboard changes the height on every open and close.
      */
     fun terminalResize(columns: Int, rows: Int) {
-        val sessionId = _terminal.value.sessionId ?: return
+        val agentId = terminalAgentId ?: return
         val id = terminalId ?: return
         val session = terminalSession ?: return
         if (!_terminal.value.writable) return
@@ -958,7 +1004,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val attachment = session.attachmentId
         enqueueTerminalWrite {
             if (terminalSession?.attachmentId == attachment) {
-                terminalClient.resize(sessionId, id, attachment, grid.first, grid.second)
+                terminalClient.resize(agentId, id, attachment, grid.first, grid.second)
             }
         }
     }
@@ -985,43 +1031,59 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Opens (or adopts) a terminal for [sessionId] and attaches to it.
+     * Opens (or adopts) a terminal in [seat] of [sessionId] and attaches to it.
      *
      * `terminal/list` comes first and is not agent-scoped, so a session that already
      * retains a running terminal adopts it instead of leaving an orphan behind on
-     * every visit. Only `terminal/create` needs the live agent, and that is where the
-     * "no live agent" fact comes from.
+     * every visit — and it is also how switching seats back adopts the shell the other
+     * seat left alive on the host.
+     *
+     * The seat decides which Session every terminal call addresses: the session the
+     * user has open for `THIS_SESSION`, or the workspace's dedicated archived Session
+     * for `HOST_SHELL`, which [materializeHostShell] builds (create → set mode →
+     * archive) before any terminal exists in it.
      */
-    private fun startTerminal(sessionId: String, reuse: Boolean) {
+    private fun startTerminal(sessionId: String, seat: TerminalSeat, reuse: Boolean) {
         terminalJob?.cancel()
         terminalSession = null
         // Nothing this panel can address until the attach below succeeds: a
         // `terminal/limit-reached` refusal must not leave a terminal id behind that
         // a later Close would act on (W8).
         terminalId = null
-        // The session id moves first: every publish below spreads the current state,
-        // and a stale id here would attach the new session's screen to the old
-        // session's identity for a frame.
-        _terminal.value = _terminal.value.copy(sessionId = sessionId)
+        terminalAgentId = null
+        // The session id and the seat move first: every publish below spreads the
+        // current state, and a stale id here would attach the new session's screen to
+        // the old session's identity for a frame.
+        _terminal.value = _terminal.value.copy(
+            sessionId = sessionId,
+            seat = seat,
+            seats = terminalSeatsFor(sessionId),
+            hostShellIssue = null,
+        )
         publishTerminal(
             phase = TerminalPhase.LOADING, active = null, writable = false,
-            error = null, issue = null, limit = null,
+            error = null, issue = null, limit = null, hostShellIssue = null,
         )
         terminalJob = viewModelScope.launch {
             try {
-                val environment = terminalClient.environment(sessionId)
-                val existing = terminalClient.list(sessionId)
+                val agentId = resolveTerminalAgent(sessionId, seat) ?: return@launch
+                // The bootstrap may have just written the mapping, and that is what
+                // makes the host-shell seat addressable, so the chips are refreshed
+                // before the terminal call that can fail.
+                _terminal.value = _terminal.value.copy(seats = terminalSeatsFor(sessionId))
+                val environment = terminalClient.environment(agentId)
+                val existing = terminalClient.list(agentId)
                 val adopted = if (reuse) {
                     existing.firstOrNull { it.state == TerminalState.RUNNING } ?: existing.firstOrNull()
                 } else {
                     null
                 }
-                val info = adopted ?: createTerminal(sessionId, environment)
+                val info = adopted ?: createTerminal(agentId, environment)
                 publishTerminal(
                     environment = environment,
                     terminals = (existing.filterNot { it.id == info.id } + info),
                 )
-                attachTerminal(sessionId, info, environment)
+                attachTerminal(agentId, info, environment)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -1030,21 +1092,214 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** The Session terminal RPCs address for one seat; null when the seat failed. */
+    private suspend fun resolveTerminalAgent(sessionId: String, seat: TerminalSeat): String? =
+        when (seat) {
+            TerminalSeat.THIS_SESSION -> sessionId
+            TerminalSeat.HOST_SHELL -> materializeHostShell(sessionId)
+        }
+
+    /** The Workspace a session is accounted to, which is what owns its host shell. */
+    private fun workspaceOf(sessionId: String): WorkspaceItem? =
+        _ui.value.workspaces.firstOrNull { sessionId in it.sessionIds }
+
+    /**
+     * The seats on offer for [sessionId], each labelled with the policy in force.
+     *
+     * Recomputed rather than remembered because the session seat's label is the open
+     * session's *current* preset: a chip that still said "Workspace Write" after the
+     * reader moved the access chip to Full access would be the panel telling them
+     * which shell they are in and getting it wrong.
+     */
+    private fun terminalSeatsFor(sessionId: String): List<SeatOption> = terminalSeats(
+        sessionId = sessionId,
+        sessionPolicyLabel = permissionLabel(_ui.value.currentPermission),
+        hostShellSessionId = workspaceOf(sessionId)?.let { _ui.value.hostShellSessions[it.id] },
+    )
+
+    /**
+     * Re-labels the chips after the open session's access mode moved.
+     *
+     * Only the labels: the shells themselves are unaffected by a preset change, and
+     * re-attaching here would tear a live screen down to redraw two words.
+     */
+    private fun refreshTerminalSeats() {
+        val sessionId = _terminal.value.sessionId ?: return
+        _terminal.value = _terminal.value.copy(seats = terminalSeatsFor(sessionId))
+    }
+
+    /**
+     * Builds (or adopts) the workspace's unconfined host shell and returns the Session
+     * a terminal may be created in, or null after publishing the fact that stopped it.
+     *
+     * **The order is the feature.** `session/create` → `/permission danger-full-access`
+     * → `workspace/archiveSession`, and only then a terminal:
+     *
+     *  - `terminal/create` derives the shell's confinement from the *Session's* policy
+     *    (`terminal-controller`: `if (policy.mode !== 'danger-full-access') argv =
+     *    sandbox.confine(argv, policy)`), so a terminal created before the mode step
+     *    would be a bwrap-confined shell sitting behind a seat labelled "Host shell ·
+     *    Full access". That is the one lie this panel must not tell.
+     *  - The host refuses a mode change while any terminal is open in the session
+     *    ("Close browser terminals before changing the Session sandbox mode"), so the
+     *    mode cannot be corrected afterwards — only before.
+     *  - The dedicated session must not sit in the drawer, so it is archived before
+     *    anything is opened in it. Creating a terminal first would still work, but it
+     *    leaves the session visible in the sidebar for as long as the terminal lives.
+     *
+     * [HostShellProgress.next] is the only thing that decides which step runs, and it
+     * cannot hand back a terminal step: [HostShellProgress.terminalAllowed] is the gate
+     * asserted below before this returns.
+     */
+    private suspend fun materializeHostShell(sessionId: String): String? {
+        val workspace = workspaceOf(sessionId)
+        if (workspace == null) {
+            failHostShell(HostShellIssue.NO_WORKSPACE)
+            return null
+        }
+        val name = hostShellSessionName(workspace.title)
+        val remembered = _ui.value.hostShellSessions[workspace.id]
+        var progress = if (remembered == null) HostShellProgress() else HostShellProgress().withSession(remembered)
+        // One rebuild at most: a remembered id the host no longer has is a stale
+        // preference, and a second one would mean the host is refusing `session/create`
+        // outright, which is the failure to report rather than to retry forever.
+        var rebuilds = 0
+        while (true) {
+            val step = progress.next(name, workspace.id) ?: break
+            publishTerminal(phase = TerminalPhase.CREATING)
+            val failure = try {
+                when (step) {
+                    is HostShellStep.CreateSession ->
+                        progress = progress.withSession(createHostShellSession(step.workspaceId))
+                    is HostShellStep.SetAccessMode -> {
+                        grantHostShellAccess(step.sessionId)
+                        progress = progress.withModeSet()
+                    }
+                    is HostShellStep.Archive -> {
+                        archiveHostShellSession(step.sessionId)
+                        progress = progress.withArchived()
+                    }
+                }
+                null
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                // The tab was left mid-bootstrap. Not a failure to report: there is no
+                // reader, and a half-built session is exactly what the next visit's
+                // walk resumes from.
+                throw cancelled
+            } catch (error: Throwable) {
+                error
+            }
+            if (failure == null) continue
+            if (isSessionGone(failure) && remembered != null && rebuilds == 0) {
+                rebuilds++
+                setHostShellSession(workspace.id, null)
+                progress = HostShellProgress()
+                continue
+            }
+            failHostShell(hostShellIssueFor(step, failure), failure)
+            return null
+        }
+        // The ordering rule, enforced: `next()` returns null only once the session
+        // exists, its mode is `danger-full-access` and it is archived, so no caller can
+        // reach a `terminal/create` while that is not true.
+        check(progress.terminalAllowed) {
+            "the host shell must be unconfined and archived before any terminal is created in it"
+        }
+        val shellSessionId = progress.sessionId
+        if (shellSessionId != remembered) setHostShellSession(workspace.id, shellSessionId)
+        return shellSessionId
+    }
+
+    /** `session/create` in one Workspace: the host roots the session at its path. */
+    private suspend fun createHostShellSession(workspaceId: String): String {
+        val value = client.rpc(
+            "session/create",
+            JSONObject().put("request", JSONObject().put("workspaceId", workspaceId)),
+        )
+        val id = value.optString("sessionId")
+        check(id.isNotEmpty()) { "session/create answered without a sessionId" }
+        return id
+    }
+
+    /**
+     * `/permission danger-full-access` — the write that makes the shell unconfined.
+     *
+     * The same call the access chip makes, and the same one the host's own web client
+     * uses; it is deliberately *not* routed through [setPermission], which would also
+     * move the access chip of the session the user is working in.
+     */
+    private suspend fun grantHostShellAccess(sessionId: String) {
+        runCommandFor(sessionId, "/permission $HOST_SHELL_PRESET").getOrThrow()
+    }
+
+    /** `workspace/archiveSession`: keeps the dedicated session out of the drawer. */
+    private suspend fun archiveHostShellSession(sessionId: String) {
+        client.rpc(
+            "workspace/archiveSession",
+            JSONObject().put("request", JSONObject().put("sessionId", sessionId)),
+        )
+    }
+
+    /** True when the host no longer has the session a remembered id names. */
+    private fun isSessionGone(error: Throwable): Boolean =
+        (error as? DshRpcException)?.code == "session/not-found"
+
+    /** Which fact a refused bootstrap step is. */
+    private fun hostShellIssueFor(step: HostShellStep, error: Throwable): HostShellIssue = when {
+        (error as? DshRpcException)?.code == "gateway/lookup-not-found" -> HostShellIssue.NO_LIVE_AGENT
+        step is HostShellStep.CreateSession -> HostShellIssue.CREATE_REFUSED
+        step is HostShellStep.SetAccessMode -> HostShellIssue.MODE_REFUSED
+        else -> HostShellIssue.ARCHIVE_REFUSED
+    }
+
+    /**
+     * States why the host shell is not there.
+     *
+     * A fact, not a spinner: nothing is retried on its own, and the sentence says what
+     * did *not* happen. The panel keeps both seat chips on screen, so "This session"
+     * is the way out and the same tap on "Host shell" is the retry.
+     */
+    private fun failHostShell(issue: HostShellIssue, cause: Throwable? = null) {
+        publishTerminal(
+            phase = TerminalPhase.FAILED,
+            writable = false,
+            issue = null,
+            error = null,
+            limit = null,
+            hostShellIssue = hostShellIssueFact(issue, cause?.message),
+        )
+    }
+
+    /**
+     * Remembers (or, for null, forgets) the workspace's host-shell session.
+     *
+     * Written only once the bootstrap has completed, so a remembered id is evidence
+     * that the mode step ran — see [materializeHostShell]. Forgetting is what a stale
+     * id becomes, and it is also the manual recovery path: the drawer's Archived list
+     * can restore or remove the session, and the next visit then builds a fresh one.
+     */
+    private fun setHostShellSession(workspaceId: String, sessionId: String?) {
+        val sessions = _ui.value.hostShellSessions.withHostShellSession(workspaceId, sessionId)
+        if (sessions == _ui.value.hostShellSessions) return
+        configStore.save(configStore.load().copy(hostShellSessions = sessions))
+        _ui.value = _ui.value.copy(hostShellSessions = sessions)
+    }
+
     private suspend fun createTerminal(
-        sessionId: String,
+        agentId: String,
         environment: TerminalEnvironmentInfo,
     ): TerminalInfo {
         publishTerminal(phase = TerminalPhase.CREATING)
         // The shell list is a convenience; a host that refuses it still has a
         // default shell, which `create` selects when `shellPath` is absent.
-        val shells = runCatching { terminalClient.shells(sessionId) }.getOrDefault(emptyList())
+        val shells = runCatching { terminalClient.shells(agentId) }.getOrDefault(emptyList())
         val id = UUID.randomUUID().toString()
         // `id` is *not* published as the panel's terminal id here: on
         // `terminal/limit-reached` nothing was created, and a published id would let
         // a later Close report "The shell was closed." for a shell that never
         // existed (W8). `attachTerminal` sets it once `create` returns.
         return terminalClient.create(
-            agentId = sessionId,
+            agentId = agentId,
             id = id,
             // The web client opens a new tab at 80×24 and lets the first resize fix
             // it; the host's own floors are 2 columns and 1 row.
@@ -1067,11 +1322,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * for the reader's Reconnect.
      */
     private suspend fun attachTerminal(
-        sessionId: String,
+        agentId: String,
         info: TerminalInfo,
         environment: TerminalEnvironmentInfo,
     ) {
         terminalId = info.id
+        terminalAgentId = agentId
         terminalInput = TerminalInputBudget(environment.maxInputBytes)
         val emulator = terminalEmulator ?: TerminalEmulator(info.cols, info.rows, environment.scrollback)
             .also { terminalEmulator = it }
@@ -1087,7 +1343,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             var restartIssue: TerminalIssue? = null
             var hostError = false
             try {
-                terminalClient.follow(sessionId, info.id, session.attachmentId).collect { event ->
+                terminalClient.follow(agentId, info.id, session.attachmentId).collect { event ->
                     when (event) {
                         is StreamEvent.Item -> {
                             val issue = onTerminalFrame(session, event.value)
@@ -1268,6 +1524,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         error: String? = _terminal.value.error,
         limit: Int? = _terminal.value.limit,
         terminals: List<TerminalInfo>? = null,
+        hostShellIssue: String? = _terminal.value.hostShellIssue,
     ) {
         // A revision bump keeps the Canvas honest when only the metadata changed:
         // an exit or a mode change redraws the same grid with a different cursor.
@@ -1280,6 +1537,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             error = error,
             limit = limit,
             terminals = terminals ?: _terminal.value.terminals,
+            hostShellIssue = hostShellIssue,
             revision = _terminal.value.revision + 1,
         )
     }
@@ -1330,6 +1588,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             drawerOrderByUpdated = config.drawerOrderByUpdated,
             drawerShowArchived = config.drawerShowArchived,
             drawerCollapsedSections = config.drawerCollapsedSections,
+            hostShellSessions = config.hostShellSessions,
             baseUrl = config.baseUrl,
             username = config.username,
         )
@@ -1458,6 +1717,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             drawerGroupByWorkspace = config.drawerGroupByWorkspace,
             drawerOrderByUpdated = config.drawerOrderByUpdated,
             drawerCollapsedSections = config.drawerCollapsedSections,
+            hostShellSessions = config.hostShellSessions,
         )
         connect()
     }
@@ -1931,7 +2191,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // *fresh* attachment is also the only way to take input control back from
         // another client that took it while this one was asleep.
         if (sessionId != null && terminalJob != null && _terminal.value.sessionId == sessionId) {
-            startTerminal(sessionId, reuse = true)
+            startTerminal(sessionId, _terminal.value.seat, reuse = true)
         }
     }
 
@@ -4205,8 +4465,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             _ui.value.goal
         }
 
+        // The open session's preset, which is what the session seat's chip names.
+        val nextPermission = permission.ifEmpty { _ui.value.currentPermission }
+        val permissionChanged = nextPermission != _ui.value.currentPermission
+
         _ui.value = _ui.value.copy(
-            currentPermission = permission.ifEmpty { _ui.value.currentPermission },
+            currentPermission = nextPermission,
             planActive = plan,
             currentAgentPreset = agentPreset,
             contextPercent = percent,
@@ -4219,6 +4483,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // clearing them would blink the pills out on every pull.
             sessionStats = parseSessionStats(values) ?: _ui.value.sessionStats,
         )
+        // The session seat's chip names the policy this session runs. Guarded on the
+        // change, not called unconditionally: these projections re-apply on every
+        // control delta, and rebuilding two labels per event would be work for nothing.
+        if (permissionChanged) refreshTerminalSeats()
 
         // A goal that has just gone blocked is an escalation: the agent has
         // stopped making progress and wants a decision. Only the *transition*
@@ -4431,26 +4699,40 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun runCommand(line: String): Result<String> {
         val sessionId = _ui.value.currentSessionId
             ?: return Result.failure(IllegalStateException("No session selected"))
-        return runCatching {
-            val value = client.rpc(
-                "commands/execute",
-                JSONObject()
-                    .put("agentId", sessionId)
-                    .put("line", line)
-                    .put("submittedAttachments", JSONArray()),
-            )
-            val result = value.obj("result")
-            val kind = result.str("kind")
-            val text = result.str("text")
-            if (kind == "error") throw IllegalStateException(text.ifEmpty { "The host rejected that command" })
-            text
-        }
+        return runCommandFor(sessionId, line)
+    }
+
+    /**
+     * The same call against an explicit session.
+     *
+     * The host-shell bootstrap needs it: it sets the mode of the workspace's own
+     * archived session, so it must not go through [runCommand], which reads the id of
+     * the session the user has open — and it must not go through [setPermission]
+     * either, which would move that session's access chip to a preset the user did not
+     * pick for it.
+     */
+    private suspend fun runCommandFor(sessionId: String, line: String): Result<String> = runCatching {
+        val value = client.rpc(
+            "commands/execute",
+            JSONObject()
+                .put("agentId", sessionId)
+                .put("line", line)
+                .put("submittedAttachments", JSONArray()),
+        )
+        val result = value.obj("result")
+        val kind = result.str("kind")
+        val text = result.str("text")
+        if (kind == "error") throw IllegalStateException(text.ifEmpty { "The host rejected that command" })
+        text
     }
 
     fun setPermission(preset: String) {
         viewModelScope.launch {
             runCommand("/permission $preset")
-                .onSuccess { _ui.value = _ui.value.copy(currentPermission = preset) }
+                .onSuccess {
+                    _ui.value = _ui.value.copy(currentPermission = preset)
+                    refreshTerminalSeats()
+                }
                 .onFailure {
                     showFailure(it, "commands/execute", "Could not switch access mode: ")
                 }
