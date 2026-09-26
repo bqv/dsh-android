@@ -135,9 +135,7 @@ jobs:
 
           # The prose belongs in the repository, next to the code it describes, so
           # `docs/releases/<tag>.md` is the body when it exists. The facts below are
-          # generated because only the build knows them. Written with printf rather
-          # than a heredoc: a heredoc inside a `run:` block carries the block's own
-          # indentation into the release body, which renders it as a code block.
+          # generated because only the build knows them.
           if [ -f "$notes_file" ]; then
             cat "$notes_file" > "$notes"
             printf '\n---\n\n' >> "$notes"
