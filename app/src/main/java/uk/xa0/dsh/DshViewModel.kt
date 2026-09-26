@@ -95,7 +95,9 @@ import uk.xa0.dsh.term.hostShellRoot
 import uk.xa0.dsh.term.hostShellSessionName
 import uk.xa0.dsh.term.terminalIssueFact
 import uk.xa0.dsh.term.terminalIssueOf
+import uk.xa0.dsh.term.terminalReapList
 import uk.xa0.dsh.term.terminalSeats
+import uk.xa0.dsh.term.terminalToAdopt
 import uk.xa0.dsh.term.withHostShellSession
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -1115,15 +1117,29 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 _terminal.value = _terminal.value.copy(seats = terminalSeatsFor(sessionId))
                 val environment = terminalClient.environment(agentId)
                 val existing = terminalClient.list(agentId)
-                val adopted = if (reuse) {
-                    existing.firstOrNull { it.state == TerminalState.RUNNING } ?: existing.firstOrNull()
-                } else {
-                    null
+                // Only a running terminal may be adopted: the fallback to
+                // `existing.firstOrNull()` adopted an *exited* one, which the host
+                // still answers with a snapshot, so the panel painted it as connected
+                // and typed into a shell that was gone (see [terminalToAdopt]).
+                val adopted = if (reuse) terminalToAdopt(existing) else null
+                // The terminals that can never be adopted again are retired here. Left
+                // behind, each `exit`-and-reopen would allocate one more shell until the
+                // host's limit replaced the dead panel with a dead end.
+                val reaped = terminalReapList(existing)
+                for (stale in reaped) {
+                    try {
+                        terminalClient.close(agentId, stale.id)
+                    } catch (error: Throwable) {
+                        // Not fatal: the stale terminal simply stays in the list and the
+                        // next visit tries again. Named so the log is not silent.
+                        Log.w(TAG, "terminal reap failed: id=${stale.id} state=${stale.state}", error)
+                    }
                 }
+                val survived = existing.filterNot { stale -> reaped.any { it.id == stale.id } }
                 val info = adopted ?: createTerminal(agentId, environment)
                 publishTerminal(
                     environment = environment,
-                    terminals = (existing.filterNot { it.id == info.id } + info),
+                    terminals = (survived.filterNot { it.id == info.id } + info),
                 )
                 attachTerminal(agentId, info, environment)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -1520,9 +1536,21 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             is TerminalFrameAction.Repaint -> {
                 // Input is set up *before* the screen is fed: a repaint can ask the
                 // host for its cursor position (DSR), and that answer must be writable.
+                //
+                // The snapshot is the first frame of every attachment, so this is where
+                // a terminal that had *already* stopped when the panel adopted it first
+                // becomes visible — and it used to publish CONNECTED unconditionally.
+                // A shell that had exited then painted its last screen under a bar
+                // saying "running" with a keyboard that could not type, and the first
+                // keystroke blamed "another attachment" for it. The state a snapshot
+                // carries is exactly as authoritative as a `state` frame's, so the same
+                // fact is stated for both.
                 publishTerminal(
-                    phase = TerminalPhase.CONNECTED, active = action.info,
-                    writable = session.writable, issue = null, error = null,
+                    phase = terminalPhaseFor(action.info) ?: TerminalPhase.CONNECTED,
+                    active = action.info,
+                    writable = session.writable,
+                    issue = terminalStopIssue(action.info),
+                    error = terminalStopDetail(action.info),
                 )
                 session.emulator.append(action.screen)
                 flushTerminalReplies(session.emulator)
