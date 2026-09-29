@@ -6,6 +6,10 @@
     <!-- An agent that is blocked on an approval or a question must be able to reach
          a pocketed phone; the in-app card alone cannot. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- The "Needs attention" channel asks to vibrate, so an approval or a question
+         is felt rather than only shown. Install-time permission: no prompt, and
+         nothing here vibrates on its own. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- The standing connection: a foreground service is the only way to keep the
          event stream open with no Activity, which is what makes an agent's
          approval or question reach a pocketed phone. -->

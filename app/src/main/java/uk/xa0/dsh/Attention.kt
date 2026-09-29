@@ -89,6 +89,16 @@ object Attention {
                 NotificationManager.IMPORTANCE_HIGH,
             ).apply {
                 description = "Approvals, agent questions and finished sessions"
+                // Felt as well as shown. The default pattern, deliberately: whether a
+                // channel is on is this app's business, and the length and rhythm of
+                // the buzz are the phone's (`Notification.VIBRATE_*` are the system's
+                // own patterns).
+                //
+                // Once a reader has touched this channel's vibration in Settings the
+                // platform marks the field user-locked and ignores this call, which is
+                // correct: they have answered the question, and a later build must not
+                // answer it back.
+                enableVibration(true)
             },
         )
         manager.createNotificationChannel(

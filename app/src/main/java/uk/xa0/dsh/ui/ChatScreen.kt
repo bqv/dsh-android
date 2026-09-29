@@ -391,14 +391,35 @@ fun ChatScreen(vm: DshViewModel) {
         indexSubagentRollups(ui.sessions, ui.subagentCatalogs)
     }
 
-    // Back closes the panel or the view before it is allowed anywhere near the app's
-    // exit: on a phone these are states, not screens, and a reader pressing Back in
-    // front of the Files panel means "close this", not "quit". Registered here rather
-    // than at the root because this is where the state lives, and they are asked
-    // before the root gate because a child's handler runs first. The sheets (jobs,
-    // lineage, settings, about) are modal and already dismiss themselves.
-    BackHandler(enabled = showFiles) { showFiles = false }
-    BackHandler(enabled = !showFiles && view != ChatView.CHAT) { view = ChatView.CHAT }
+    // The way *up*, when this session is a subagent the roster can place: the header
+    // makes its title a tap that opens the parent, and because the parent is itself a
+    // session, opening it offers the same affordance again — so a nested run is a walk
+    // rather than a one-way trip back to the drawer.
+    val subagentParent = remember(ui.sessions, ui.currentSessionId) {
+        subagentParentOf(ui.sessions, ui.currentSessionId)
+    }
+
+    // Back walks *up* the screen before it is allowed anywhere near the app's exit.
+    //
+    // One handler with an explicit order rather than several `BackHandler`s: which of
+    // those wins is a question about registration order, and the answer here has to be
+    // about what the reader means. The stack is the one the screen shows — an open
+    // panel is on top of the view, the view is on top of the chat, and a subagent sits
+    // under the session that spawned it — so: close the Files panel, then return to
+    // Chat, then go up to the parent.
+    //
+    // `enabled` only while one of those applies, which matters: a handler always
+    // consumes the press, and consuming one it cannot use would hold the exit dialog
+    // hostage. The sheets (jobs, lineage, settings, about) are modal and already
+    // dismiss themselves. Composed here rather than at the root because this is where
+    // the state lives, and the root gate is asked only after the screen declines.
+    BackHandler(enabled = showFiles || view != ChatView.CHAT || subagentParent != null) {
+        when {
+            showFiles -> showFiles = false
+            view != ChatView.CHAT -> view = ChatView.CHAT
+            else -> subagentParent?.let { vm.openSession(it.sessionId) }
+        }
+    }
 
     val attachLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) vm.addAttachment(uri)
@@ -465,13 +486,6 @@ fun ChatScreen(vm: DshViewModel) {
 
 
     val current = ui.sessions.firstOrNull { it.id == ui.currentSessionId }
-    // The way *up*, when this session is a subagent the roster can place: the header
-    // makes its title a tap that opens the parent, and because the parent is itself a
-    // session, opening it offers the same affordance again — so a nested run is a walk
-    // rather than a one-way trip back to the drawer.
-    val subagentParent = remember(ui.sessions, ui.currentSessionId) {
-        subagentParentOf(ui.sessions, ui.currentSessionId)
-    }
     // The pending seat's directory, for the hero's workspace chip. The target's own
     // path is preferred; a Workspace the registry has not delivered a path for yet
     // still resolves through the registry, and a Directory target *is* its path.
