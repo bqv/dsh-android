@@ -155,6 +155,36 @@ fun subagentChildrenOf(sessions: List<SessionItem>, parentId: String): List<Sess
  * from it could only be opened blind — and the drawer, which lists archived sessions
  * too, is the honest way to reach something this client cannot name.
  */
+/**
+ * The session whose *root* a subagent shares — its top-level ancestor.
+ *
+ * Subagents are never members of a Workspace: measured on the running host, the
+ * `dsh-android` Workspace had nine members and *none* of them was a subagent, while
+ * sixty-seven subagents had a parent inside it. So the "a Workspace's host shell is
+ * shared by its members" rule never fired for a subagent, and each one resolved to a
+ * `cwd` root instead — a *second* host shell for a directory that already had one.
+ *
+ * Inheriting the ancestor's root is what makes the shell genuinely shared: the parent
+ * and every subagent under it open the same archived session, hence the same terminal,
+ * hence one shell with one history. It is also what stops the duplicate: the same
+ * directory can no longer have two roots, because only the ancestor nominates one.
+ *
+ * A top-level session owns its own root, and a cycle (a roster that names a session as
+ * its own ancestor) stops at the session itself rather than looping.
+ */
+fun hostShellOwnerOf(sessions: List<SessionItem>, sessionId: String?): String? {
+    if (sessionId.isNullOrEmpty()) return null
+    var current = sessions.firstOrNull { it.id == sessionId } ?: return null
+    val seen = HashSet<String>()
+    while (current.isSubagent) {
+        if (!seen.add(current.id)) return current.id
+        val parentId = current.parentSessionId?.takeIf { it.isNotEmpty() } ?: break
+        if (parentId == current.id) break
+        current = sessions.firstOrNull { it.id == parentId } ?: break
+    }
+    return current.id
+}
+
 data class SubagentParent(val sessionId: String, val title: String)
 
 fun subagentParentOf(sessions: List<SessionItem>, sessionId: String?): SubagentParent? {

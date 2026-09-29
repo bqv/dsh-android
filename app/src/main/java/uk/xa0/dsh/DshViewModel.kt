@@ -99,6 +99,7 @@ import uk.xa0.dsh.term.TerminalState
 import uk.xa0.dsh.term.hostShellCreateRequest
 import uk.xa0.dsh.term.hostShellIssueFact
 import uk.xa0.dsh.term.hostShellRoot
+import uk.xa0.dsh.ui.hostShellOwnerOf
 import uk.xa0.dsh.term.hostShellSessionName
 import uk.xa0.dsh.term.terminalIssueFact
 import uk.xa0.dsh.term.terminalIssueOf
@@ -1237,13 +1238,20 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * A Workspace first, because its host shell is shared by its members; otherwise the
      * session's own cwd, which `session/create` accepts exactly as it accepts a
      * workspace id. The choice itself is [hostShellRoot], where the JVM tests reach it.
+     *
+     * A **subagent** asks for its ancestor's root, not its own: the host never makes a
+     * subagent a Workspace member, so resolving its own cwd built a second host shell
+     * for a directory that already had one, and a shell the parent was not in. See
+     * [hostShellOwnerOf] — one shell per project, which is what the reader means by
+     * "the host shell" whatever session they are looking at.
      */
     private fun hostShellRootFor(sessionId: String): HostShellRoot? {
-        val workspace = workspaceOf(sessionId)
+        val owner = hostShellOwnerOf(_ui.value.sessions, sessionId) ?: sessionId
+        val workspace = workspaceOf(owner)
         return hostShellRoot(
             workspaceId = workspace?.id,
             workspaceTitle = workspace?.title,
-            cwd = cwdOf(sessionId),
+            cwd = cwdOf(owner),
         )
     }
 

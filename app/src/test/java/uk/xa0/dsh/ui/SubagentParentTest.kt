@@ -2,6 +2,7 @@ package uk.xa0.dsh.ui
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import uk.xa0.dsh.SessionItem
 
@@ -95,5 +96,52 @@ class SubagentParentTest {
         assertNull(subagentParentOf(roster, null))
         assertNull(subagentParentOf(roster, ""))
         assertNull(subagentParentOf(roster, "not-in-the-roster"))
+    }
+
+    /**
+     * The host-shell side of the same walk: a subagent shares its *ancestor's* root.
+     *
+     * Measured on the host: a Workspace's nine members were all top-level, and none of
+     * the sixty-seven subagents under them was a member. So a subagent resolving its own
+     * cwd built a second host shell for a directory that already had one.
+     */
+    @Test
+    fun `a subagent shares the root of its top-level ancestor`() {
+        val roster = listOf(
+            session("root", title = "Root"),
+            session("mid", isSubagent = true, parent = "root", title = "Mid"),
+            session("leaf", isSubagent = true, parent = "mid", title = "Leaf"),
+        )
+        assertEquals("root", hostShellOwnerOf(roster, "leaf"))
+        assertEquals("root", hostShellOwnerOf(roster, "mid"))
+        // A top-level session owns its own root, so the rule is a no-op for it.
+        assertEquals("root", hostShellOwnerOf(roster, "root"))
+    }
+
+    @Test
+    fun `an orphan subagent keeps its own root`() {
+        val roster = listOf(session("orphan", isSubagent = true, title = "Orphan"))
+        assertEquals("orphan", hostShellOwnerOf(roster, "orphan"))
+        val gone = listOf(session("child", isSubagent = true, parent = "gone", title = "Child"))
+        assertEquals("child", hostShellOwnerOf(gone, "child"))
+    }
+
+    /** A roster that names a cycle must stop, not spin. */
+    @Test
+    fun `a cycle stops at the session itself`() {
+        val roster = listOf(
+            session("a", isSubagent = true, parent = "b", title = "A"),
+            session("b", isSubagent = true, parent = "a", title = "B"),
+        )
+        val owner = hostShellOwnerOf(roster, "a")
+        assertTrue("owner is one of the two, not null", owner == "a" || owner == "b")
+        // And the same walk from the other side terminates as well.
+        assertTrue(hostShellOwnerOf(roster, "b") in setOf("a", "b"))
+    }
+
+    @Test
+    fun `an unknown session has no owner`() {
+        assertNull(hostShellOwnerOf(emptyList(), "nobody"))
+        assertNull(hostShellOwnerOf(emptyList(), null))
     }
 }
