@@ -338,6 +338,15 @@ is the whole of what it will tell you about an account, and topping up opens
 `platform.deepseek.com/top_up` in the browser. The key lives in the app's encrypted
 preferences and is sent nowhere but `api.deepseek.com`.
 
+## Sharing into it
+
+The app appears in the Android share sheet for any file type: sharing an image or a
+document to **DSH** attaches it to the open session's composer, exactly as the `+`
+button does, so nothing has to be saved and re-attached by hand. A share can start the
+app from cold — the files wait until it is connected and has a session to stage them
+into. Only `content://` URIs are taken; a shared block of text is not an attachment and
+is left alone.
+
 ## Deliberate divergences and gaps
 
 `docs/PARITY.md` is the element-by-element ledger; the short version:

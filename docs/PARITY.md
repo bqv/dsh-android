@@ -202,6 +202,19 @@ of where the app stands against them.
       after a network drop is **unverified**: the emulator's `svc wifi/data` do not
       touch the app's path
 - [x] Preview panel: the `text` preview that a deliverable or a file row opens into
+- [+] **Share to DSH** (app addition, not in the web client). The app registers for
+      `ACTION_SEND` and `ACTION_SEND_MULTIPLE` with `*/*`, so an image from the gallery
+      or a document from a viewer lands in the open session's composer as an attachment
+      — the same path the `+` button takes, with no detour through Downloads. A share
+      can *start* the app, where there is no session and often no connection yet, so
+      the URIs are held by the activity and staged once `AppPhase.READY` and a session
+      or pending target exist; `addAttachment` materialises a pending session by design,
+      so a share onto the hero becomes the session's first use.
+      Only `content://` URIs: a `file://` extra is not this app's to open, and pretending
+      otherwise would leave an unexplained empty attachment. A shared *text* is not
+      handled — it is a message, not an attachment, and the composer is where it belongs
+      if it is ever wanted.
+
 - [+] **Balance & top up** (app addition, not in the web client). The token panel's
       cost row leads to the account balance, read with the user's own DeepSeek key
       (`GET /user/balance` — the only account call DeepSeek publishes, and the only

@@ -33,6 +33,8 @@ import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
 
+import android.net.Uri
+
 class MainActivity : ComponentActivity() {
 
     /**
@@ -44,6 +46,16 @@ class MainActivity : ComponentActivity() {
 
     /** One provisioning intent, consumed once by composition. */
     private val provisioning = mutableStateOf<Provisioning?>(null)
+
+    /**
+     * Files another app shared into this one, waiting to be staged.
+     *
+     * Held rather than handed straight to the view model because a share can *start*
+     * the app: on a cold share there is no session, no pending target and often no
+     * connection yet, and staging an attachment needs a session to stage it into.
+     * Composition stages them once there is somewhere for them to go.
+     */
+    private val sharedFiles = mutableStateOf<List<Uri>>(emptyList())
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -78,6 +90,20 @@ class MainActivity : ComponentActivity() {
                     DshConnectionService.start(this@MainActivity)
                     BatteryExemption.request(this@MainActivity)
                 }
+            }
+
+            // A share can *start* the app: no session, no pending target, and the
+            // connection still coming up. So the files wait here until there is
+            // somewhere to stage them — then they go in one at a time, exactly as if
+            // each had been picked with the + button.
+            LaunchedEffect(sharedFiles.value, ui.phase, ui.currentSessionId, ui.pendingSession) {
+                val files = sharedFiles.value
+                if (files.isEmpty()) return@LaunchedEffect
+                if (ui.phase != AppPhase.READY) return@LaunchedEffect
+                val destination = ui.currentSessionId ?: ui.pendingSession?.let { "pending" }
+                if (destination == null) return@LaunchedEffect
+                sharedFiles.value = emptyList()
+                files.forEach { vm.addAttachment(it) }
             }
 
             LaunchedEffect(deepLinkSession.value) {
@@ -166,6 +192,7 @@ class MainActivity : ComponentActivity() {
         intent.getStringExtra(Attention.EXTRA_SESSION)?.takeIf { it.isNotBlank() }?.let {
             deepLinkSession.value = it
         }
+        sharedFiles.value = sharedFilesOf(intent).ifEmpty { sharedFiles.value }
         val url = intent.getStringExtra("url")?.takeIf { it.isNotBlank() } ?: return
         provisioning.value = Provisioning(
             url = url,
@@ -173,6 +200,54 @@ class MainActivity : ComponentActivity() {
             password = intent.getStringExtra("password").orEmpty(),
             cookie = intent.getStringExtra("cookie").orEmpty(),
         )
+    }
+
+    /**
+     * The `content://` URIs a share intent carries, in the order it lists them.
+     *
+     * Both share actions, because they are different intents rather than one with a
+     * flag: `SEND` puts a single Uri in `EXTRA_STREAM`, `SEND_MULTIPLE` puts a list in
+     * the same extra. A sender that puts a bare string URI there (some do) is read
+     * too, and an `EXTRA_TEXT` carrying a `content://` URI is taken as a file as well.
+     *
+     * Only `content://`. A `file://` extra cannot be read by this app on a modern
+     * Android — the sender's own file path is not ours to open — and pretending
+     * otherwise would turn a share into an unexplained empty attachment.
+     */
+    private fun sharedFilesOf(intent: android.content.Intent?): List<Uri> {
+        intent ?: return emptyList()
+        val action = intent.action
+        if (action != android.content.Intent.ACTION_SEND &&
+            action != android.content.Intent.ACTION_SEND_MULTIPLE
+        ) {
+            return emptyList()
+        }
+        val uris = mutableListOf<Uri>()
+        // Read the raw extra rather than the typed getter: `EXTRA_STREAM` is a Uri for
+        // SEND and an ArrayList for SEND_MULTIPLE, and `getParcelableExtra` is only
+        // correct for the first of those — asking it for a list is a ClassCastException
+        // on a modern platform, which would make every multi-file share crash the app
+        // it was aimed at. The string form is here too because some senders use it.
+        when (val raw = intent.extras?.get(android.content.Intent.EXTRA_STREAM)) {
+            is Uri -> uris += raw
+            is String -> runCatching { Uri.parse(raw) }.getOrNull()?.let { uris += it }
+            is ArrayList<*> -> raw.forEach { entry ->
+                when (entry) {
+                    is Uri -> uris += entry
+                    is String -> runCatching { Uri.parse(entry) }.getOrNull()?.let { uris += it }
+                    else -> Unit
+                }
+            }
+
+            is Array<*> -> raw.forEach { entry -> if (entry is Uri) uris += entry }
+        }
+        // A text share that is a URI is a file share with extra words; anything else
+        // as text is a message, which is not an attachment and is not staged here.
+        intent.getStringExtra(android.content.Intent.EXTRA_TEXT)
+            ?.trim()
+            ?.takeIf { it.startsWith("content://") }
+            ?.let { runCatching { Uri.parse(it) }.getOrNull()?.let { uri -> uris += uri } }
+        return uris.filter { it.scheme == "content" }
     }
 
     /**

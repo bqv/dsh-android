@@ -39,6 +39,22 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Share to DSH. One image, one document, or several at once land in the
+                 open session's composer as attachments, which is the same path the +
+                 button takes — so a screenshot from the gallery or a PDF from a viewer
+                 needs no detour through Downloads.
+
+                 `*/*` on purpose: the app does not care what the file is, and a filter
+                 listing only image/* would silently hide "DSH" from a share of
+                 anything else. Both actions are registered because a single-file share
+                 and a multi-file share are different intents, not a flag. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
 
         <service
