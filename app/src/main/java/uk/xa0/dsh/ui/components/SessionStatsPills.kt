@@ -96,6 +96,8 @@ fun SessionStatsPills(
      * provider's prices.
      */
     rates: TokenRates? = null,
+    /** Opens the account balance and top-up screen, from the usage panel. */
+    onBalance: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     if (stats == null || !stats.visible) return
@@ -204,6 +206,10 @@ fun SessionStatsPills(
                         StatRow("Cost (off-peak – peak)", formatCostRange(cost))
                         StatNote(PRICE_SOURCE)
                     }
+                    // The way up from a session's cost to the account's balance, which
+                    // is the same question one level out. Shown whether or not a price
+                    // table matched: topping up is useful even for an unpriced route.
+                    BalanceAction(onClick = onBalance)
                 }
             }
         }
@@ -399,4 +405,31 @@ private fun StatNote(text: String) {
             .fillMaxWidth()
             .padding(top = DshSpacing.xs),
     )
+}
+
+/**
+ * `Balance & top up` as a panel row.
+ *
+ * A row rather than a second chip: the pills are readings, and this is a door out of
+ * the panel to the account behind them.
+ */
+@Composable
+private fun BalanceAction(onClick: () -> Unit) {
+    val colors = DshTheme.colors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(DshRadius.sm))
+            .clickableNoRipple(onClick = onClick)
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Balance & top up",
+            style = DshType.bodySmall,
+            color = colors.link,
+            modifier = Modifier.weight(1f),
+        )
+        Text("›", style = DshType.bodySmall, color = colors.link)
+    }
 }

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 120" width="240" height="120">
+  <rect x="2" y="2" width="236" height="116" rx="12" fill="#1b2b4b" stroke="#4c8dff" stroke-width="3"/>
+  <circle cx="60" cy="60" r="30" fill="#4c8dff"/>
+  <path d="M60 34 L60 86 M34 60 L86 60" stroke="#eaf1ff" stroke-width="6" stroke-linecap="round"/>
+  <text x="110" y="55" fill="#eaf1ff" font-family="monospace" font-size="20">SVG preview</text>
+  <text x="110" y="80" fill="#9db8e8" font-family="monospace" font-size="14">drawing + source</text>
+</svg>

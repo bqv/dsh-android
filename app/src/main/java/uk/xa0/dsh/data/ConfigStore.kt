@@ -75,6 +75,19 @@ data class DshConfig(
      * and restores the session if they ever want it back, or wants it gone.
      */
     val hostShellSessions: Map<String, String> = emptyMap(),
+    /**
+     * A DeepSeek API key, for reading the account's balance.
+     *
+     * Not the host's key and not a way to bill anything: DeepSeek's only account
+     * endpoint is `GET /user/balance`, and the balance belongs to the *account* —
+     * every key on it reads the same figure — so this key sees exactly the balance
+     * the host is spending from. It is stored in the same encrypted preferences as
+     * the host password, and sent to `api.deepseek.com` and nowhere else.
+     *
+     * Blank means the usage panel says so rather than showing a stale or invented
+     * number.
+     */
+    val deepseekApiKey: String = "",
 ) {
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
@@ -137,6 +150,7 @@ class ConfigStore(context: Context) {
             ?.toSet()
             ?: emptySet(),
         hostShellSessions = decodeHostShellSessions(prefs.getString(KEY_HOST_SHELLS, null)),
+        deepseekApiKey = prefs.getString(KEY_DEEPSEEK_KEY, "").orEmpty(),
     )
 
     fun save(config: DshConfig) {
@@ -158,11 +172,12 @@ class ConfigStore(context: Context) {
             // Same hazard, same answer: the encoding copies the entries into a fresh
             // String, so nothing the caller still holds can reach the stored value.
             .putString(KEY_HOST_SHELLS, encodeHostShellSessions(config.hostShellSessions))
+            .putString(KEY_DEEPSEEK_KEY, config.deepseekApiKey)
             .apply()
     }
 
     fun clearCredentials() {
-        prefs.edit().remove(KEY_PASSWORD).remove(KEY_COOKIE).apply()
+        prefs.edit().remove(KEY_PASSWORD).remove(KEY_COOKIE).remove(KEY_DEEPSEEK_KEY).apply()
     }
 
     private companion object {
@@ -178,5 +193,6 @@ class ConfigStore(context: Context) {
         const val KEY_DRAWER_ARCHIVED = "drawer_show_archived"
         const val KEY_DRAWER_COLLAPSED = "drawer_collapsed_sections"
         const val KEY_HOST_SHELLS = "host_shell_sessions"
+        const val KEY_DEEPSEEK_KEY = "deepseek_api_key"
     }
 }

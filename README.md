@@ -329,6 +329,15 @@ socket resumes streaming instead of silently freezing the UI.
   exemption is offered, because an OEM battery manager otherwise reaps the
   process and the socket with it.
 
+### The account balance
+
+The token panel's cost row opens the DeepSeek account balance: `GET /user/balance`,
+read with an API key you paste on that screen. It is the one request this app makes
+that does not go to your host — DeepSeek has no top-up or usage API, so the balance
+is the whole of what it will tell you about an account, and topping up opens
+`platform.deepseek.com/top_up` in the browser. The key lives in the app's encrypted
+preferences and is sent nowhere but `api.deepseek.com`.
+
 ## Deliberate divergences and gaps
 
 `docs/PARITY.md` is the element-by-element ledger; the short version:

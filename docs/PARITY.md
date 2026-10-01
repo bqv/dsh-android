@@ -202,6 +202,16 @@ of where the app stands against them.
       after a network drop is **unverified**: the emulator's `svc wifi/data` do not
       touch the app's path
 - [x] Preview panel: the `text` preview that a deliverable or a file row opens into
+- [+] **Balance & top up** (app addition, not in the web client). The token panel's
+      cost row leads to the account balance, read with the user's own DeepSeek key
+      (`GET /user/balance` — the only account call DeepSeek publishes, and the only
+      request this app makes that does not go to the host). The key is stored in the
+      app's encrypted preferences, entered on that screen rather than in Settings, and
+      the only place it is sent is `api.deepseek.com`. Top up opens
+      `platform.deepseek.com/top_up` in the browser: there is no top-up API, and a
+      payment form in an app would be inventing one. There is deliberately **no usage
+      chart** — DeepSeek exposes no spend or history at all, so a graph could only be
+      this client's own ledger, which was considered and deferred.
 - [x] **Preview renders pictures, and an SVG both ways.** The format is decided from the
       path (`model/previewFormatOf`), which is what makes the read choice possible at all: a
       raster image is fetched as bytes (`workspaceFiles/readBytes`, one window of at most

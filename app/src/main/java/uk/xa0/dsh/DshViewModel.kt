@@ -27,6 +27,7 @@ import org.json.JSONObject
 import uk.xa0.dsh.data.BusyEnter
 import uk.xa0.dsh.data.DshConfig
 import uk.xa0.dsh.data.ThemeMode
+import uk.xa0.dsh.model.AccountBalance
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.JobsMarker
 import uk.xa0.dsh.model.LiveAttempt
@@ -74,6 +75,8 @@ import uk.xa0.dsh.model.str
 import uk.xa0.dsh.model.subagentInterruptArgs
 import uk.xa0.dsh.model.subagentPromptRequest
 import uk.xa0.dsh.model.subagentTargetOf
+import uk.xa0.dsh.net.BalanceFailure
+import uk.xa0.dsh.net.DeepSeekAccount
 import uk.xa0.dsh.net.DshAuthException
 import uk.xa0.dsh.net.DshRpcException
 import uk.xa0.dsh.net.DshUnreachableException
@@ -192,6 +195,20 @@ data class DirectoryLevel(
 
 /** One adapter-owned reasoning effort for a model route. */
 data class EffortOption(val id: String, val name: String)
+
+/**
+ * What the usage panel knows about the account balance.
+ *
+ * [NoKey] is a state rather than an absent value because it has its own wording on
+ * screen — "add a key to see this" is advice, and an empty card is not.
+ */
+sealed interface BalanceState {
+    data object Idle : BalanceState
+    data object Loading : BalanceState
+    data object NoKey : BalanceState
+    data class Ready(val account: AccountBalance) : BalanceState
+    data class Failed(val message: String) : BalanceState
+}
 
 data class ModelOption(
     val provider: String,
@@ -539,6 +556,12 @@ data class UiState(
      */
     val sessionStats: SessionStats? = null,
     /**
+     * The account's balance, as last read. Null until asked for: this is an outbound
+     * call to DeepSeek with the user's own key, so it happens when the panel is opened
+     * rather than on every launch.
+     */
+    val balance: BalanceState = BalanceState.Idle,
+    /**
      * The current session's dock rows, from the host control stream plus any
      * local submission echo the host has not admitted yet. Host `queued` and
      * `steering` placements both render (`steering` is already on its way into
@@ -773,6 +796,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * Held so [onCleared] can unregister exactly this hook: the tracker is
      * process-scoped and would otherwise keep a destroyed view model alive.
      */
+    /** The one client that talks to DeepSeek itself rather than to the host. */
+    private val deepseekAccount = DeepSeekAccount()
+
     private val foregroundHook: () -> Unit = { onAppResumed() }
 
     /** Same idea for the mux handshake hook on [DshClient]. */
@@ -4508,6 +4534,44 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val config = configStore.load().copy(busyEnter = mode)
         configStore.save(config)
         _ui.value = _ui.value.copy(busyEnter = mode)
+    }
+
+    /** Saves (or clears) the DeepSeek key used to read the account balance. */
+    fun updateDeepSeekKey(key: String) {
+        val config = configStore.load().copy(deepseekApiKey = key.trim())
+        configStore.save(config)
+        // The old balance belonged to the old key; a stale figure next to a new key is
+        // worse than none.
+        _ui.value = _ui.value.copy(balance = BalanceState.Idle)
+    }
+
+    /**
+     * Reads the account balance, if there is a key to read it with.
+     *
+     * The only call this app makes that is not to the DSH host: DeepSeek's own
+     * `GET /user/balance`, which is the whole of what that API will say about an
+     * account — it publishes no spend and no history.
+     */
+    fun refreshBalance() {
+        val key = configStore.load().deepseekApiKey
+        if (key.isBlank()) {
+            _ui.value = _ui.value.copy(balance = BalanceState.NoKey)
+            return
+        }
+        if (_ui.value.balance is BalanceState.Loading) return
+        _ui.value = _ui.value.copy(balance = BalanceState.Loading)
+        viewModelScope.launch {
+            val next = try {
+                BalanceState.Ready(deepseekAccount.balance(key))
+            } catch (error: BalanceFailure) {
+                BalanceState.Failed(error.message ?: "Could not read the balance.")
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                BalanceState.Failed(error.message ?: error.javaClass.simpleName)
+            }
+            _ui.value = _ui.value.copy(balance = next)
+        }
     }
 
     /**

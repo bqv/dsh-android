@@ -116,6 +116,12 @@ dependencies {
     // attachment/sequence rules are verified against bytes here, because the device
     // half of this feature cannot be exercised from a build box.
     testImplementation("junit:junit:4.13.2")
+    // A *real* org.json for unit tests. The android.jar on a unit-test classpath is
+    // the stubbed one, so `JSONObject(...)` throws "Stub!" and every parser test would
+    // fail for a reason that has nothing to do with the parser. The test source set
+    // takes this jar over the stub, which makes JSON-shaped logic testable on the JVM
+    // — which is the only place it can be tested at all.
+    testImplementation("org.json:json:20240303")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

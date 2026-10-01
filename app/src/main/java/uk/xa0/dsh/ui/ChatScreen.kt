@@ -381,6 +381,9 @@ fun ChatScreen(vm: DshViewModel) {
     // The right panel's `files` surface. A phone has no room for a column beside
     // the transcript, so it takes the whole body with its own back bar.
     var showFiles by rememberSaveable(ui.currentSessionId) { mutableStateOf(false) }
+    // The balance sheet, reached from the token panel. Its read is on demand rather
+    // than on launch: it is the one call this app makes to DeepSeek itself.
+    var showBalance by rememberSaveable { mutableStateOf(false) }
     // A deliverable chip opens that path in the panel, so the panel needs to be
     // told what to select when it was not opened from its own list.
     var filesFocus by remember(ui.currentSessionId) { mutableStateOf<String?>(null) }
@@ -1287,6 +1290,12 @@ fun ChatScreen(vm: DshViewModel) {
                 // nothing at all rather than an empty row.
                 SessionStatsPills(
                     stats = ui.sessionStats,
+                    onBalance = {
+                        showBalance = true
+                        // Ask when the door opens, not when the app starts: a figure
+                        // read at launch is stale by the time anyone looks at it.
+                        vm.refreshBalance()
+                    },
                     // Priced routes only. The rates follow the session's *current*
                     // model, which is also what the host bills the next turn at.
                     rates = tokenRatesFor(ui.selectedModel?.provider, ui.selectedModel?.model),
@@ -1378,6 +1387,15 @@ fun ChatScreen(vm: DshViewModel) {
                 },
             )
         }
+    }
+
+    if (showBalance) {
+        BalanceSheet(
+            state = ui.balance,
+            onKey = vm::updateDeepSeekKey,
+            onRefresh = vm::refreshBalance,
+            onDismiss = { showBalance = false },
+        )
     }
 
     if (showJobs) {
