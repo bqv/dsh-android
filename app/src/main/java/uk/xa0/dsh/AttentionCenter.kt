@@ -106,8 +106,24 @@ class AttentionCenter(private val context: Context) {
     var visibleSessionId: String? = null
         set(value) {
             field = value
+            // Opening a session acknowledges it. Its alerts were *suppressed* while it
+            // was on screen (`alert` below), but one that arrived while another session
+            // — or no app at all — was in front is already in the shade, and the
+            // notification existed only to bring the reader here.
+            value?.let { markSessionSeen(it) }
             publishVisible()
         }
+
+    /**
+     * Withdraws every alert a session may have posted.
+     *
+     * Called when the reader opens it, and again when the app is resumed onto it:
+     * both are the same fact — they are looking at the session now — and neither
+     * should leave a "needs attention" row in the shade for something on screen.
+     */
+    fun markSessionSeen(sessionId: String) {
+        for (id in Attention.sessionNotificationIds(sessionId)) Attention.cancel(context, id)
+    }
 
     /** The session currently on screen is also "visible" only while an activity is resumed. */
     @Volatile

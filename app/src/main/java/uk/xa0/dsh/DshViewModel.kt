@@ -2404,6 +2404,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     Log.d(TAG, "resume: socket is down; leaving it to the backoff")
                     return@launch
                 }
+                // Resuming *onto* a session is opening it: a notification that landed
+                // while the app was in a pocket is about the screen the reader is now
+                // looking at. (Opening a different one clears that one instead, in
+                // `AttentionCenter.visibleSessionId`.)
+                _ui.value.currentSessionId?.let { app.attention.markSessionSeen(it) }
                 // Cancel and re-open rather than trusting `isActive`: a frozen
                 // collector is active and dead at the same time, and only a fresh
                 // opening frame carries the baseline (archived ids included).

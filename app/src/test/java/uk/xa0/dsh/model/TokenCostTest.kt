@@ -22,10 +22,10 @@ class TokenCostTest {
     @Test
     fun `a million of each class costs the published rates`() {
         val range = costRange(1_000_000, 1_000_000, 1_000_000, flash)
-        // peak: 0.006 + 0.3 + 1.2
-        assertEquals(1.506, range.peak, 1e-9)
+        // peak: ¥0.04 + ¥2 + ¥8
+        assertEquals(10.04, range.peak, 1e-9)
         // off-peak is half of peak
-        assertEquals(0.753, range.offPeak, 1e-9)
+        assertEquals(5.02, range.offPeak, 1e-9)
     }
 
     /** The cache-hit rate is the one that makes a long session cheap; keep it honest. */
@@ -33,16 +33,16 @@ class TokenCostTest {
     fun `cache hits are billed at the hit rate, not the miss rate`() {
         val hits = costRange(cacheHitTokens = 1_000_000, cacheMissTokens = 0, outputTokens = 0, rates = flash)
         val misses = costRange(cacheHitTokens = 0, cacheMissTokens = 1_000_000, outputTokens = 0, rates = flash)
-        assertEquals(0.006, hits.peak, 1e-9)
-        assertEquals(0.3, misses.peak, 1e-9)
+        assertEquals(0.04, hits.peak, 1e-9)
+        assertEquals(2.0, misses.peak, 1e-9)
         assertTrue("a hit must be far cheaper than a miss", hits.peak < misses.peak / 10)
     }
 
     @Test
     fun `pro is priced from its own column`() {
         val range = costRange(0, 1_000_000, 0, pro)
-        assertEquals(1.32, range.peak, 1e-9)
-        assertEquals(0.66, range.offPeak, 1e-9)
+        assertEquals(9.0, range.peak, 1e-9)
+        assertEquals(4.5, range.offPeak, 1e-9)
     }
 
     /** The retired ids are served and billed as Flash, so they must be priced. */
@@ -70,18 +70,21 @@ class TokenCostTest {
     fun `an empty session estimates zero`() {
         val range = costRange(0, 0, 0, flash)
         assertEquals(0.0, range.peak, 0.0)
-        assertEquals("$0.00", formatCostRange(range))
+        assertEquals("¥0.00", formatCostRange(range))
         // So does one whose whole spend is below the precision printed: a few hundred
         // cached tokens is not a figure, it is nothing to the cent.
-        assertEquals("$0.00", formatCostRange(costRange(500, 0, 0, flash)))
+        assertEquals("¥0.00", formatCostRange(costRange(500, 0, 0, flash)))
     }
 
-    /** Two decimals for dollars, three for cents, four when it is a fraction of one. */
+    /** Money's own two decimals, and four only when two would round the figure away. */
     @Test
     fun `the format scales with the size of the figure`() {
-        assertEquals("$1.51 – $3.01", formatCostRange(CostRange(1.506, 3.012)))
-        assertEquals("$0.075 – $0.151", formatCostRange(CostRange(0.0753, 0.1506)))
-        assertEquals("$0.0075 – $0.0151", formatCostRange(CostRange(0.00753, 0.01506)))
+        assertEquals("¥5.02 – ¥10.04", formatCostRange(CostRange(5.02, 10.04)))
+        // A cent and a half is money: two decimals still say something.
+        assertEquals("¥0.01 – ¥0.02", formatCostRange(CostRange(0.00753, 0.01506)))
+        // Below half a cent, two decimals would print ¥0.00 at both ends, so the figure
+        // is carried at four instead.
+        assertEquals("¥0.0008 – ¥0.0015", formatCostRange(CostRange(0.000753, 0.001506)))
     }
 
     /**
@@ -90,11 +93,11 @@ class TokenCostTest {
      */
     @Test
     fun `a range that rounds together is printed once`() {
-        assertEquals("$0.00", formatCostRange(CostRange(0.0000001, 0.0000002)))
+        assertEquals("¥0.00", formatCostRange(CostRange(0.0000001, 0.0000002)))
         // A thousand cache-hit tokens on Flash is a fraction of a cent: both ends print
         // the same four-decimal figure, so the reading is one value and not a range.
         val tiny = formatCostRange(costRange(1_000, 0, 0, flash))
-        assertTrue(tiny.startsWith("$"))
+        assertTrue(tiny.startsWith("¥"))
         assertTrue("no dash at this size", !tiny.contains("–"))
     }
 }

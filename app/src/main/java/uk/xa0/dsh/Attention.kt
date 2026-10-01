@@ -64,6 +64,22 @@ object Attention {
         if (sessionId.isNullOrEmpty()) ID_QUESTION else 5_000_000 + (sessionId.hashCode() and 0xFFFFF)
 
     /**
+     * Every notification this app posts *about one session*, for the caller that has
+     * to withdraw them together.
+     *
+     * One list rather than four cancellations at each call site: a new per-session
+     * alert kind is added here and nowhere else. The ids are per session by
+     * construction, so cancelling is scoped — opening a session cannot silence
+     * another one's alert.
+     */
+    fun sessionNotificationIds(sessionId: String): List<Int> = listOf(
+        idleId(sessionId),
+        approvalId(sessionId),
+        questionId(sessionId),
+        bellId(sessionId),
+    )
+
+    /**
      * A terminal's BEL, per session. It gets its own range rather than sharing the
      * question one: a bell and a question can be waiting at the same time, and the
      * one that arrived last must not erase the other from the shade.
