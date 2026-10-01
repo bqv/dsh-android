@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -241,6 +242,13 @@ fun ChatScreen(vm: DshViewModel) {
     // catches up in one step, when they come back to the end.
     var frozenLive by remember { mutableStateOf<LiveAttempt?>(null) }
     val currentLive by rememberUpdatedState(live)
+
+    // How tall the streaming row actually is, measured rather than guessed: the
+    // follow below is allowed to chase a message only while the whole of it fits.
+    var liveRowHeight by remember { mutableStateOf(0) }
+    val viewportHeight by remember {
+        derivedStateOf { listState.layoutInfo.viewportSize.height }
+    }
 
     // ...and hold the *shape* of the ended-turn fold for the same reason.
     //
@@ -913,6 +921,28 @@ fun ChatScreen(vm: DshViewModel) {
                 // Token deltas change the live row's height without changing the
                 // item count, so height growth has to trigger the follow too.
                 val liveLength = (live?.text?.length ?: 0) + (live?.reasoning?.length ?: 0)
+
+                // A message taller than the screen is not chased.
+                //
+                // Following pins the newest text to the bottom edge, so a long answer
+                // slides its own beginning off the top and the reader has to scroll up
+                // to catch it — while the next token drags them back down. At the
+                // instant the row first outgrows the viewport its top is exactly one
+                // viewport above the tail, so one scroll back by the difference lands
+                // the reader at the beginning and there is nothing left to chase.
+                //
+                // Releasing `stickToBottom` is what makes it stick: the follow effect
+                // below is what re-pins the tail, and the freeze is what stops the
+                // growth re-laying-out the rows that are now the reader's page.
+                LaunchedEffect(liveRowHeight, viewportHeight) {
+                    if (!stickToBottom || viewportHeight <= 0 || liveRowHeight <= viewportHeight) {
+                        return@LaunchedEffect
+                    }
+                    stickToBottom = false
+                    frozenLive = currentLive
+                    listState.scrollBy((liveRowHeight - viewportHeight).toFloat())
+                }
+
                 LaunchedEffect(rows.size, liveLength, todos.size) {
                     // `isScrollInProgress` is the guard that matters: without it a
                     // streaming token could jump the list mid-drag, which reads as
@@ -1001,7 +1031,10 @@ fun ChatScreen(vm: DshViewModel) {
                                         }
                                     }
 
-                                    is DisplayRow.Live -> LiveAttemptRow(row.attempt)
+                                    is DisplayRow.Live -> LiveAttemptRow(
+                                        row.attempt,
+                                        modifier = Modifier.onSizeChanged { liveRowHeight = it.height },
+                                    )
                                 }
 
                                 // `turn-deliverables.ts`: the row belongs to the turn's

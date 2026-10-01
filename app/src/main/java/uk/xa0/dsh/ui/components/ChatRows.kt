@@ -623,9 +623,12 @@ fun AssistantMessageRow(
 
 /** The in-flight attempt: live reasoning, live answer text, plus a streaming dot. */
 @Composable
-fun LiveAttemptRow(attempt: LiveAttempt) {
+fun LiveAttemptRow(attempt: LiveAttempt, modifier: Modifier = Modifier) {
     val colors = DshTheme.colors
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(DshSpacing.xl)) {
+    Column(
+        modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(DshSpacing.xl),
+    ) {
         val reasoning = attempt.reasoning
         if (reasoning.isNotBlank()) {
             ReasoningRow(reasoning, running = !attempt.finished)
