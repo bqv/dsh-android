@@ -39,8 +39,12 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
+import uk.xa0.dsh.model.PRICE_SOURCE
+import uk.xa0.dsh.model.TokenRates
 import uk.xa0.dsh.model.SessionStats
 import uk.xa0.dsh.model.formatCompactDuration
+import uk.xa0.dsh.model.costRange
+import uk.xa0.dsh.model.formatCostRange
 import uk.xa0.dsh.model.formatCompactTokens
 import uk.xa0.dsh.model.formatExactTokens
 import uk.xa0.dsh.ui.clickableNoRipple
@@ -83,7 +87,17 @@ private enum class StatPill { TIME, USAGE }
  *   composer card's edges.
  */
 @Composable
-fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
+fun SessionStatsPills(
+    stats: SessionStats?,
+    /**
+     * The published rates for the session's current route, or null when this app has
+     * no price for it — a local model, or a provider whose list it does not have. Null
+     * means the panel draws no cost row at all rather than a number from another
+     * provider's prices.
+     */
+    rates: TokenRates? = null,
+    modifier: Modifier = Modifier,
+) {
     if (stats == null || !stats.visible) return
     // One exclusive slot for both panels: opening either closes the other, as
     // the web's single `openPill` state does.
@@ -175,6 +189,21 @@ fun SessionStatsPills(stats: SessionStats?, modifier: Modifier = Modifier) {
                         StatRow("Cache write", exactCount(stats.cacheWriteTokens))
                     }
                     StatRow("Output", exactCount(stats.outputTokens))
+                    // The estimate, last and clearly labelled: the rows above are what
+                    // the host counted, this one is arithmetic on a published price
+                    // list that can change.
+                    if (rates != null) {
+                        val cost = costRange(
+                            cacheHitTokens = stats.cacheReadTokens,
+                            // A cache write is an input token that did not come from
+                            // the cache, and the published list has no third input rate.
+                            cacheMissTokens = stats.uncachedInputTokens + stats.cacheWriteTokens,
+                            outputTokens = stats.outputTokens,
+                            rates = rates,
+                        )
+                        StatRow("Cost (off-peak – peak)", formatCostRange(cost))
+                        StatNote(PRICE_SOURCE)
+                    }
                 }
             }
         }
@@ -351,4 +380,23 @@ private fun StatRow(label: String, value: String) {
             maxLines = 1,
         )
     }
+}
+
+/**
+ * A footnote under the rows: where a figure came from, or what it is not.
+ *
+ * Its own composable rather than a [StatRow] because it is prose, not a reading — it
+ * wraps, it has no value column, and it sits closer to the row above it than the
+ * panel's `8dp` row rhythm.
+ */
+@Composable
+private fun StatNote(text: String) {
+    Text(
+        text = text,
+        style = DshType.bodySmall,
+        color = DshTheme.colors.labelTertiary,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = DshSpacing.xs),
+    )
 }

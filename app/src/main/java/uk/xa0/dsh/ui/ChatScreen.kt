@@ -106,6 +106,7 @@ import uk.xa0.dsh.model.DisplayRow
 import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.SessionFiles
 import uk.xa0.dsh.model.SessionTarget
+import uk.xa0.dsh.model.tokenRatesFor
 import uk.xa0.dsh.model.SubagentComposerState
 import uk.xa0.dsh.model.SubagentReadOnlyReason
 import uk.xa0.dsh.model.TurnDeliverables
@@ -1253,6 +1254,9 @@ fun ChatScreen(vm: DshViewModel) {
                 // nothing at all rather than an empty row.
                 SessionStatsPills(
                     stats = ui.sessionStats,
+                    // Priced routes only. The rates follow the session's *current*
+                    // model, which is also what the host bills the next turn at.
+                    rates = tokenRatesFor(ui.selectedModel?.provider, ui.selectedModel?.model),
                     modifier = Modifier.padding(
                         start = DshSpacing.xl,
                         end = DshSpacing.xl,
