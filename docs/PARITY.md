@@ -215,6 +215,20 @@ of where the app stands against them.
       handled — it is a message, not an attachment, and the composer is where it belongs
       if it is ever wanted.
 
+- [+] **Automation runs get their own drawer section** (the web shows them apart from
+      conversations). A session a scheduled automation started carries no marker in the
+      roster — measured on the host: `origin` is null or `subagent`, `sessionListMetadata`
+      has no automation field, and the runs *are* Workspace members, so they pad out a
+      Workspace's list exactly like a chat someone started. The authoritative mapping
+      (`dsh_automation.json`'s `runs` table, with `sessionId` and `automationName`) is
+      host-side and has no RPC — `automations`, `automation`, `runs` and `units`
+      endpoints all answer "not found" — so the id prefix the runner puts on the session
+      is the one signal a client can see, and the rule lives in
+      `model/Automations.kt` rather than being spelled out per call site.
+      **With no automation sessions the drawer renders exactly as it did before** — the
+      section is built only when there is something to put in it, and the split reduces
+      to identity (pinned by a test).
+
 - [+] **Balance & top up** (app addition, not in the web client). The token panel's
       cost row leads to the account balance, read with the user's own DeepSeek key
       (`GET /user/balance` — the only account call DeepSeek publishes, and the only

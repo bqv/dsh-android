@@ -71,6 +71,8 @@ import androidx.compose.ui.unit.dp
 import uk.xa0.dsh.PendingKind
 import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
+import uk.xa0.dsh.model.isAutomationSessionId
+import uk.xa0.dsh.model.partitionAutomations
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.ui.components.DotState
 import uk.xa0.dsh.ui.components.DshMark
@@ -299,6 +301,7 @@ fun SessionsDrawer(
         // Hiding it then looked permanent — the registry does not change again, so
         // nothing re-emitted the section.
         val known = sessions.associateBy { it.id }
+        val automationIds = matched.filter { isAutomationSessionId(it.id) }.map { it.id }.toSet()
 
         /** One top-level row plus the subagents its caret has disclosed. */
         fun disclose(session: SessionItem): List<TreeRow> {
@@ -325,23 +328,41 @@ fun SessionsDrawer(
             return out
         }
 
+        // With no runs to lift, every expression below reduces to what it was before
+        // this existed: `automationIds` is empty, `claimedIds` *is* the Workspace's own
+        // list, `conversations` is `matched`, and `automationSection` is null — no
+        // header, no empty group, nothing on screen to hint the app knows the concept.
+        //
+        // Automation runs are lifted out of the workspace groups and listed together,
+        // the way the web surfaces them: a scheduled run is not a conversation someone
+        // started in that directory, and fifty of them turn a Workspace into a log.
+        // Nothing is hidden — every row is here, in its own section.
+        val (automationRuns, conversations) = partitionAutomations(matched) { it.id }
+        val automationSection = automationRuns
+            .sortedByDescending { it.updatedAt }
+            .takeIf { it.isNotEmpty() }
+            ?.let { Section(AUTOMATIONS, "Automations", it.flatMap { run -> disclose(run) }) }
+
         if (!groupByWorkspace) {
-            return@remember listOf(
+            val sections = arrayListOf(
                 Section(
                     FLAT,
                     "Sessions",
-                    matched.sortedByDescending { it.updatedAt }.flatMap { disclose(it) },
+                    conversations.sortedByDescending { it.updatedAt }.flatMap { disclose(it) },
                 ),
             )
+            automationSection?.let { sections += it }
+            return@remember sections
         }
 
         val claimed = HashSet<String>()
         val result = ArrayList<Section>()
 
         workspaces.forEach { workspace ->
-            var items = workspace.sessionIds.mapNotNull { byId[it] }
+            val claimedIds = workspace.sessionIds.filter { it !in automationIds }
+            var items = claimedIds.mapNotNull { byId[it] }
             if (orderByUpdated) items = items.sortedByDescending { it.updatedAt }
-            claimed += workspace.sessionIds
+            claimed += claimedIds
             // A Workspace with no sessions at all is still a group: "Add
             // workspace…" just created it, and hiding it made the row look inert.
             // A Workspace whose members are all merely filtered out (search,
@@ -356,7 +377,7 @@ fun SessionsDrawer(
 
         // Sessions outside every Workspace. The host labels this "Ungrouped"; it
         // has no manual order of its own, so it is always newest-first.
-        val rest = matched.filterNot { it.id in claimed }
+        val rest = conversations.filterNot { it.id in claimed }
             .sortedByDescending { it.updatedAt }
         if (rest.isNotEmpty()) {
             result += Section(
@@ -365,6 +386,8 @@ fun SessionsDrawer(
                 rest.flatMap { disclose(it) },
             )
         }
+        // Last, after the live work: a run's session is history the moment it ends.
+        automationSection?.let { result += it }
         result
     }
 
@@ -1202,6 +1225,7 @@ private fun MiniChoice(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 private const val UNGROUPED = "__ungrouped__"
+private const val AUTOMATIONS = "__automations__"
 private const val FLAT = "__flat__"
 
 /** How many sessions a collapsed section shows before "Show N more". */
