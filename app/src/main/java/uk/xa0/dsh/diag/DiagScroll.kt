@@ -2,6 +2,7 @@ package uk.xa0.dsh.diag
 
 import android.os.SystemClock
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.lazy.LazyListState
@@ -27,6 +28,18 @@ import androidx.compose.ui.input.pointer.pointerInput
 /** Watches a lazily-composed list: position, visible keys, item count, extent. */
 @Composable
 fun DiagLazyList(surface: String, state: LazyListState) {
+    // What the list's own gesture detector did, as opposed to what the finger
+    // did. A drag that the mutex cancels shows up here and nowhere else.
+    LaunchedEffect(surface, state) {
+        state.interactionSource.interactions.collect { interaction ->
+            when (interaction) {
+                is DragInteraction.Start -> ScrollDiag.dragEvent(surface, "start")
+                is DragInteraction.Stop -> ScrollDiag.dragEvent(surface, "stop")
+                is DragInteraction.Cancel -> ScrollDiag.dragEvent(surface, "cancel")
+                else -> Unit
+            }
+        }
+    }
     LaunchedEffect(surface, state) {
         snapshotFlow {
             val info = state.layoutInfo

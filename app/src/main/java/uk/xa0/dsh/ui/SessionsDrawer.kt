@@ -56,10 +56,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
-import kotlinx.coroutines.flow.first
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
@@ -158,12 +157,6 @@ fun SessionsDrawer(
     pendingInteractions: Map<String, PendingKind> = emptyMap(),
     currentId: String?,
     drawerOpen: Boolean,
-    /**
-     * Whether the drawer has finished opening — no finger still on the screen,
-     * no animation still running. Read through a lambda rather than passed as a
-     * value so the drawer does not recompose on every frame of its own open.
-     */
-    drawerSettled: () -> Boolean = { true },
     loading: Boolean,
     onSelect: (String) -> Unit,
     onNew: () -> Unit,
@@ -444,30 +437,27 @@ fun SessionsDrawer(
         result
     }
 
-    // Anchor the drawer to the top on open. The old code paged it to the open
-    // session instead, which pushed every section above that row off-screen, so
-    // the first Workspace (`dsh-android`, owner of the long-running session)
-    // looked like it had vanished and every reopen re-pinned it.
+    // The drawer keeps its place. It does not anchor, and it does not move on.
     //
-    // A plain `remember`-ed `LazyListState` is not enough on its own: Compose's
-    // focus system scrolls the previously focused row — normally the open
-    // session, since that is the last row the user tapped — back into view when
-    // the sheet reopens (verified on the emulator: the drawer opened on the
-    // `root` section that owns the open session, not at the top). The top is the
-    // one anchor that always shows every group, so the reveal is an explicit
-    // scroll to item 0.
+    // It used to `scrollToItem(0)` on every open — first because the focus system
+    // dragged the previously focused row into view on reopen, which pushed every
+    // section above it off-screen and made the first Workspace look like it had
+    // vanished. Measured over one session: 8 of these, 6 of them with `kept: 0`,
+    // meaning every row on screen was replaced; the list went from index 27 to 0
+    // again and again. Reading the drawer meant losing your place every single
+    // time you opened it, and that is worse than the thing it was fixing.
     //
-    // It waits for the sheet to be fully out. [drawerOpen] is the *target*, not
-    // the position: it goes true the moment a swipe passes the halfway mark, so
-    // anchoring on it moved the list while the finger that opened the drawer was
-    // still on the screen. Measured: 17 of these fired with a finger down, and
-    // every open replaced every visible row (`kept: 0`) — the drawer's whole
-    // content changing under a thumb that was still sliding.
+    // The list's position already persists — the `LazyListState` is remembered
+    // across closes — so the reveal is not needed. What is needed is that nothing
+    // else moves it: focus is dropped while the drawer is shut, so the row you
+    // last tapped is not a target for `bringIntoView` when it reopens. And a
+    // programmatic scroll here was never free: `scrollToItem` holds the scroll
+    // mutex until layout completes, and any drag landing in that window was
+    // cancelled against it — measured as drags of 260–370px that moved the list
+    // by exactly nothing.
+    val focus = LocalFocusManager.current
     LaunchedEffect(drawerOpen) {
-        if (!drawerOpen) return@LaunchedEffect
-        snapshotFlow { drawerSettled() }.first { it }
-        ScrollDiag.prog("drawer", "open-anchor")
-        listState.scrollToItem(0)
+        if (!drawerOpen) focus.clearFocus()
     }
 
     // Rename is the one row verb with a form; the others act immediately.

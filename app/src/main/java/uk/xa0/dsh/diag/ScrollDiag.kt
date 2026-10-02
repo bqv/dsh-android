@@ -129,6 +129,19 @@ object ScrollDiag {
         )
     }
 
+    /**
+     * A drag the scrollable itself started, stopped or had cancelled.
+     *
+     * This is the record that names a dead drag rather than describing it. A
+     * gesture that moves a finger 300px and the list by nothing either never
+     * started a drag, or started one and had it cancelled — and `Cancel` comes
+     * from the scroll mutex, which the app's own `scrollToItem` holds until
+     * layout completes. A `drag cancel` next to a `prog` is that contention.
+     */
+    fun dragEvent(surface: String, event: String) {
+        record("drag", "s" to surface, "e" to event, notable = event == "cancel")
+    }
+
     /** True while a finger is down on [surface]. */
     fun pointerDown(surface: String): Boolean = (downCounts[surface]?.get() ?: 0) > 0
 

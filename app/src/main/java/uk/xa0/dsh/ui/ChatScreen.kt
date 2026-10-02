@@ -201,10 +201,6 @@ fun ChatScreen(vm: DshViewModel) {
     var expandedTurns by remember { mutableStateOf(emptySet<Int>()) }
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
-    // Every finger on the screen, not just one on the transcript. The drawer is
-    // opened by a swipe that usually starts outside the sheet, so nothing smaller
-    // than the screen can tell whether the gesture that opened it has finished.
-    val screenTouch = rememberTouchGate()
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     // With reverseLayout the newest turn is index 0 at the visual bottom, so
@@ -262,13 +258,6 @@ fun ChatScreen(vm: DshViewModel) {
     // catches up in one step, when they come back to the end.
     var frozenLive by remember { mutableStateOf<LiveAttempt?>(null) }
     val currentLive by rememberUpdatedState(live)
-
-    // How tall the streaming row actually is, measured rather than guessed: the
-    // follow below is allowed to chase a message only while the whole of it fits.
-    var liveRowHeight by remember { mutableStateOf(0) }
-    val viewportHeight by remember {
-        derivedStateOf { listState.layoutInfo.viewportSize.height }
-    }
 
     // ...and hold the *shape* of the ended-turn fold for the same reason.
     //
@@ -663,12 +652,6 @@ fun ChatScreen(vm: DshViewModel) {
                     pendingInteractions = ui.pendingInteractions,
                     currentId = ui.currentSessionId,
                     drawerOpen = drawerState.isOpen,
-                    // Read lazily: this is consulted every frame of the open, and
-                    // passing it by value would recompose the whole drawer on each
-                    // one. Material's `isOpen` is the *target*, not the position —
-                    // it goes true as soon as a swipe passes the halfway mark — so
-                    // it is not on its own a signal that the drawer has opened.
-                    drawerSettled = { !screenTouch.isDown && !drawerState.isAnimationRunning },
                     loading = ui.sessionsLoading,
                     onSelect = {
                         vm.openSession(it)
@@ -744,7 +727,6 @@ fun ChatScreen(vm: DshViewModel) {
         Column(
             Modifier
                 .fillMaxSize()
-                .touchGate(screenTouch)
                 .drawerDrag(drawerState, DRAWER_WIDTH)
                 .background(DshTheme.colors.bgBase)
                 .statusBarsPadding()
@@ -986,41 +968,32 @@ fun ChatScreen(vm: DshViewModel) {
                 // item count, so height growth has to trigger the follow too.
                 val liveLength = (live?.text?.length ?: 0) + (live?.reasoning?.length ?: 0)
 
-                // A message taller than the screen is not chased.
+                // The one place the transcript moves itself.
                 //
-                // Following pins the newest text to the bottom edge, so a long answer
-                // slides its own beginning off the top and the reader has to scroll up
-                // to catch it — while the next token drags them back down. At the
-                // instant the row first outgrows the viewport its top is exactly one
-                // viewport above the tail, so one scroll back by the difference lands
-                // the reader at the beginning and there is nothing left to chase.
+                // A message taller than the screen used to be "not chased" by
+                // scrolling *backwards* by the difference between the row's height
+                // and the viewport's — a single instant `scrollBy`, thousands of
+                // pixels, at the moment the row outgrew the screen. Measuring it on
+                // the phone: 2,801px in one step, and it could fire mid-fling or
+                // under a thumb. It is gone. A long answer is simply not chased:
+                // `stickToBottom` is released and the follow below stops asking.
                 //
-                // Releasing `stickToBottom` is what makes it stick: the follow effect
-                // below is what re-pins the tail, and the freeze is what stops the
-                // growth re-laying-out the rows that are now the reader's page.
-                LaunchedEffect(liveRowHeight, viewportHeight) {
-                    // A finger on the list, or a fling still running, means the
-                    // reader is driving: neither is a moment to jump the viewport.
-                    if (!stickToBottom || touch.isDown || listState.isScrollInProgress ||
-                        viewportHeight <= 0 || liveRowHeight <= viewportHeight
-                    ) {
-                        return@LaunchedEffect
-                    }
-                    stickToBottom = false
-                    frozenLive = currentLive
-                    ScrollDiag.prog("chat", "oversize-teleport")
-                    listState.scrollBy((liveRowHeight - viewportHeight).toFloat())
-                }
-
+                // What remains scrolls only when the list is not already where it
+                // wants to be. `scrollToItem` takes the scroll mutex even when it
+                // turns out to be a no-op, and this effect ran 474 times in one
+                // session — nearly all of them for a list already at offset 0, with
+                // any user drag in that window cancelled against it. `atBottom` is
+                // the same test the effect would have made by moving: if it is
+                // already at the end there is nothing to do.
                 LaunchedEffect(rows.size, liveLength, todos.size) {
                     // `isScrollInProgress` is not enough on its own: without the
                     // touch gate a streaming token could jump the list inside the
                     // touch-down window, which reads as the app fighting the
                     // finger.
-                    if (stickToBottom && !touch.isDown && !listState.isScrollInProgress && rows.isNotEmpty()) {
-                        ScrollDiag.prog("chat", "follow")
-                        listState.scrollToItem(0)
-                    }
+                    if (!stickToBottom || touch.isDown || listState.isScrollInProgress) return@LaunchedEffect
+                    if (rows.isEmpty() || atBottom) return@LaunchedEffect
+                    ScrollDiag.prog("chat", "follow")
+                    listState.scrollToItem(0)
                 }
 
                 // Bug A: the transcript is the flex child, so a row inserted
@@ -1111,7 +1084,6 @@ fun ChatScreen(vm: DshViewModel) {
 
                                     is DisplayRow.Live -> LiveAttemptRow(
                                         row.attempt,
-                                        modifier = Modifier.onSizeChanged { liveRowHeight = it.height },
                                     )
                                 }
 

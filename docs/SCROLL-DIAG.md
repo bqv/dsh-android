@@ -42,6 +42,7 @@ discarded.
 | `flingmove` | The app moved the list while a fling was still running. File only: an animated scroll of the app's own making reports `isScrollInProgress` for each of its frames, so one operation appears here many times. |
 | `move` | A deliberate move by the app, large enough to be worth recording. Carries `tag`. |
 | `shift` | The position changed with no finger down, no fling, and no mark — nothing in the app asked for it. |
+| `drag` | The list's own gesture detector started, stopped or **cancelled** a drag. `cancel` is the record that names a dead drag: it comes from the scroll mutex, which a programmatic `scrollToItem` holds until layout completes. A `drag cancel` beside a `prog` is that contention. |
 | `jank` | More than 150 ms between position changes while the list was moving. |
 
 `shift` and `move` carry `di` (index delta), `doff` (offset delta), `ditem` (item
