@@ -174,6 +174,22 @@ fun ChatScreen(vm: DshViewModel) {
     val todos by vm.todos.collectAsStateWithLifecycle()
     val header by vm.header.collectAsStateWithLifecycle()
     val endedTurns by vm.endedTurns.collectAsStateWithLifecycle()
+    // The host's settings document is read once the connection is up, not only
+    // when the Settings sheet is opened.
+    //
+    // It was read on that tap alone, and the transcript needs one field from it:
+    // until the sheet had been opened once, `ui-chat.transcriptView` was unknown
+    // and the fallback below folded every completed turn. The host on this device
+    // is set to `normal`, so the reader's rows were being closed under them by a
+    // setting that says the opposite of what was happening.
+    var settingsAsked by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (!settingsAsked) {
+            settingsAsked = true
+            vm.loadHostSettings()
+        }
+    }
+
     // The host's "Conversation display" setting, honoured at last: `normal` folds
     // nothing, so a completed turn keeps every row it had — interim messages, tool
     // calls, to-dos — instead of collapsing them behind one summary line. Absent
@@ -719,8 +735,10 @@ fun ChatScreen(vm: DshViewModel) {
                     },
                     onSettings = {
                         showSettings = true
-                        // The sheet is the only reader of the host's settings
-                        // document, so it reads on open rather than on a timer.
+                        // The sheet reads on open rather than on a timer, but it is
+                        // no longer the *only* reader — the transcript needs
+                        // `ui-chat.transcriptView` to know whether it may fold — so
+                        // the connect-time read below is what usually supplies this.
                         vm.loadHostSettings()
                         scope.launch { drawerState.close() }
                     },
@@ -1058,17 +1076,7 @@ fun ChatScreen(vm: DshViewModel) {
                         item(key = "turn-status") { TurnStatusRow(elapsedMs) }
                     }
                     items(items = rows, key = { it.key }) { row ->
-                            // A row that can be opened by hand keeps its top edge when
-                            // it grows, so the body appears below the header instead
-                            // of the header flying up to make room for it. The live
-                            // row is excluded: it grows on its own as tokens arrive,
-                            // and pinning it would stop the newest text being visible.
-                            val anchor = if (row is DisplayRow.Live) {
-                                Modifier
-                            } else {
-                                Modifier.anchorTopOnResize(listState)
-                            }
-                            Box(Modifier.widthIn(max = 920.dp).then(anchor)) {
+                            Box(Modifier.widthIn(max = 920.dp)) {
                               // Text in a Compose row is not selectable until it is
                               // inside a SelectionContainer, and on the web every one
                               // of these rows is. It is per row rather than around the
