@@ -9,6 +9,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -164,7 +165,10 @@ import uk.xa0.dsh.ui.theme.DshType
  * collapses to: modal sidebar (drawer), a 76dp-equivalent header, the transcript
  * column, and the sticky composer.
  */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    ExperimentalFoundationApi::class,
+)
 @Composable
 fun ChatScreen(vm: DshViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
@@ -1041,7 +1045,27 @@ fun ChatScreen(vm: DshViewModel) {
                         item(key = "turn-status") { TurnStatusRow(elapsedMs) }
                     }
                     items(items = rows, key = { it.key }) { row ->
-                            Box(Modifier.widthIn(max = 920.dp)) {
+                            // A row that can be opened by hand keeps its top edge when
+                            // it grows, so the body appears below the header instead
+                            // of the header flying up to make room for it. The live
+                            // row is excluded: it grows on its own as tokens arrive,
+                            // and pinning it would stop the newest text being visible.
+                            val anchor = if (row is DisplayRow.Live) {
+                                Modifier
+                            } else {
+                                Modifier.anchorTopOnResize(listState)
+                            }
+                            // Rows that shift because something above them was
+                            // inserted or removed slide into place instead of
+                            // snapping there, which is most of what "jumping about"
+                            // looks like when a row is opened in the middle of a
+                            // transcript.
+                            Box(
+                                Modifier
+                                    .widthIn(max = 920.dp)
+                                    .then(anchor)
+                                    .animateItemPlacement(),
+                            ) {
                               // Text in a Compose row is not selectable until it is
                               // inside a SelectionContainer, and on the web every one
                               // of these rows is. It is per row rather than around the

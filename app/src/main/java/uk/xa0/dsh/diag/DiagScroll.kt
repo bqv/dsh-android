@@ -41,19 +41,25 @@ fun DiagLazyList(surface: String, state: LazyListState) {
         }
     }
     LaunchedEffect(surface, state) {
-        snapshotFlow {
-            val info = state.layoutInfo
-            Sample(
-                index = state.firstVisibleItemIndex,
-                offset = state.firstVisibleItemScrollOffset,
-                keys = info.visibleItemsInfo.map { shortKey(it.key) },
-                items = info.totalItemsCount,
-                viewport = info.viewportSize.height,
-                scrolling = state.isScrollInProgress,
-            )
-        }.collect { s ->
-            ScrollDiag.watch(surface, s.index, s.offset, s.keys, s.items, s.viewport, s.scrolling)
-        }
+        // Two cheap reads drive the sampler, and the visible-key list — the only
+        // allocation here — is rebuilt only when the first visible item changes.
+        // Building it per emission meant a list of hashes per frame for the whole
+        // of a scroll: instrumentation must not be the thing costing frames.
+        var lastIndex = Int.MIN_VALUE
+        var keys: List<String> = emptyList()
+        var items = 0
+        var viewport = 0
+        snapshotFlow { state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                if (index != lastIndex || keys.isEmpty()) {
+                    val info = state.layoutInfo
+                    keys = info.visibleItemsInfo.map { shortKey(it.key) }
+                    viewport = info.viewportSize.height
+                    lastIndex = index
+                }
+                items = state.layoutInfo.totalItemsCount
+                ScrollDiag.watch(surface, index, offset, keys, items, viewport, state.isScrollInProgress)
+            }
     }
 }
 
@@ -125,15 +131,6 @@ fun Modifier.diagDrag(surface: String, offset: () -> Int = { 0 }): Modifier = co
 
 /** A list's position, as [ScrollDiag.watch] wants it. */
 fun LazyListState.diagOffset(): Int = firstVisibleItemIndex * 10_000 + firstVisibleItemScrollOffset
-
-private class Sample(
-    val index: Int,
-    val offset: Int,
-    val keys: List<String>,
-    val items: Int,
-    val viewport: Int,
-    val scrolling: Boolean,
-)
 
 /** Keys can be whole prompt strings; a short hash is enough to spot a swap. */
 private fun shortKey(key: Any?): String = (key?.hashCode() ?: 0).toUInt().toString(16)
