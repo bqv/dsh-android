@@ -201,6 +201,10 @@ fun ChatScreen(vm: DshViewModel) {
     var expandedTurns by remember { mutableStateOf(emptySet<Int>()) }
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
+    // Every finger on the screen, not just one on the transcript. The drawer is
+    // opened by a swipe that usually starts outside the sheet, so nothing smaller
+    // than the screen can tell whether the gesture that opened it has finished.
+    val screenTouch = rememberTouchGate()
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     // With reverseLayout the newest turn is index 0 at the visual bottom, so
@@ -235,6 +239,17 @@ fun ChatScreen(vm: DshViewModel) {
     // reader back to the bottom. That is the "it keeps autoscrolling when I have
     // scrolled up" report.
     var stickToBottom by remember { mutableStateOf(true) }
+
+    // Whether a finger is on the transcript. See [rememberTouchGate]: the two
+    // effects below move the list on their own, and the flag they used to trust —
+    // `isScrollInProgress` — is off for the whole of the gap between a finger
+    // landing and its first movement past slop.
+    //
+    // That gap is not a technicality. Measured on the phone: 23 of the per-token
+    // follows and 6 of the oversize scrolls below fired with a finger already
+    // down, so a token arriving just after you put your thumb on the list moved
+    // it before you did.
+    val touch = rememberTouchGate()
 
     // Freeze the streaming row while the reader is away from the end.
     //
@@ -648,6 +663,12 @@ fun ChatScreen(vm: DshViewModel) {
                     pendingInteractions = ui.pendingInteractions,
                     currentId = ui.currentSessionId,
                     drawerOpen = drawerState.isOpen,
+                    // Read lazily: this is consulted every frame of the open, and
+                    // passing it by value would recompose the whole drawer on each
+                    // one. Material's `isOpen` is the *target*, not the position —
+                    // it goes true as soon as a swipe passes the halfway mark — so
+                    // it is not on its own a signal that the drawer has opened.
+                    drawerSettled = { !screenTouch.isDown && !drawerState.isAnimationRunning },
                     loading = ui.sessionsLoading,
                     onSelect = {
                         vm.openSession(it)
@@ -723,6 +744,7 @@ fun ChatScreen(vm: DshViewModel) {
         Column(
             Modifier
                 .fillMaxSize()
+                .touchGate(screenTouch)
                 .drawerDrag(drawerState, DRAWER_WIDTH)
                 .background(DshTheme.colors.bgBase)
                 .statusBarsPadding()
@@ -977,7 +999,11 @@ fun ChatScreen(vm: DshViewModel) {
                 // below is what re-pins the tail, and the freeze is what stops the
                 // growth re-laying-out the rows that are now the reader's page.
                 LaunchedEffect(liveRowHeight, viewportHeight) {
-                    if (!stickToBottom || viewportHeight <= 0 || liveRowHeight <= viewportHeight) {
+                    // A finger on the list, or a fling still running, means the
+                    // reader is driving: neither is a moment to jump the viewport.
+                    if (!stickToBottom || touch.isDown || listState.isScrollInProgress ||
+                        viewportHeight <= 0 || liveRowHeight <= viewportHeight
+                    ) {
                         return@LaunchedEffect
                     }
                     stickToBottom = false
@@ -987,10 +1013,11 @@ fun ChatScreen(vm: DshViewModel) {
                 }
 
                 LaunchedEffect(rows.size, liveLength, todos.size) {
-                    // `isScrollInProgress` is the guard that matters: without it a
-                    // streaming token could jump the list mid-drag, which reads as
-                    // the app fighting the finger.
-                    if (stickToBottom && !listState.isScrollInProgress && rows.isNotEmpty()) {
+                    // `isScrollInProgress` is not enough on its own: without the
+                    // touch gate a streaming token could jump the list inside the
+                    // touch-down window, which reads as the app fighting the
+                    // finger.
+                    if (stickToBottom && !touch.isDown && !listState.isScrollInProgress && rows.isNotEmpty()) {
                         ScrollDiag.prog("chat", "follow")
                         listState.scrollToItem(0)
                     }
@@ -1021,6 +1048,7 @@ fun ChatScreen(vm: DshViewModel) {
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
+                            .touchGate(touch)
                             .diagDrag("chat") { listState.diagOffset() },
                         reverseLayout = true,
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(

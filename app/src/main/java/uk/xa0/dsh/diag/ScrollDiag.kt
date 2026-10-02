@@ -314,11 +314,19 @@ object ScrollDiag {
             "keys" to keys.take(8).joinToString(","),
         )
         when {
-            // The app moved the list while a finger was on it, or while a fling
-            // was still running: the one shape a reader describes as "it fights
-            // my finger", and the one a description never pins to a call site.
-            attributed != null && (down || scrolling) ->
+            // The app moved the list while a finger was on it: the one shape a
+            // reader describes as "it fights my finger", and the one a
+            // description never pins to a call site.
+            attributed != null && down ->
                 record("fight", *common, "tag" to attributed, notable = true)
+
+            // The app moved the list while a fling was still running. File only,
+            // and deliberately so: an animated scroll of the app's own making
+            // (`to-bottom-button`) reports `isScrollInProgress` for every one of
+            // its frames, so this kind is mostly one operation sampled many times
+            // rather than one problem per record.
+            attributed != null && scrolling ->
+                record("flingmove", *common, "tag" to attributed)
 
             attributed != null ->
                 if (big) record("move", *common, "tag" to attributed, notable = true)

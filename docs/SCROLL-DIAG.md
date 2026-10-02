@@ -38,7 +38,8 @@ discarded.
 | `down` | A finger landed. `fx`/`fy` are its position as a fraction of the surface, which is what identifies a strip at an edge eating the gesture. |
 | `up` | The gesture ended: `dx`/`dy` travelled, `ms` taken, `child` = a child scrollable consumed it, `moved` = the surface's own offset changed. `child=1 moved=0` is a gesture the surface never saw. |
 | `prog` | A mark dropped immediately before the app moves a list itself. `g` is whether a finger was down at that instant. |
-| `fight` | The app moved the list **while a finger was down or a fling was running**. Carries the `tag` of the call site. |
+| `fight` | The app moved the list **while a finger was down**. Carries the `tag` of the call site. |
+| `flingmove` | The app moved the list while a fling was still running. File only: an animated scroll of the app's own making reports `isScrollInProgress` for each of its frames, so one operation appears here many times. |
 | `move` | A deliberate move by the app, large enough to be worth recording. Carries `tag`. |
 | `shift` | The position changed with no finger down, no fling, and no mark — nothing in the app asked for it. |
 | `jank` | More than 150 ms between position changes while the list was moving. |

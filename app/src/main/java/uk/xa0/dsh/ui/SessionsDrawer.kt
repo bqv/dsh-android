@@ -56,6 +56,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -156,6 +158,12 @@ fun SessionsDrawer(
     pendingInteractions: Map<String, PendingKind> = emptyMap(),
     currentId: String?,
     drawerOpen: Boolean,
+    /**
+     * Whether the drawer has finished opening — no finger still on the screen,
+     * no animation still running. Read through a lambda rather than passed as a
+     * value so the drawer does not recompose on every frame of its own open.
+     */
+    drawerSettled: () -> Boolean = { true },
     loading: Boolean,
     onSelect: (String) -> Unit,
     onNew: () -> Unit,
@@ -448,11 +456,18 @@ fun SessionsDrawer(
     // `root` section that owns the open session, not at the top). The top is the
     // one anchor that always shows every group, so the reveal is an explicit
     // scroll to item 0.
+    //
+    // It waits for the sheet to be fully out. [drawerOpen] is the *target*, not
+    // the position: it goes true the moment a swipe passes the halfway mark, so
+    // anchoring on it moved the list while the finger that opened the drawer was
+    // still on the screen. Measured: 17 of these fired with a finger down, and
+    // every open replaced every visible row (`kept: 0`) — the drawer's whole
+    // content changing under a thumb that was still sliding.
     LaunchedEffect(drawerOpen) {
-        if (drawerOpen) {
-            ScrollDiag.prog("drawer", "open-anchor")
-            listState.scrollToItem(0)
-        }
+        if (!drawerOpen) return@LaunchedEffect
+        snapshotFlow { drawerSettled() }.first { it }
+        ScrollDiag.prog("drawer", "open-anchor")
+        listState.scrollToItem(0)
     }
 
     // Rename is the one row verb with a form; the others act immediately.
