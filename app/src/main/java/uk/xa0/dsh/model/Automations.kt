@@ -3,8 +3,18 @@ package uk.xa0.dsh.model
 /**
  * A session a scheduled automation started, as opposed to one a person opened.
  *
- * **The id is the only signal there is**, and that was measured rather than assumed:
- * on the running host, 55 such sessions carried
+ * **The prefix is the plugin's own convention, not a guess.** Automations are not a
+ * host feature at all: they come from `@michengai/dsh-automation` (a third-party DSH
+ * plugin installed in the web profile), which ships its own **sidebar tab** and
+ * Settings panel — that is the "shown separately" the web has, not a grouping in the
+ * core client. The same plugin's own client bundle contains the string
+ * `dsh-automation-session-`, so it keys on exactly this prefix to find, adopt and
+ * delete its runs' sessions.
+ *
+ * What that leaves for a client that cannot load a plugin's web bundle — which is any
+ * native app, since the plugin's methods are not on the public gateway (its namespace
+ * answers "not found", as do five spellings tried) — is the prefix itself. Measured on
+ * the running host, 55 such sessions carried
  *
  *  - `origin` null (never `"automation"` — the field distinguishes `subagent` and
  *    nothing else),
@@ -12,15 +22,13 @@ package uk.xa0.dsh.model
  *  - membership of a Workspace like any other session, so they appear *inside*
  *    workspace groups and are indistinguishable from a chat someone started.
  *
- * The host does keep an authoritative mapping — `~/.dsh/storages/dsh_automation.json`
- * has a `runs` table with `sessionId`, `automationName` and `status` per run — but no
- * RPC exposes it — the `automations`, `automation`, `runs` and `units` endpoints all
- * answer "not found", as does anything else tried — and a remote client cannot read
- * the host's files. (Written without the `slash-star` form those namespaces are
- * usually printed with: in Kotlin a block comment *nests*, so that sequence inside
- * this one opens a comment the closing marker below no longer closes.) So the prefix the
- * runner puts on the session id is what a client can see, and this is where that
- * knowledge lives rather than being spelled out at each call site.
+ * The plugin does keep an authoritative mapping — its store,
+ * `~/.dsh/storages/dsh_automation.json` has a `runs` table with `sessionId`,
+ * `automationName` and `status` per run — but that is plugin-side storage behind the
+ * plugin bridge, and a native client can neither call it nor read the host's files.
+ *
+ * So the prefix is what this app can see, and it lives here rather than being spelled
+ * out at each call site.
  *
  * It is a *presentation* rule: nothing is hidden or deleted, the sessions simply get
  * their own group instead of padding out a Workspace's list.
