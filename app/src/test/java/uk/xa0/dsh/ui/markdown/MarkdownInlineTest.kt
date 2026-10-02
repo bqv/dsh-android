@@ -111,4 +111,36 @@ class MarkdownInlineTest {
         val found = links("https://a.dev/1 and https://b.dev/2")
         assertEquals(listOf("https://a.dev/1", "https://b.dev/2"), found.map { it.url })
     }
+
+
+    /**
+     * **A URL in bold is the form that prompted all of this.** Emphasis runs are taken
+     * whole by the parser, so the autolink never saw what was inside them: in the
+     * session under test the model answered "All done" with
+     * `**https://github.com/Julow/Unexpected-Keyboard/pull/1451**` — bold, and dead.
+     */
+    @Test
+    fun `a url inside emphasis is a link`() {
+        val bold = links("**https://github.com/Julow/Unexpected-Keyboard/pull/1451**")
+        assertEquals(1, bold.size)
+        assertEquals("https://github.com/Julow/Unexpected-Keyboard/pull/1451", bold.single().url)
+        assertEquals(InlineStyle.LINK, bold.single().style)
+
+        // The same for the other two emphasis forms, and with words around it.
+        assertEquals("https://x.dev/a", links("*https://x.dev/a*").single().url)
+        assertEquals("https://x.dev/a", links("~~https://x.dev/a~~").single().url)
+        val surrounded = links("**see https://x.dev/a now**")
+        assertEquals("https://x.dev/a", surrounded.single().url)
+        // The emphasis's own words are still there, and still bold.
+        val boldWords = Markdown.parseInline("**see https://x.dev/a now**")
+            .filter { it.style == InlineStyle.BOLD }
+            .map { it.text }
+        assertEquals(listOf("see ", " now"), boldWords)
+    }
+
+    /** A span that is a command is still code, emphasis or not. */
+    @Test
+    fun `a url inside a code span is not linked by the emphasis rule`() {
+        assertEquals(emptyList<InlineToken>(), links("**`curl https://x.dev/a`**"))
+    }
 }

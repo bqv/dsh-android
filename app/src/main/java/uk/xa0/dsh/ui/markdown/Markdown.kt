@@ -248,7 +248,11 @@ object Markdown {
                 val end = rest.indexOf(marker, 2)
                 if (end > 0) {
                     flush()
-                    tokens += InlineToken(rest.substring(2, end), InlineStyle.BOLD)
+                    // Recursive, not one opaque run: `**see `code` and https://x**` has
+                    // three different things in it, and taking the span whole was what
+                    // made a bold URL dead — and a code span inside emphasis into
+                    // emphasis rather than code.
+                    tokens += emphasise(parseInline(rest.substring(2, end)), InlineStyle.BOLD)
                     i += end + 2
                     continue
                 }
@@ -258,7 +262,7 @@ object Markdown {
                 val end = rest.indexOf("~~", 2)
                 if (end > 0) {
                     flush()
-                    tokens += InlineToken(rest.substring(2, end), InlineStyle.STRIKE)
+                    tokens += emphasise(parseInline(rest.substring(2, end)), InlineStyle.STRIKE)
                     i += end + 2
                     continue
                 }
@@ -269,7 +273,7 @@ object Markdown {
                 val end = rest.indexOf(marker, 1)
                 if (end > 0 && !rest.substring(1, end).contains(' ')) {
                     flush()
-                    tokens += InlineToken(rest.substring(1, end), InlineStyle.ITALIC)
+                    tokens += emphasise(parseInline(rest.substring(1, end)), InlineStyle.ITALIC)
                     i += end + 1
                     continue
                 }
@@ -328,7 +332,84 @@ object Markdown {
             i++
         }
         flush()
-        return tokens
+        // A URL written *inside* emphasis is still a URL. The emphasis branches above
+        // consume their whole run as one styled token, so the autolink never sees what
+        // is in it: `**https://…**` rendered bold and dead, and that is the form this
+        // model reaches for when it wants a link to stand out — the message that
+        // prompted this was exactly `**https://github.com/…/pull/1451**`.
+        return linkUrlsIn(tokens)
+    }
+
+    /**
+     * Applies an emphasis to everything a nested parse produced.
+     *
+     * Code and links keep their own meaning: a backtick span inside `**…**` is code, not
+     * bolded prose, and a link inside it is a link. `BOLD` over `ITALIC` (in either
+     * order) is the one combination the model of styles has a name for, and it is used
+     * rather than discarded.
+     */
+    private fun emphasise(tokens: List<InlineToken>, style: InlineStyle): List<InlineToken> =
+        tokens.map { token ->
+            when (token.style) {
+                InlineStyle.CODE, InlineStyle.LINK -> token
+                InlineStyle.NORMAL -> token.copy(style = style)
+                else -> token.copy(style = combine(style, token.style))
+            }
+        }
+
+    private fun combine(outer: InlineStyle, inner: InlineStyle): InlineStyle = when {
+        outer == InlineStyle.STRIKE || inner == InlineStyle.STRIKE -> InlineStyle.STRIKE
+        outer != inner &&
+            (outer == InlineStyle.BOLD || outer == InlineStyle.ITALIC) &&
+            (inner == InlineStyle.BOLD || inner == InlineStyle.ITALIC) -> InlineStyle.BOLD_ITALIC
+
+        else -> inner
+    }
+
+    /**
+     * Splits URL runs out of styled tokens, so emphasis keeps its meaning and the
+     * address inside it becomes tappable.
+     *
+     * Code spans are skipped: a URL inside a longer span is *code* (the whole-span rule
+     * above already handles a span that is nothing but one), and `curl https://…` must
+     * not become half a link. The URL part takes the link style rather than keeping the
+     * emphasis's — the token model carries one style per run, and a reader who cannot
+     * see that something is a link is no better off than before.
+     */
+    private fun linkUrlsIn(tokens: List<InlineToken>): List<InlineToken> {
+        var changed = false
+        val out = ArrayList<InlineToken>(tokens.size)
+        for (token in tokens) {
+            if (token.url != null || token.style == InlineStyle.CODE) {
+                out += token
+                continue
+            }
+            val text = token.text
+            var index = 0
+            while (index < text.length) {
+                val match = AUTOLINK.find(text, index) ?: break
+                val start = match.range.first
+                if (start > 0 && text[start - 1].isLetterOrDigit()) {
+                    // A word that merely contains a URL: copy past its first character
+                    // and keep looking, so `xhttps://…` is never linked from the middle.
+                    out += InlineToken(text.substring(index, start + 1), token.style)
+                    index = start + 1
+                    continue
+                }
+                val (link, end) = trimUrlEnd(match.value)
+                if (link.isEmpty()) break
+                if (start > index) out += InlineToken(text.substring(index, start), token.style)
+                out += InlineToken(
+                    text = link,
+                    style = InlineStyle.LINK,
+                    url = if (link.startsWith("www.")) "https://$link" else link,
+                )
+                changed = true
+                index = start + end
+            }
+            if (index < text.length) out += InlineToken(text.substring(index), token.style)
+        }
+        return if (changed) out else tokens
     }
 
     /**

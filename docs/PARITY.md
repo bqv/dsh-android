@@ -132,6 +132,11 @@ of where the app stands against them.
 - [x] Turn navigator rail at the transcript's right edge — one tick per human message that
       opened a turn; press-to-grow scrubber with a prompt/answer preview, commit on release
       (`ui/ChatScreen.kt: TurnRail`, `TurnPreviewCard`)
+- [+] **A URL inside emphasis is a link.** Emphasis was consumed as one opaque styled run,
+      so the autolinker never saw what was in it: the session that prompted this ends with
+      `**https://github.com/…/pull/1451**` — bold, and dead. Emphasis now parses its content
+      recursively, so a code span inside `**…**` stays code, a link inside it stays a link,
+      and `BOLD` over `ITALIC` becomes `BOLD_ITALIC` rather than one of them being dropped.
 - [x] Markdown: headings, paragraphs, bullet/numbered/nested lists, task lists, tables,
       quotes, rules, fenced code + banner + copy, inline code, bold/italic/strike, links
 - [x] Links open in the browser for `[text](url)` **and** for a bare `https://`/`http://`/
