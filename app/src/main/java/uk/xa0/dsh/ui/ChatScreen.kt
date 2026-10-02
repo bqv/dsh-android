@@ -353,9 +353,42 @@ fun ChatScreen(vm: DshViewModel) {
 
     // The draft carries its selection: the `/` and `@` menus follow the caret, so
     // a tap back into an earlier line must be visible to the trigger derivation.
-    var draft by rememberSaveable(ui.currentSessionId, stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(""))
+    //
+    // Seeded from disk, keyed by the session — and by [PENDING_DRAFT_KEY] on the
+    // deferred new-session screen, which is a composer with no session to file under.
+    // `rememberSaveable` alone lost the text on a switch (the key change recreates the
+    // state) and on any cold start; a draft is what someone was in the middle of.
+    val draftKey = ui.currentSessionId ?: PENDING_DRAFT_KEY
+    var draft by rememberSaveable(draftKey, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(vm.draftFor(draftKey)))
     }
+    // Written on every change rather than on a timer, and after every other way the text
+    // moves — send clears it, a failed send hands it back — so the file always holds what
+    // is on screen. An empty draft is a deletion on the store's side.
+    LaunchedEffect(draftKey, draft.text) { vm.saveDraft(draftKey, draft.text) }
+
+    // …and a draft typed on the deferred screen follows the session it turns into.
+    //
+    // Two ways that happens under the reader: a send materialises the session, and the
+    // app's own auto-open picks one the moment the connection comes up — which can land
+    // while they are still typing on the hero. The key changes, the box would reseed from
+    // the new session's (empty) draft, and their words would be left behind under the
+    // hero's key. The store already moves a draft on materialisation; this is the same
+    // rule for the composed case, which is the one a reader can see.
+    var trackedKey by remember { mutableStateOf(draftKey) }
+    var trackedText by remember { mutableStateOf(draft.text) }
+    LaunchedEffect(draftKey, draft.text) {
+        if (draftKey == trackedKey) {
+            trackedText = draft.text
+        } else {
+            if (trackedKey == PENDING_DRAFT_KEY && draft.text.isEmpty() && trackedText.isNotBlank()) {
+                draft = TextFieldValue(trackedText)
+            }
+            trackedKey = draftKey
+            trackedText = draft.text
+        }
+    }
+
     // A send that never reached a session hands its text back here. Restored only
     // into an empty draft: text the reader has typed since must not be overwritten.
     LaunchedEffect(ui.draftRestore) {

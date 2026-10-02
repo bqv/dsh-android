@@ -35,6 +35,7 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Inbox
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.MoreVert
@@ -401,9 +402,13 @@ fun SessionsDrawer(
             .sortedByDescending { it.updatedAt }
         if (rest.isNotEmpty()) {
             result += Section(
-                UNGROUPED,
-                "Ungrouped",
-                rest.flatMap { disclose(it) },
+                key = UNGROUPED,
+                title = "Ungrouped",
+                rows = rest.flatMap { disclose(it) },
+                // Sessions outside every Workspace are still *this* machine's — the host
+                // files them under a bucket rather than a directory, and the glyph says
+                // so instead of showing a folder that names nothing.
+                icon = Icons.Rounded.Inbox,
             )
         }
         // Last, after the live work: a run's session is history the moment it ends.
