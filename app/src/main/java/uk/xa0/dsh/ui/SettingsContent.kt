@@ -611,11 +611,21 @@ private fun ArchivedSessionsSection(
     onUnarchive: ((String) -> Unit)?,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
+    // Archived sessions accumulate — this host has hundreds — and the section sits at
+    // the bottom of a settings sheet, so an uncapped list buries everything above it
+    // and the sheet's own scroll becomes the archived list's. Paged the same way the
+    // drawer pages a Workspace ("Show N more sessions"), and reset by each new query:
+    // an expanded page from the previous search is not a view the reader chose for the
+    // next one.
+    var expanded by rememberSaveable { mutableStateOf(false) }
     val colors = DshTheme.colors
 
     DshTextField(
         value = query,
-        onValueChange = { query = it },
+        onValueChange = {
+            query = it
+            expanded = false
+        },
         placeholder = "Search archived sessions",
         modifier = Modifier.padding(horizontal = DshSpacing.xxl, vertical = DshSpacing.md),
     )
@@ -648,7 +658,9 @@ private fun ArchivedSessionsSection(
         return
     }
 
-    val groups = rows.groupBy { it.second }
+    val shown = if (expanded) rows else rows.take(ARCHIVED_PAGE_SIZE)
+    val hidden = rows.size - shown.size
+    val groups = shown.groupBy { it.second }
     groups.forEach { (workspace, group) ->
         GroupLabel(workspace)
         group.forEach { (session, _) ->
@@ -693,7 +705,35 @@ private fun ArchivedSessionsSection(
             }
         }
     }
+
+    // The drawer's own wording and its own shape: one line, centred, that says how many
+    // are left rather than just "more".
+    if (hidden > 0 || expanded) {
+        Text(
+            text = if (expanded) {
+                "Show less"
+            } else {
+                "Show $hidden more session${if (hidden == 1) "" else "s"}"
+            },
+            style = DshType.bodySmall,
+            color = colors.link,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickableNoRipple { expanded = !expanded }
+                .padding(horizontal = DshSpacing.xxl, vertical = DshSpacing.md),
+        )
+    }
 }
+
+/**
+ * How many archived sessions the Settings section shows before offering the rest.
+ *
+ * The drawer's page is 6 and this is the same idea at a different scale: the drawer
+ * pages *within* a section that is one screenful of a list, while Settings is a
+ * scrolled document whose archived list is its last section, so a slightly longer page
+ * keeps the common case — unarchiving something recent — from needing the tap at all.
+ */
+private const val ARCHIVED_PAGE_SIZE = 8
 
 // ------------------------------------------------------------------ building
 
