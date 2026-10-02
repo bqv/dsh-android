@@ -33,7 +33,9 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Refresh
@@ -90,11 +92,20 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-/** One collapsible group in the sidebar: a Workspace, the flat list, or "Ungrouped". */
+/**
+ * One collapsible group in the sidebar: a Workspace, the flat list, "Ungrouped", or
+ * the automation runs.
+ *
+ * [icon] is null for every group that has a *place* rather than a *kind* — a
+ * Workspace, the flat list, Ungrouped — and those keep the folder pair they have
+ * always had. Only the automation section names an icon of its own, because only it
+ * is a different sort of thing: a Workspace is a directory, this is a schedule.
+ */
 private data class Section(
     val key: String,
     val title: String,
     val rows: List<TreeRow>,
+    val icon: ImageVector? = null,
 )
 
 /** A session plus its nesting depth, so subagents indent under their parent. */
@@ -341,7 +352,16 @@ fun SessionsDrawer(
         val automationSection = automationRuns
             .sortedByDescending { it.updatedAt }
             .takeIf { it.isNotEmpty() }
-            ?.let { Section(AUTOMATIONS, "Automations", it.flatMap { run -> disclose(run) }) }
+            ?.let {
+                Section(
+                    key = AUTOMATIONS,
+                    title = "Automations",
+                    rows = it.flatMap { run -> disclose(run) },
+                    // A schedule, not a folder: this group is a kind of session
+                    // rather than a place one lives.
+                    icon = Icons.Rounded.Schedule,
+                )
+            }
 
         if (!groupByWorkspace) {
             val sections = arrayListOf(
@@ -671,6 +691,7 @@ fun SessionsDrawer(
                         // its parent's row, it is not another session in the group.
                         count = section.rows.count { it.depth == 0 },
                         collapsed = isCollapsed,
+                        icon = section.icon,
                         onClick = {
                             onCollapsedSections(
                                 if (isCollapsed) {
@@ -858,6 +879,13 @@ private fun ProjectRow(
     collapsed: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * The group's own glyph, when it has one. Null is the Workspace case, whose
+     * open/closed folder *is* the disclosure affordance; a group that supplies an
+     * icon keeps it whether it is collapsed or not, since its icon says what the
+     * group is rather than whether it is open.
+     */
+    icon: ImageVector? = null,
     /** Null for the buckets with no Workspace behind them: the flat list and Ungrouped. */
     onCreate: (() -> Unit)? = null,
 ) {
@@ -872,8 +900,13 @@ private fun ProjectRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = if (collapsed) Icons.Rounded.Folder else Icons.Rounded.FolderOpen,
-            contentDescription = if (collapsed) "Expand workspace" else "Collapse workspace",
+            imageVector = icon
+                ?: if (collapsed) Icons.Rounded.Folder else Icons.Rounded.FolderOpen,
+            contentDescription = when {
+                icon != null -> null
+                collapsed -> "Expand workspace"
+                else -> "Collapse workspace"
+            },
             tint = colors.labelTertiary,
             modifier = Modifier.size(16.dp),
         )
