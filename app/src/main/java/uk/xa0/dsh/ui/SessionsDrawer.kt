@@ -107,6 +107,17 @@ private data class Section(
     val title: String,
     val rows: List<TreeRow>,
     val icon: ImageVector? = null,
+    /**
+     * The Workspace a new session would be created in, or null for a group that is not
+     * a directory.
+     *
+     * This is what decides the header's `+`. It used to be a blacklist of the two
+     * synthetic keys, which meant the Automations section offered a `+` that would have
+     * asked the host for a session in a Workspace called `__automations__` — a name no
+     * registry has. A group draws the button only when it can say where the session
+     * goes.
+     */
+    val createIn: String? = null,
 )
 
 /** A session plus its nesting depth, so subagents indent under their parent. */
@@ -392,7 +403,12 @@ fun SessionsDrawer(
             // the user cannot see or fix.
             val everyMemberKnown = workspace.sessionIds.all { it in known }
             if (items.isNotEmpty() || workspace.sessionIds.isEmpty() || !everyMemberKnown) {
-                result += Section(workspace.id, workspace.title, items.flatMap { disclose(it) })
+                result += Section(
+                    key = workspace.id,
+                    title = workspace.title,
+                    rows = items.flatMap { disclose(it) },
+                    createIn = workspace.id,
+                )
             }
         }
 
@@ -706,9 +722,9 @@ fun SessionsDrawer(
                                 },
                             )
                         },
-                        onCreate = section.key
-                            .takeIf { it != FLAT && it != UNGROUPED }
-                            ?.let { workspaceId -> { onNewInWorkspace(workspaceId) } },
+                        onCreate = section.createIn?.let { workspaceId ->
+                            { onNewInWorkspace(workspaceId) }
+                        },
                     )
                 }
 
