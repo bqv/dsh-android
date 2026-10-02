@@ -73,6 +73,15 @@ fun buildDisplayRows(
     endedTurns: Set<Int>,
     expandedTurns: Set<Int>,
     live: LiveAttempt?,
+    /**
+     * Whether a completed turn's process may be folded away at all. The web's
+     * `ui-chat.transcriptView` setting: `compact` folds, `normal` "never folds"
+     * (`chat/ChatView.tsx:244`, `compactTranscript`). This client used to fold
+     * unconditionally and report `compact` to the settings row whatever the host
+     * said, so a host set to Normal still had its completed turns collapsed into
+     * a summary line — every interim message and tool row hidden behind it.
+     */
+    fold: Boolean = true,
 ): List<DisplayRow> {
     val rows = ArrayList<DisplayRow>(entries.size + 2)
     if (entries.isEmpty()) {
@@ -139,7 +148,10 @@ fun buildDisplayRows(
             group += entries[index]
             index++
         }
-        rows += foldTurn(turn, group, endedTurns, expandedTurns)
+        // Normal mode folds nothing, which is exactly what `foldTurn` does for a
+        // turn the host has not closed — so the switch is the ended set, not a
+        // second path through the grouping.
+        rows += foldTurn(turn, group, if (fold) endedTurns else emptySet(), expandedTurns)
     }
 
     if (live != null) rows += DisplayRow.Live(live)

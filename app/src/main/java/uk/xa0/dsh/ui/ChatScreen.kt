@@ -9,7 +9,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -108,6 +107,7 @@ import uk.xa0.dsh.diag.DiagLazyList
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.diag.diagDrag
 import uk.xa0.dsh.diag.diagOffset
+import uk.xa0.dsh.model.GeneralSettings
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.DisplayRow
 import uk.xa0.dsh.model.LiveAttempt
@@ -165,10 +165,7 @@ import uk.xa0.dsh.ui.theme.DshType
  * collapses to: modal sidebar (drawer), a 76dp-equivalent header, the transcript
  * column, and the sticky composer.
  */
-@OptIn(
-    androidx.compose.material3.ExperimentalMaterial3Api::class,
-    ExperimentalFoundationApi::class,
-)
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(vm: DshViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
@@ -177,6 +174,16 @@ fun ChatScreen(vm: DshViewModel) {
     val todos by vm.todos.collectAsStateWithLifecycle()
     val header by vm.header.collectAsStateWithLifecycle()
     val endedTurns by vm.endedTurns.collectAsStateWithLifecycle()
+    // The host's "Conversation display" setting, honoured at last: `normal` folds
+    // nothing, so a completed turn keeps every row it had — interim messages, tool
+    // calls, to-dos — instead of collapsing them behind one summary line. Absent
+    // or unreadable falls back to `compact`, which is what the app did for
+    // everything before.
+    val transcriptView = ui.hostSettings
+        ?.field(GeneralSettings.CHAT_NS, GeneralSettings.TRANSCRIPT_FIELD)
+        ?.value
+        ?: "compact"
+    val foldTurns = transcriptView != "normal"
     val closingSeqs by vm.closingSeqs.collectAsStateWithLifecycle()
     val turnDurations by vm.turnDurations.collectAsStateWithLifecycle()
     val turnStartedAt by vm.turnStartedAt.collectAsStateWithLifecycle()
@@ -926,8 +933,14 @@ fun ChatScreen(vm: DshViewModel) {
                 // `frozenLive` while the reader is in history, so the streaming row
                 // cannot grow and reflow the list under them.
                 val shownLive = frozenLive ?: live
-                val rows = remember(entries, foldedTurns, expandedTurns, shownLive) {
-                    buildDisplayRows(entries, foldedTurns, expandedTurns, shownLive).asReversed()
+                val rows = remember(entries, foldedTurns, expandedTurns, shownLive, foldTurns) {
+                    buildDisplayRows(
+                        entries = entries,
+                        endedTurns = foldedTurns,
+                        expandedTurns = expandedTurns,
+                        live = shownLive,
+                        fold = foldTurns,
+                    ).asReversed()
                 }
 
                 // The tool-call forest, keyed by call id so a row can find its own
@@ -1055,17 +1068,7 @@ fun ChatScreen(vm: DshViewModel) {
                             } else {
                                 Modifier.anchorTopOnResize(listState)
                             }
-                            // Rows that shift because something above them was
-                            // inserted or removed slide into place instead of
-                            // snapping there, which is most of what "jumping about"
-                            // looks like when a row is opened in the middle of a
-                            // transcript.
-                            Box(
-                                Modifier
-                                    .widthIn(max = 920.dp)
-                                    .then(anchor)
-                                    .animateItemPlacement(),
-                            ) {
+                            Box(Modifier.widthIn(max = 920.dp).then(anchor)) {
                               // Text in a Compose row is not selectable until it is
                               // inside a SelectionContainer, and on the web every one
                               // of these rows is. It is per row rather than around the
@@ -1415,8 +1418,7 @@ fun ChatScreen(vm: DshViewModel) {
             // No default-permission state exists, so the row shows "Unavailable"
             // rather than claiming a value the host never sent.
             defaultPermission = "",
-            // The app only implements the folded ("Compact") transcript view.
-            transcriptView = "compact",
+            transcriptView = transcriptView,
             agentPresetOptions = ui.agentPresetOptions,
             agentModePickerEnabled = true,
             // Archived ids are a set on this client, so the host's own

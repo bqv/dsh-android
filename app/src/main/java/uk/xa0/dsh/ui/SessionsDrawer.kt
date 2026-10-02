@@ -747,10 +747,6 @@ fun SessionsDrawer(
                     items(count = shown.size, key = { index -> shown[index].session.id }) { index ->
                         val row = shown[index]
                         SessionRow(
-                            // A refresh can re-sort sessions under the reader, and a
-                            // collapsed section can take rows out from above; both
-                            // move every row below them. Sliding beats snapping.
-                            modifier = Modifier.animateItemPlacement(),
                             session = row.session,
                             depth = row.depth,
                             selected = row.session.id == currentId,
@@ -1003,7 +999,6 @@ private fun ShowMoreRow(label: String, onClick: () -> Unit) {
 
 @Composable
 private fun SessionRow(
-    modifier: Modifier = Modifier,
     session: SessionItem,
     depth: Int,
     selected: Boolean,
@@ -1024,7 +1019,7 @@ private fun SessionRow(
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(DshRadius.md)
     Row(
-        modifier
+        Modifier
             .fillMaxWidth()
             .height(32.dp)
             // Subagents nest one indent step per level under their parent.

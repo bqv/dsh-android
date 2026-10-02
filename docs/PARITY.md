@@ -118,10 +118,12 @@ of where the app stands against them.
       produced a finalised answer; while a turn runs there is no group and no summary.
       Counts-only summary ("N tool calls · N messages · N subagents", else "Thought for a
       while") spliced after the opening user message (`model/TurnProcess.kt`,
-      `ui/components/ChatRows.kt: TurnProcessRow`). **Divergence:** the web also requires
-      transcript mode `compact` and fully-loaded history; the app folds either way, and a
-      host `transcriptView: normal` is stored intent it does not render
-      (`ui/SettingsContent.kt` "Conversation display")
+      `ui/components/ChatRows.kt: TurnProcessRow`). The fold honours the host's
+      `ui-chat.transcriptView`: `normal` folds nothing, as the web's `compactTranscript`
+      does, and anything else — including a host that never sends the field — folds
+      (`ui/ChatScreen.kt`, `buildDisplayRows(fold = …)`). **Divergence:** the web also
+      requires fully-loaded history before it will fold; the app does not gate on a
+      pending history page.
 - [x] Live token streaming with throttling + streaming dot; the live signal is the
       turn-scoped "Deep diving..." shimmer, not a caret — the web has no streaming caret
 - [x] Message footers: `[clock] [copy]` with a 1s icon swap and no toast

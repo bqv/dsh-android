@@ -326,10 +326,10 @@ private fun GeneralSection(
         }
     }
 
-    // Conversation display: the web's `transcriptView`. The app still folds a
-    // finished turn's process, so a host value of `normal` is stored intent this
-    // client does not render yet — the row states it truthfully rather than
-    // showing the app's effective mode as if it were the setting.
+    // Conversation display: the web's `transcriptView`, and now the mode the
+    // transcript actually renders in — `normal` folds nothing, so a completed
+    // turn keeps its interim messages and tool rows instead of collapsing them
+    // into one summary line (see `buildDisplayRows`).
     val transcript = hostSettings?.field(GeneralSettings.CHAT_NS, GeneralSettings.TRANSCRIPT_FIELD)
     val transcriptWrite = writerFor(transcript)
     SettingsRow(

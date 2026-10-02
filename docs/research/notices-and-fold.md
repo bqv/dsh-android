@@ -178,9 +178,12 @@ Observed: `plugin` = "Context injection · {plugin id}"; `agent-message` = "Cont
 ## What the Android client does
 
 1. Fold after `turn/end` with a finalized answer, default closed
-   (`model/TurnProcess.kt:203-204`). The web also gates on `Compact` mode, a `turn-process` control
-   and complete history; the port has no mode switch and always folds
-   (`ui/SettingsContent.kt`, the "Conversation display" row), and does not gate on a pending history page.
+   (`model/TurnProcess.kt`). The web also gates on `Compact` mode, a `turn-process` control and
+   complete history. The port **now honours `Compact`/`Normal`**: `ui-chat.transcriptView` is read
+   from the host's settings and `normal` folds nothing (`ui/ChatScreen.kt`, `foldTurns`), which is
+   what the web's `compactTranscript` does; anything else, including a host that never sends the
+   field, folds as before. It still does not gate on a pending history page, and the port has no
+   `turn-process` control of its own.
 2. Fold the assistant's own process — tool calls, interim messages and to-do rows — plus nothing
    else. Human messages and every notice (`context`, `compaction`, `model-retry`, turn error) stay
    visible outside the group; the web hides them, and folding them here hid compaction entirely

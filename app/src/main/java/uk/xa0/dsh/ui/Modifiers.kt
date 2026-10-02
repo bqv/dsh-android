@@ -18,6 +18,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
+import android.os.SystemClock
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -54,41 +55,73 @@ fun Modifier.clickableNoRipple(
  * removing it, so the first one is checked against the next layout and reversed if
  * it went the wrong way. The answer is kept for the rest of the process.
  *
- * Only a change in the row's own height triggers it, and never while a scroll is
- * in progress — so a row that is being streamed into is left alone, and the
- * bottom-pinning follow is not fought.
+ * It arms only on a tap on the row. Rows change height for plenty of reasons the
+ * reader did not ask for — a tool's output arrives, a deliverable appears, an
+ * image finishes decoding — and compensating for those moves the transcript out
+ * from under somebody who is only reading it. A tap is the one signal that says
+ * the change is about to be the reader's own doing.
+ *
+ * A change in the row's own height, inside [TOGGLE_WINDOW_MS] of a tap on it, and
+ * never while a scroll is in progress.
  */
 fun Modifier.anchorTopOnResize(listState: LazyListState): Modifier = composed {
     val scope = rememberCoroutineScope()
     val st = remember { Anchor() }
-    Modifier.onGloballyPositioned { coords ->
-        val top = coords.positionInWindow().y
-        val height = coords.size.height
-        if (!st.busy && st.height != 0 && st.height != height && !listState.isScrollInProgress) {
-            val delta = top - st.top
-            if (delta != 0f) {
-                st.busy = true
-                st.target = st.top
-                scope.launch {
-                    val sent = delta * st.sign
-                    listState.scrollBy(sent)
-                    withFrameNanos { }
-                    // Only judge it if the layout actually moved: an unchanged
-                    // reading means the scroll did not land, not that it went the
-                    // wrong way.
-                    if (st.top != top && abs(st.top - st.target) > abs(delta)) {
-                        st.sign = -st.sign
-                        listState.scrollBy(-2f * sent)
-                        withFrameNanos { }
-                    }
-                    st.busy = false
+    Modifier
+        .pointerInput(Unit) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                var travel = 0f
+                var last = down.position
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Final)
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    travel += abs(change.position.y - last.y) + abs(change.position.x - last.x)
+                    last = change.position
+                    if (!change.pressed) break
+                }
+                if (travel <= viewConfiguration.touchSlop) {
+                    st.tappedAt = SystemClock.uptimeMillis()
                 }
             }
         }
-        st.top = top
-        st.height = height
-    }
+        .onGloballyPositioned { coords ->
+            val top = coords.positionInWindow().y
+            val height = coords.size.height
+            val tapped = SystemClock.uptimeMillis() - st.tappedAt <= TOGGLE_WINDOW_MS
+            if (!st.busy && tapped && st.height != 0 && st.height != height && !listState.isScrollInProgress) {
+                val delta = top - st.top
+                if (delta != 0f) {
+                    st.busy = true
+                    st.target = st.top
+                    scope.launch {
+                        try {
+                            val sent = delta * st.sign
+                            listState.scrollBy(sent)
+                            withFrameNanos { }
+                            // Only judge it if the layout actually moved: an
+                            // unchanged reading means the scroll did not land, not
+                            // that it went the wrong way.
+                            if (st.top != top && abs(st.top - st.target) > abs(delta)) {
+                                st.sign = -st.sign
+                                listState.scrollBy(-2f * sent)
+                                withFrameNanos { }
+                            }
+                        } finally {
+                            // Also on cancellation, or one cancelled correction
+                            // would wedge this row for the rest of the process.
+                            st.busy = false
+                        }
+                    }
+                }
+            }
+            st.top = top
+            st.height = height
+        }
 }
+
+/** How long after a tap on a row a height change is taken to be that tap's doing. */
+private const val TOGGLE_WINDOW_MS = 800L
 
 private class Anchor {
     var top = 0f
@@ -98,6 +131,7 @@ private class Anchor {
     /** 1 or -1: which way a scroll moves this list's content. Learned once. */
     var sign = 1f
     var busy = false
+    var tappedAt = 0L
 }
 
 /**
