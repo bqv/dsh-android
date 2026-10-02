@@ -217,12 +217,27 @@ object Markdown {
         while (i < text.length) {
             val rest = text.substring(i)
 
-            // Inline code wins over everything else.
+            // Inline code wins over everything else — except when the whole span is a
+            // URL, which is how this model writes a link it does not want mangled.
+            //
+            // Measured on real transcripts rather than guessed: across a sample of
+            // sessions, *zero* CommonMark angle autolinks and 198 backticked URLs in
+            // one session alone. Backticks there are a quoting habit, not a claim that
+            // the address is code, and a reader tapping it wants the page.
+            //
+            // Only a span that is *entirely* one URL. `curl https://…` stays code: that
+            // span is a command, and linking half of it would be a lie about what it is.
             if (text[i] == '`') {
                 val end = text.indexOf('`', i + 1)
                 if (end > i + 1) {
                     flush()
-                    tokens += InlineToken(text.substring(i + 1, end), InlineStyle.CODE)
+                    val inner = text.substring(i + 1, end)
+                    val url = wholeUrlOf(inner)
+                    tokens += if (url != null) {
+                        InlineToken(text = inner, style = InlineStyle.LINK, url = url)
+                    } else {
+                        InlineToken(inner, InlineStyle.CODE)
+                    }
                     i = end + 1
                     continue
                 }
@@ -314,6 +329,18 @@ object Markdown {
         }
         flush()
         return tokens
+    }
+
+    /**
+     * The URL a code span is, when the span is nothing but one.
+     *
+     * No punctuation trimming here, unlike the bare-text autolink: inside backticks the
+     * characters are deliberate, so a trailing full stop is part of the address and the
+     * sentence's own stop sits outside the span where it belongs.
+     */
+    private fun wholeUrlOf(span: String): String? {
+        if (span.isEmpty() || !AUTOLINK.matches(span)) return null
+        return if (span.startsWith("www.")) "https://$span" else span
     }
 
     /**

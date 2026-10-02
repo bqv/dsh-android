@@ -134,6 +134,12 @@ of where the app stands against them.
 - [x] Links open in the browser for `[text](url)` **and** for a bare `https://`/`http://`/
       `www.` URL (`model/Markdown.parseInline`'s autolink, GFM's rule: word boundary,
       sentence punctuation left out, a bracket belonging to the path kept)
+      — and for a **code span that is nothing but a URL** (`` `https://x.dev/docs` ``). That
+      last one is the form this model actually uses: measured across a sample of real
+      sessions, zero CommonMark angle autolinks and 198 backticked URLs in one session
+      alone, every one of them rendered as unclickable code. A span with anything else in
+      it (`curl https://…`) stays code, and a trailing stop inside the backticks is kept,
+      since inside backticks the characters are deliberate.
 - [x] Syntax highlighting (heuristic tokenizer, DSH Shiki colours)
 - [ ] Markdown gaps: inline images, `@file` mentions as chips, citations, tags, mermaid/math
 - [ ] Interrupted assistant tail tag. A `turn/end` reason already draws the

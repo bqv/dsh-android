@@ -26,6 +26,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import uk.xa0.dsh.data.BusyEnter
 import uk.xa0.dsh.data.DshConfig
+import uk.xa0.dsh.data.DraftStore
 import uk.xa0.dsh.data.ThemeMode
 import uk.xa0.dsh.model.AccountBalance
 import uk.xa0.dsh.model.ChatEntry
@@ -335,6 +336,15 @@ private const val FILE_PREVIEW_LINES = 2000
  * with `eof` false, which is what "too large to preview" means here.
  */
 private const val MAX_PREVIEW_IMAGE_BYTES = 2 * 1024 * 1024
+
+/**
+ * The draft key for the composer that has no session yet.
+ *
+ * The new-session hero takes typing like any other composer and what is typed there is
+ * as easy to lose, but there is no session id to file it under. It cannot collide with
+ * one: session ids are `session-…` or `dsh-automation-session-…`.
+ */
+const val PENDING_DRAFT_KEY = "pending"
 
 /**
  * The web's pause between the last keystroke and a `session/search` request
@@ -3179,6 +3189,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 .onSuccess { _ui.value = _ui.value.copy(currentPermission = mode) }
                 .onFailure { showFailure(it, "commands/execute", "Could not switch access mode: ") }
         }
+        // Whatever was typed on the hero belongs to the session it just created: the
+        // composer's key changes with the session id, so without this the reader's own
+        // words would be filed under the hero's key and never read again — a draft lost
+        // by the act of using it.
+        draftStore.rename(PENDING_DRAFT_KEY, id)
         _ui.value = _ui.value.copy(busy = false, pendingSession = null)
         openSession(id)
         return id
@@ -4534,6 +4549,29 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val config = configStore.load().copy(busyEnter = mode)
         configStore.save(config)
         _ui.value = _ui.value.copy(busyEnter = mode)
+    }
+
+    private val draftStore by lazy { DraftStore(app) }
+
+    /**
+     * The draft for [key], from disk.
+     *
+     * Read synchronously on purpose: the composer seeds itself from this on its first
+     * frame, and an asynchronous read would render an empty box and then fill it — the
+     * one place where "loading" is worse than a plain read of a few hundred bytes.
+     *
+     * @param key the session id, or [PENDING_DRAFT_KEY] for the new-session composer.
+     */
+    fun draftFor(key: String?): String = key?.let { draftStore.load(it) }.orEmpty()
+
+    /**
+     * Stores [key]'s draft. Called on every change rather than on a timer: preferences
+     * writes are asynchronous and cheap, and a debounce would lose the last keystrokes
+     * whenever the process is killed — which is one of the two cases this exists for.
+     */
+    fun saveDraft(key: String?, text: String) {
+        key ?: return
+        draftStore.save(key, text)
     }
 
     /** Saves (or clears) the DeepSeek key used to read the account balance. */

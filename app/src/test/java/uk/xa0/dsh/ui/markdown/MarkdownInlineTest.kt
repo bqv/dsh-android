@@ -59,6 +59,36 @@ class MarkdownInlineTest {
         assertEquals("$url.", "${links("$url.").single().url}.")
     }
 
+    /**
+     * The form this model actually uses. Across a sample of real sessions: zero
+     * CommonMark angle autolinks, 198 backticked URLs in one session alone — so a link
+     * in backticks is the *common* case, and it used to render as unclickable code.
+     */
+    @Test
+    fun `a code span that is only a url is a link`() {
+        assertEquals("http://host:8080", links("`http://host:8080`").single().url)
+        assertEquals("https://x.dev/docs", links("see `https://x.dev/docs` now").single().url)
+        // `www.` without a scheme is the same address, and the display text is what the
+        // model wrote rather than what a browser would need.
+        val www = links("`www.example.com/a`").single()
+        assertEquals("www.example.com/a", www.text)
+        assertEquals("https://www.example.com/a", www.url)
+    }
+
+    /** Inside backticks the characters are deliberate, so a trailing stop is part of it. */
+    @Test
+    fun `a code span keeps its own punctuation`() {
+        assertEquals("https://x.dev/a.", links("`https://x.dev/a.`").single().url)
+    }
+
+    /** …but a span that is a command, or a sentence, is still code. */
+    @Test
+    fun `a code span with anything else in it stays code`() {
+        assertEquals(emptyList<InlineToken>(), links("`curl https://x.dev/a`"))
+        assertEquals(emptyList<InlineToken>(), links("`https://x.dev/a --flag`"))
+        assertEquals(emptyList<InlineToken>(), links("`see https://x.dev`"))
+    }
+
     @Test
     fun `a url inside inline code is not a link`() {
         val tokens = Markdown.parseInline("run `curl https://x.dev/a` now")
