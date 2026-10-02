@@ -716,9 +716,14 @@ fun ReasoningRow(reasoning: String, running: Boolean) {
         }
 
         if (expanded) {
-            Text(
+            // Markdown, not a plain `Text` — which is what this was, and why a link in
+            // thinking was dead. Reasoning is where this model puts most of its URLs
+            // ("Let me check https://…/issues/1448"): measured on one session, the
+            // assistant's own prose carried them in reasoning, and the plain text here
+            // made every one of them unclickable. The renderer is the same one the
+            // answer body uses, so a link taps the same way in both.
+            MarkdownText(
                 text = reasoning.trim(),
-                style = DshType.bodyMedium,
                 color = colors.labelTertiary,
                 modifier = Modifier.padding(start = 22.dp, top = DshSpacing.xs, bottom = DshSpacing.xs),
             )

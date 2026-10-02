@@ -99,6 +99,9 @@ of where the app stands against them.
 - [x] User message: right-aligned r22 bubble, 82% cap, timestamp
 - [x] Assistant message: plain full-width markdown, no bubble/avatar
 - [x] Reasoning row: collapsible "Think", live "Thinking…", summary line
+      — the expanded body is **markdown**, not plain text, which is what makes a link in
+      thinking clickable. Reasoning is where DeepSeek puts most of its URLs, and a plain
+      `Text` there made every one of them dead.
 - [x] Tool rows: 24dp disclosure + IN/OUT mono card
 - [x] Tool card variants, dispatched by call name in `ui/components/ChatRows.kt`:
       bash/pwsh terminal card with `$ cwd cmd`, state dot, exit-code pill and **panned**
