@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -46,6 +47,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import uk.xa0.dsh.diag.DiagLazyList
+import uk.xa0.dsh.diag.diagDrag
+import uk.xa0.dsh.diag.diagOffset
 import uk.xa0.dsh.DirectoryEntry
 import uk.xa0.dsh.DirectoryLevel
 import uk.xa0.dsh.ui.clickableNoRipple
@@ -254,7 +258,14 @@ fun WorkspaceBrowser(
 
             Box(Modifier.weight(1f)) {
                 if (level != null) {
-                    LazyColumn(Modifier.fillMaxWidth()) {
+                    val listState = rememberLazyListState()
+                    DiagLazyList("browser", listState)
+                    LazyColumn(
+                        Modifier
+                            .fillMaxWidth()
+                            .diagDrag("browser") { listState.diagOffset() },
+                        state = listState,
+                    ) {
                         items(visible, key = { it.path }) { entry ->
                             DirectoryRow(entry = entry, enabled = !busy) { onList(entry.path) }
                         }

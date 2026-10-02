@@ -2,6 +2,7 @@ package uk.xa0.dsh
 
 import android.app.Application
 import uk.xa0.dsh.data.ConfigStore
+import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.net.DshClient
 
 /** Process-wide singletons; the DSH client owns the cookie jar and the event socket. */
@@ -30,5 +31,8 @@ class DshApplication : Application() {
         client.applyConfig(configStore.load())
         Attention.ensureChannel(this)
         registerActivityLifecycleCallbacks(foreground)
+        // Latent scroll diagnostics: invisible, additive, and off the main
+        // thread. See uk.xa0.dsh.diag.ScrollDiag for how to read them back.
+        ScrollDiag.attach(filesDir)
     }
 }

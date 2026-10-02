@@ -103,6 +103,10 @@ import uk.xa0.dsh.PENDING_DRAFT_KEY
 import uk.xa0.dsh.DshViewModel
 import uk.xa0.dsh.ReferenceCandidate
 import uk.xa0.dsh.data.BusyEnter
+import uk.xa0.dsh.diag.DiagLazyList
+import uk.xa0.dsh.diag.ScrollDiag
+import uk.xa0.dsh.diag.diagDrag
+import uk.xa0.dsh.diag.diagOffset
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.DisplayRow
 import uk.xa0.dsh.model.LiveAttempt
@@ -280,6 +284,7 @@ fun ChatScreen(vm: DshViewModel) {
         frozenLive = null
         stickToBottom = true
         if (listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0) {
+            ScrollDiag.prog("chat", "session-switch")
             listState.scrollToItem(0)
         }
     }
@@ -977,6 +982,7 @@ fun ChatScreen(vm: DshViewModel) {
                     }
                     stickToBottom = false
                     frozenLive = currentLive
+                    ScrollDiag.prog("chat", "oversize-teleport")
                     listState.scrollBy((liveRowHeight - viewportHeight).toFloat())
                 }
 
@@ -985,6 +991,7 @@ fun ChatScreen(vm: DshViewModel) {
                     // streaming token could jump the list mid-drag, which reads as
                     // the app fighting the finger.
                     if (stickToBottom && !listState.isScrollInProgress && rows.isNotEmpty()) {
+                        ScrollDiag.prog("chat", "follow")
                         listState.scrollToItem(0)
                     }
                 }
@@ -1006,9 +1013,15 @@ fun ChatScreen(vm: DshViewModel) {
                 // reverseLayout keeps the newest turn pinned to the bottom, so a
                 // streaming answer never yanks the viewport while you read history.
                 Box(Modifier.weight(1f)) {
+                    // Latent: records the transcript's position and gestures. It
+                    // consumes nothing and scrolls nothing, so what it captures is
+                    // the behaviour that existed before any of this was added.
+                    DiagLazyList("chat", listState)
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .diagDrag("chat") { listState.diagOffset() },
                         reverseLayout = true,
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
                             start = DshSpacing.xl,
@@ -1118,7 +1131,10 @@ fun ChatScreen(vm: DshViewModel) {
                         TurnRail(
                             targets = jumpTargets,
                             activeIndex = activeTarget,
-                            onJump = { index -> scope.launch { listState.animateScrollToItem(index) } },
+                            onJump = { index ->
+                                ScrollDiag.prog("chat", "rail")
+                                scope.launch { listState.animateScrollToItem(index) }
+                            },
                             // Flush to the edge and only as wide as the ticks: the
                             // rail owns the whole column for pointer input, so any
                             // inset ate into the rows' trailing controls (the To-dos
@@ -1133,7 +1149,10 @@ fun ChatScreen(vm: DshViewModel) {
                     // is exactly "cannot scroll backwards".
                     if (!atBottom) {
                         ScrollToBottomButton(
-                            onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                            onClick = {
+                                ScrollDiag.prog("chat", "to-bottom-button")
+                                scope.launch { listState.animateScrollToItem(0) }
+                            },
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
                                 .padding(end = DshSpacing.xl, bottom = DshSpacing.lg),
@@ -1272,6 +1291,7 @@ fun ChatScreen(vm: DshViewModel) {
                             draft = TextFieldValue("")
                             stickToBottom = true
                             vm.send(text, vm.submitMode())
+                            ScrollDiag.prog("chat", "send")
                             scope.launch { listState.animateScrollToItem(0) }
                         },
                         onSendMode = { mode ->
@@ -1279,6 +1299,7 @@ fun ChatScreen(vm: DshViewModel) {
                             draft = TextFieldValue("")
                             stickToBottom = true
                             vm.send(text, mode)
+                            ScrollDiag.prog("chat", "send-mode")
                             scope.launch { listState.animateScrollToItem(0) }
                         },
                         onToggleBusyEnter = {
@@ -2115,21 +2136,45 @@ private fun TurnRail(
             .padding(horizontal = pad, vertical = pad)
             .pointerInput(shown.size) {
                 awaitEachGesture {
+                    // Observe the rail, never claim the gesture.
+                    //
+                    // This used to consume the down. The rail's box is the width of
+                    // its ticks by up to 280dp tall, and consuming there meant a
+                    // vertical drag that started on that strip never reached the
+                    // transcript at all — a 22dp-wide hole in the list along the
+                    // right edge, over the half of the screen a thumb rests on. A
+                    // scrub is a *tap*; a drag belongs to whatever it is over.
+                    //
+                    // Nothing is consumed here, so a tap's owner is decided the way
+                    // it is everywhere else: if a row's own control consumed the
+                    // gesture, that control wins and the rail stays quiet.
                     val down = awaitFirstDown(requireUnconsumed = false)
                     pressed = true
                     hovered = shown.indexOfAt(down.position.y, ladder)
-                    down.consume()
+                    var travel = 0f
+                    var last = down.position
+                    var claimed = down.isConsumed
                     while (true) {
                         val event = awaitPointerEvent()
                         val pointer = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (pointer.isConsumed) claimed = true
+                        travel += abs(pointer.position.y - last.y) + abs(pointer.position.x - last.x)
+                        last = pointer.position
                         if (!pointer.pressed) {
                             // Release is the commit: the web's onClick lands here too.
-                            hovered?.let { if (it in shown.indices) onJump(shown[it].index) }
-                            pointer.consume()
+                            if (!claimed && travel <= viewConfiguration.touchSlop) {
+                                hovered?.let { if (it in shown.indices) onJump(shown[it].index) }
+                            }
                             break
                         }
-                        hovered = shown.indexOfAt(pointer.position.y, ladder)
-                        pointer.consume()
+                        if (travel > viewConfiguration.touchSlop) {
+                            // The finger is scrolling. Let go of the rail the moment
+                            // it does, so the preview does not ride along with it.
+                            pressed = false
+                            hovered = null
+                        } else {
+                            hovered = shown.indexOfAt(pointer.position.y, ladder)
+                        }
                     }
                     pressed = false
                     hovered = null

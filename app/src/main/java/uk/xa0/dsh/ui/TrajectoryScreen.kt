@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +45,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import uk.xa0.dsh.diag.DiagLazyList
+import uk.xa0.dsh.diag.diagOffset
+import uk.xa0.dsh.diag.diagDrag
 import uk.xa0.dsh.model.TrajectoryKind
 import uk.xa0.dsh.model.TrajectoryModel
 import uk.xa0.dsh.model.TrajectoryRow
@@ -106,10 +110,14 @@ fun TrajectoryScreen(
             )
 
             val rows = remember(model, collapsedTurns) { model.rows(collapsedTurns) }
+            val listState = rememberLazyListState()
+            DiagLazyList("trajectory", listState)
             LazyColumn(
                 Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .diagDrag("trajectory") { listState.diagOffset() },
+                state = listState,
             ) {
                 items(rows, key = { it.key }) { row ->
                     when (row) {

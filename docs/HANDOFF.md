@@ -190,6 +190,12 @@ editing the live copy. There is no install step to forget.
 
 ## Open items
 
+- **Scrolling is being rebuilt from evidence, not from an account of it.** The
+  latent recorder in `uk.xa0.dsh.diag.ScrollDiag` is attached to every scroll
+  surface (`docs/SCROLL-DIAG.md`); read it with `adb logcat -d -s DshScroll:I`.
+  The `fight` records — the app moving a list while a finger is down — are the
+  ones to look at first.
+
 - **Device verification is not re-checked by a docs pass.** Screen evidence lives
   in `.probe/`; a surface with no capture there is unverified, and this note
   makes no claim either way.

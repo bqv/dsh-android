@@ -77,6 +77,10 @@ import uk.xa0.dsh.WorkspaceItem
 import uk.xa0.dsh.model.isAutomationSessionId
 import uk.xa0.dsh.model.partitionAutomations
 import uk.xa0.dsh.model.SessionSearchHit
+import uk.xa0.dsh.diag.DiagLazyList
+import uk.xa0.dsh.diag.ScrollDiag
+import uk.xa0.dsh.diag.diagDrag
+import uk.xa0.dsh.diag.diagOffset
 import uk.xa0.dsh.ui.components.DotState
 import uk.xa0.dsh.ui.components.DshMark
 import uk.xa0.dsh.ui.components.DshTextField
@@ -445,7 +449,10 @@ fun SessionsDrawer(
     // one anchor that always shows every group, so the reveal is an explicit
     // scroll to item 0.
     LaunchedEffect(drawerOpen) {
-        if (drawerOpen) listState.scrollToItem(0)
+        if (drawerOpen) {
+            ScrollDiag.prog("drawer", "open-anchor")
+            listState.scrollToItem(0)
+        }
     }
 
     // Rename is the one row verb with a form; the others act immediately.
@@ -671,8 +678,11 @@ fun SessionsDrawer(
             )
         }
 
+        DiagLazyList("drawer", listState)
         LazyColumn(
-            Modifier.weight(1f),
+            Modifier
+                .weight(1f)
+                .diagDrag("drawer") { listState.diagOffset() },
             state = listState,
             contentPadding = PaddingValues(bottom = DshSpacing.md),
         ) {

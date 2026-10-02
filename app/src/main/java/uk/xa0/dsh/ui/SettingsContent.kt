@@ -34,6 +34,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import uk.xa0.dsh.diag.DiagScrollColumn
+import uk.xa0.dsh.diag.diagDrag
 import uk.xa0.dsh.AgentPresetOption
 import uk.xa0.dsh.ModelOption
 import uk.xa0.dsh.PermissionOption
@@ -134,10 +136,13 @@ fun SettingsContent(
     onDismiss: () -> Unit,
 ) {
     val colors = DshTheme.colors
+    val scroll = rememberScrollState()
+    DiagScrollColumn("settings", scroll)
     Column(
         Modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scroll)
+            .diagDrag("settings") { scroll.value }
             .padding(bottom = DshSpacing.xxxl),
     ) {
         // The web header: title + Close (`settings.title` / `settings.close`).

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,6 +43,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import uk.xa0.dsh.diag.DiagLazyList
+import uk.xa0.dsh.diag.diagDrag
+import uk.xa0.dsh.diag.diagOffset
 import uk.xa0.dsh.AgentPresetOption
 import uk.xa0.dsh.ContextBreakdown
 import uk.xa0.dsh.FULL_ACCESS_PRESET
@@ -225,10 +229,14 @@ fun ModelSheet(
                 )
             }
 
+            val modelList = rememberLazyListState()
+            DiagLazyList("sheet:models", modelList)
             LazyColumn(
                 Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 420.dp),
+                    .heightIn(max = 420.dp)
+                    .diagDrag("sheet:models") { modelList.diagOffset() },
+                state = modelList,
             ) {
                 grouped.forEach { (provider, options) ->
                     item(key = "h-$provider") {
@@ -709,10 +717,14 @@ fun AgentPresetSheet(
                 )
             }
 
+            val presetList = rememberLazyListState()
+            DiagLazyList("sheet:presets", presetList)
             LazyColumn(
                 Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 420.dp),
+                    .heightIn(max = 420.dp)
+                    .diagDrag("sheet:presets") { presetList.diagOffset() },
+                state = presetList,
             ) {
                 items(options, key = { it.id }) { option ->
                     val selected = option.id == current

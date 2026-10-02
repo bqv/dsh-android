@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -56,6 +57,10 @@ import com.caverock.androidsvg.SVG
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
+import uk.xa0.dsh.diag.DiagLazyList
+import uk.xa0.dsh.diag.DiagScrollColumn
+import uk.xa0.dsh.diag.diagDrag
+import uk.xa0.dsh.diag.diagOffset
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.FileTouch
 import uk.xa0.dsh.model.PreviewFormat
@@ -270,7 +275,14 @@ private fun FileListPane(
             )
         }
         Box(Modifier.fillMaxWidth().height(0.5.dp).background(colors.borderL1))
-        LazyColumn(Modifier.fillMaxSize()) {
+        val listState = rememberLazyListState()
+        DiagLazyList("files:tree", listState)
+        LazyColumn(
+            Modifier
+                .fillMaxSize()
+                .diagDrag("files:tree") { listState.diagOffset() },
+            state = listState,
+        ) {
             items(files, key = { it.path }) { file ->
                 FileRow(file, selected = file.path == selectedPath, onSelect = { onSelect(file) })
             }
@@ -439,7 +451,14 @@ private fun PreviewPane(
                         modifier = Modifier.padding(horizontal = DshSpacing.lg, vertical = DshSpacing.xs),
                     )
                 }
-                LazyColumn(Modifier.fillMaxSize()) {
+                val previewState = rememberLazyListState()
+                DiagLazyList("files:preview", previewState)
+                LazyColumn(
+                    Modifier
+                        .fillMaxSize()
+                        .diagDrag("files:preview") { previewState.diagOffset() },
+                    state = previewState,
+                ) {
                     items(ready.numbered, key = { it.number }) { line -> PreviewLineRow(line) }
                 }
             }
@@ -623,11 +642,14 @@ private fun PicturePreview(picture: FilePreview.Image, modifier: Modifier = Modi
         if (decoded == null) {
             PreviewNote("Could not decode this image.", Modifier.weight(1f).fillMaxWidth())
         } else {
+            val imageScroll = rememberScrollState()
+            DiagScrollColumn("files:image", imageScroll)
             Column(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(imageScroll)
+                    .diagDrag("files:image") { imageScroll.value }
                     .padding(DshSpacing.md),
             ) {
                 Image(
@@ -698,9 +720,12 @@ private fun SvgPreview(markup: String, modifier: Modifier = Modifier) {
         PreviewNote("Could not render this SVG — switch to Source to read it.", modifier)
         return
     }
+    val svgScroll = rememberScrollState()
+    DiagScrollColumn("files:svg", svgScroll)
     Column(
         modifier
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(svgScroll)
+            .diagDrag("files:svg") { svgScroll.value }
             .padding(DshSpacing.md),
     ) {
         Image(

@@ -400,6 +400,8 @@ app/build.gradle.kts, settings.gradle.kts, gradle.properties, local.properties  
   that have cost real time, and what is still open.
 - `docs/PARITY.md` — the parity roadmap against the vanilla web UI, including
   every deliberate divergence and the reasoning behind it.
+- `docs/SCROLL-DIAG.md` — the latent scroll diagnostics: what they record, and
+  how to read them back off a device.
 - `docs/research/` — the reverse-engineered reference: design system, wire
   protocol, transcript/UI node model, settings and panels, composer menus,
   notification plumbing, and the mobile-remote environment.
