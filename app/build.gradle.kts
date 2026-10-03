@@ -44,6 +44,28 @@ android {
         buildConfig = true
     }
 
+    // Compose UI tests run on the JVM under Robolectric. Scrolling is the one
+    // behaviour in this app that a unit test could not reach and a person on a
+    // phone could only describe — "it jumps", "it fights my finger" — so it gets
+    // a real list, real gestures and a real layout, deterministically and in
+    // seconds, instead of an install per hypothesis.
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+
+    // Robolectric resolves its `android-all` jar through a Maven cache and takes a
+    // lock file, both under the user's home. That is unwritable inside the build
+    // sandbox — the lock alone fails the run — and would be litter in a real home
+    // anyway, so the test JVM is given a home of its own beside the toolchain,
+    // where the download survives a `clean`.
+    tasks.withType<Test>().configureEach {
+        val fakeHome = rootProject.layout.projectDirectory.dir(".toolchain/robolectric-home").asFile
+        doFirst { fakeHome.mkdirs() }
+        systemProperty("user.home", fakeHome.absolutePath)
+    }
+
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
@@ -122,6 +144,10 @@ dependencies {
     // takes this jar over the stub, which makes JSON-shaped logic testable on the JVM
     // — which is the only place it can be tested at all.
     testImplementation("org.json:json:20240303")
+    // The scroll harness: a real Compose layout and real touch input, on the JVM.
+    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
