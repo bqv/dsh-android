@@ -448,6 +448,21 @@ fun ChatScreen(vm: DshViewModel) {
     // (order 0, and the hard-coded default in `view-selection.ts`) and trajectory
     // (order 10) — and the web remembers the choice per session.
     var view by rememberSaveable(ui.currentSessionId) { mutableStateOf(ChatView.CHAT) }
+
+    // Closing the last shell returns to the conversation.
+    //
+    // The Shell tab is a place you go and then leave by closing what you opened;
+    // with nothing left in it there is nothing to look at and no way back except
+    // the tab strip. Fired on the *transition* to empty rather than on emptiness,
+    // so opening the tab to start a first shell is not immediately undone.
+    LaunchedEffect(Unit) {
+        var previous = -1
+        vm.terminal.collect { state ->
+            val now = state.terminals.size
+            if (previous > 0 && now == 0 && view == ChatView.TERMINAL) view = ChatView.CHAT
+            previous = now
+        }
+    }
     // The right panel's `files` surface. A phone has no room for a column beside
     // the transcript, so it takes the whole body with its own back bar.
     var showFiles by rememberSaveable(ui.currentSessionId) { mutableStateOf(false) }
