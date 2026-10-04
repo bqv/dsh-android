@@ -186,6 +186,25 @@ fun buildDisplayRows(
     return unique
 }
 
+/**
+ * The turn this row belongs to, when it belongs to one.
+ *
+ * Used to answer "is the reader looking at this turn's rows", which is the question
+ * that keeps a fold from closing something somebody is reading.
+ */
+fun DisplayRow.turnOrNull(): Int? = when (this) {
+    is DisplayRow.TurnProcess -> turn
+    is DisplayRow.Single -> when (val entry = entry) {
+        is ChatEntry.AssistantMessage -> entry.turn
+        is ChatEntry.ToolCall -> entry.turn
+        // A human message opens the turn that follows it, and a notice belongs to
+        // whatever was running; neither is a fold member, so neither has a say.
+        is ChatEntry.UserMessage, is ChatEntry.Todos, is ChatEntry.Notice -> null
+    }
+
+    is DisplayRow.Live -> null
+}
+
 /** False for rows whose composable would draw nothing at all. */
 private val DisplayRow.renders: Boolean
     get() = when (this) {

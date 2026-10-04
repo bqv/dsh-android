@@ -56,6 +56,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -313,6 +314,33 @@ fun SessionsDrawer(
     // per-child `activity` those catalogs carry does reach these rows, through the
     // live-running fold behind `session.running`.
     val rollups = remember(sessions) { indexSubagentRollups(sessions) }
+
+    // Where the drawer opens.
+    //
+    // Remembering the raw index does not work, and the recorder shows why: the roster
+    // arrives in chunks, so at startup the drawer's list is briefly nine rows and the
+    // full one lands after. Everything added *above* the anchor pushes the reader down
+    // the list — measured, 46 rows arriving took the first visible row from 0 to 36, so
+    // the drawer opened two thirds of the way down with nothing on screen to explain
+    // it, and it looked like it had scrolled itself to the bottom.
+    //
+    // A position is therefore only remembered once the reader has actually chosen one.
+    // Until they touch the drawer it opens at the top, and after that it opens where
+    // they left it.
+    val drawerTouch = rememberTouchGate()
+    var drawerTouched by remember { mutableStateOf(false) }
+    var drawerAt by remember { mutableStateOf(0) }
+    LaunchedEffect(drawerTouch) {
+        snapshotFlow { drawerTouch.isDown }.collect { if (it) drawerTouched = true }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex }.collect { index ->
+            if (drawerTouched) drawerAt = index
+        }
+    }
+    LaunchedEffect(drawerOpen) {
+        if (drawerOpen) listState.scrollToItem(drawerAt)
+    }
 
     // The roster's order is held still while the drawer is open. It is refreshed
     // from the live list whenever the drawer is *shut*, so it is current the moment
@@ -699,6 +727,7 @@ fun SessionsDrawer(
         LazyColumn(
             Modifier
                 .weight(1f)
+                .touchGate(drawerTouch)
                 .diagDrag("drawer") { listState.diagOffset() },
             state = listState,
             contentPadding = PaddingValues(bottom = DshSpacing.md),

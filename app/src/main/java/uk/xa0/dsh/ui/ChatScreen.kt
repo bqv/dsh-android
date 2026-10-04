@@ -123,6 +123,7 @@ import uk.xa0.dsh.model.buildToolCallTree
 import uk.xa0.dsh.model.buildTrajectory
 import uk.xa0.dsh.model.subagentComposerState
 import uk.xa0.dsh.model.subagentTargetOf
+import uk.xa0.dsh.model.turnOrNull
 import uk.xa0.dsh.ui.agentPresetLabel
 import uk.xa0.dsh.ui.components.ApprovalCard
 import uk.xa0.dsh.ui.components.AssistantMessageRow
@@ -290,8 +291,21 @@ fun ChatScreen(vm: DshViewModel) {
     // index. The fix at this level is not to rewrite rows the reader is reading: the
     // set is held while they are away, and applied in one step when they return.
     var foldedTurns by remember { mutableStateOf(endedTurns) }
-    LaunchedEffect(following.value, endedTurns) {
-        if (following.value) foldedTurns = endedTurns
+
+    // Which turns the reader can actually see, one frame behind. A fold replaces the
+    // rows it stands in for, so folding a turn somebody is reading closes what they
+    // are looking at — the complaint this answers, in the words it was made in.
+    //
+    // Being at the tail is not enough on its own: while following, the turn that just
+    // ended is the one under the reader's eye, and the closing message is exactly the
+    // moment the fold appears. A turn on screen is therefore not folded at all, however
+    // the reader got there — following, dragging, or jumping with the rail — and folds
+    // once they have scrolled past it.
+    var visibleTurns by remember { mutableStateOf(emptySet<Int>()) }
+    LaunchedEffect(following.value, endedTurns, visibleTurns) {
+        if (!following.value) return@LaunchedEffect
+        val wanted = endedTurns - visibleTurns
+        if (wanted != foldedTurns) foldedTurns = wanted
     }
 
     // A session switch is not a scroll. `listState` is remembered across sessions on
@@ -938,14 +952,27 @@ fun ChatScreen(vm: DshViewModel) {
                             if (entry is ChatEntry.UserMessage && !entry.fromPlugin) {
                                 TurnJump(
                                     index = index,
-                                    prompt = entry.text,
-                                    response = responseAfter(rows, index),
+                                    prompt = { entry.text },
+                                    response = { responseAfter(rows, index) },
                                 )
                             } else {
                                 null
                             }
                         }
                 }
+                // The turns on screen, which is what the fold rule above asks about.
+                // One frame behind by construction, which is the safe direction: a fold
+                // can only ever be applied to a turn that was off screen when the turn
+                // ended.
+                val rowsNow by rememberUpdatedState(rows)
+                LaunchedEffect(listState) {
+                    snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.index } }
+                        .collect { indices ->
+                            val latest = indices.mapNotNull { rowsNow.getOrNull(it)?.turnOrNull() }.toSet()
+                            if (latest != visibleTurns) visibleTurns = latest
+                        }
+                }
+
                 val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
                 // The turn you are reading is the newest target at or above the
                 // first visible row.
@@ -2041,7 +2068,21 @@ private fun ScrollToBottomButton(onClick: () -> Unit, modifier: Modifier = Modif
 }
 
 /** One rail mark: where in the transcript it jumps to, and what it says. */
-private data class TurnJump(val index: Int, val prompt: String, val response: String)
+/**
+ * One stop on the turn rail.
+ *
+ * The prompt and the answer are *lambdas*, not strings, and that is a scrolling
+ * cost rather than a tidiness one: the rail's targets are rebuilt whenever the row
+ * list changes, which is every streamed token, and building them eagerly meant
+ * joining the assistant prose of every turn in the session — hundreds of kilobytes
+ * of it in a long conversation — on every frame, to fill a card that is only on
+ * screen while a finger is on the rail.
+ */
+private class TurnJump(
+    val index: Int,
+    val prompt: () -> String,
+    val response: () -> String,
+)
 
 /**
  * The assistant prose that answered the prompt at [index].
@@ -2208,6 +2249,10 @@ private fun TurnRail(
 private fun TurnPreviewCard(preview: TurnJump, modifier: Modifier = Modifier) {
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(DshRadius.lg)
+    // Once per turn shown, not once per frame: the rail is rebuilt on every streamed
+    // token and the answer is the whole of that turn's prose.
+    val prompt = remember(preview.index) { preview.prompt() }
+    val response = remember(preview.index) { preview.response() }
     Column(
         modifier
             .widthIn(max = 260.dp)
@@ -2218,16 +2263,16 @@ private fun TurnPreviewCard(preview: TurnJump, modifier: Modifier = Modifier) {
             .padding(horizontal = DshSpacing.lg, vertical = 10.dp),
     ) {
         Text(
-            text = preview.prompt,
+            text = prompt,
             style = DshType.bodyMedium.copy(fontWeight = FontWeight.Medium),
             color = colors.labelPrimary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (preview.response.isNotBlank()) {
+        if (response.isNotBlank()) {
             Spacer(Modifier.height(DshSpacing.xs))
             Text(
-                text = preview.response,
+                text = response,
                 style = DshType.bodySmall,
                 color = colors.labelCaption,
                 maxLines = 4,
