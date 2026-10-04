@@ -98,6 +98,15 @@ editing the live copy. There is no install step to forget.
 
 ## Traps
 
+0. **The JVM harness cannot measure text.** Robolectric lays text out with stub
+   metrics — probed in `TextOverflowProbeTest`, 24,892 characters measure as a single
+   260px line, about 0.6px per glyph — so nothing wraps and `hasVisualOverflow` is false
+   however long the string is. Box layout, row positions, gesture effects and list shape
+   are all real there; typography is not. **A test whose subject is where text breaks
+   cannot be written in this repository** and has to be seen on a device. Two tests have
+   been deleted for being unable to see their own subject: one comparing composition cost
+   by wall clock (the first run pays the JIT warm-up) and one asserting a "Show more"
+   offer appears on a clipped paragraph.
 1. **Locks live in the checkout, never `/tmp`.** Each DSH bash call gets a private
    tmpfs, so a `/tmp` flock is not a mutex at all; two holders never meet. Every
    lock is `$ROOT/.build.lock`, `.install.lock`, `.device-<serial>.lock`.
