@@ -1,21 +1,18 @@
-Only silence the subagent "done" alert, and put the rest of the child's alerts back
+Release v0.4.0
 
-The previous commit read the request as "a child is worth a buzz only when it is
-stuck" and dropped a subagent's error and terminal bell along with its idle alert. That
-was too much: the thing to stop is the "Done: <title>" notification, and everything
-else about a child still matters.
+The scrolling release. The transcript moves from a reversed list to an ordinary
+top-anchored one, because a reversed list anchors on the row at the bottom of the
+viewport and therefore grows a row *upward* by exactly the height it gains — measured,
+192px for a 48px row grown to 200px, against zero in an ordinary list. That one
+property was behind "it opens upwards", "it closes the rows I'm reading" and most of
+"it jumps about", and the six mechanisms stacked on top of it were patches over it.
 
-So the blocking flag is gone and `alert` is back to one rule — post unless the reader is
-looking at it. The idle alert is silenced where it is raised instead: a subagent
-finishing its turn is not news, because the parent's turn is what the reader is waiting
-for and the child's result arrives in the parent's transcript anyway. A dispatch of
-three children ended in four notifications, three of them about work nobody was
-supervising directly. The row still takes its green "done" dot, which is the quiet half
-of the same signal.
+Everything that moves a list now either is the reader's gesture or says so before it
+moves. Frame times over 24,053 frames with the reader scrolling: 11.7% of frames over
+the 11ms budget before, 5.4% after, and 1.4% over 33ms.
 
-A question or an approval still speaks for a child, because they stall it where the
-parent's screen cannot show that the header counts a waiting child as running. An error
-or a bell still speaks for it too, because those are events rather than a status.
+`docs/releases/v0.4.0.md` carries the full account, including a section on what is not
+verified.
 
-The `visibleWith` half of that commit stands: opening a parent settles its subagents'
-alerts and suppresses them while it is in front. 342 green.
+versionCode 4 -> 5, versionName 0.3.0 -> 0.4.0, and the release APK built locally
+reports 5 / 0.4.0 rather than merely being tagged as such.

@@ -60,7 +60,8 @@ bash build.sh :app:assembleDebug
 # -> app/build/outputs/apk/debug/app-debug.apk
 
 bash build.sh :app:testDebugUnitTest
-# 230 tests, all JVM: the VT parser, the protocol gates and the key tables
+# 342 tests, all JVM: the VT parser, the protocol gates, the key tables,
+# and the scroll rules — which run a real Compose layout under Robolectric
 ```
 
 The suite (`app/src/test/java/…`) exists because the VT core and the terminal's
