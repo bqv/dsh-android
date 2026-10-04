@@ -40,6 +40,25 @@ fun isAutomationSessionId(sessionId: String): Boolean =
     sessionId.startsWith(AUTOMATION_SESSION_PREFIX)
 
 /**
+ * Whether a session that has just stopped is worth an idle notification.
+ *
+ * Two kinds of session are not, and for the same reason: nobody is waiting on them.
+ * A subagent's turn is part of its parent's, whose result arrives in the parent's
+ * transcript anyway; an automation run exists precisely to happen unattended, and one
+ * that fires hourly would otherwise post twenty-four "Done" notifications a day for
+ * work the reader set going and then walked away from.
+ *
+ * Both still speak up when something is *stuck* — a question or an approval stalls them
+ * where nothing else can show it — and an error or a terminal bell is an event rather
+ * than a status. This rules out the status, not the session.
+ *
+ * A subagent of an automation run is covered twice over: its own id is a plain
+ * `session-…`, and it is a subagent.
+ */
+fun warrantsIdleAlert(sessionId: String, subagent: Boolean): Boolean =
+    !subagent && !isAutomationSessionId(sessionId)
+
+/**
  * Splits a roster into the automation runs and everything else, preserving order.
  *
  * Pure so the rule is pinned by a test: a subagent of an automation run is *not*
