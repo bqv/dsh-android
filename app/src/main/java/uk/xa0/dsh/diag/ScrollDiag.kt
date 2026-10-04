@@ -57,8 +57,19 @@ object ScrollDiag {
     /** A gap between position samples longer than this is a visible stall. */
     private const val JANK_MS = 150L
 
-    /** How long a `prog` mark stays attributable to a `shift`. */
+    /**
+     * How long a `prog` mark stays attributable to a `shift`.
+     *
+     * Two windows, because the two questions are different. A mark and a finger
+     * together are a fight, and a stale mark must not be able to invent one, so that
+     * test uses the short window. Whether *the app* moved the list is a different
+     * question, and there the long window is the honest one: a session switch marks
+     * before scrolling, and the scroll itself waits for the new session's rows to
+     * arrive — measured, the move landed 681ms and 938ms after its own mark, outside
+     * the short window, and was filed as unexplained.
+     */
     private const val MARK_TTL_MS = 500L
+    private const val MARK_TTL_SLOW_MS = 4000L
 
     /** A pixel-scrolled surface stepping further than this in one sample jumped. */
     private const val PX_JUMP = 600
@@ -349,7 +360,11 @@ object ScrollDiag {
         pxJump: Boolean = false,
     ) {
         val mark = marks[surface]
-        val attributed = mark?.takeIf { fresh(it.at, SystemClock.uptimeMillis(), MARK_TTL_MS) }?.tag
+        val now = SystemClock.uptimeMillis()
+        val attributed = mark?.takeIf { fresh(it.at, now, MARK_TTL_MS) }?.tag
+        // The app may still be the cause long after the short window: a scroll that
+        // waits for rows to arrive is the app's move, however late it lands.
+        val announced = mark?.takeIf { fresh(it.at, now, MARK_TTL_SLOW_MS) }?.tag
         val down = pointerDown(surface)
         val big = jumped(di, kept, threshold, pxJump)
         val common = arrayOf(
@@ -379,8 +394,10 @@ object ScrollDiag {
             attributed != null && scrolling ->
                 record("flingmove", *common, "tag" to attributed)
 
-            attributed != null ->
-                if (big) record("move", *common, "tag" to attributed, notable = true)
+            attributed != null || announced != null ->
+                if (big) {
+                    record("move", *common, "tag" to (attributed ?: announced), notable = true)
+                }
 
             // A gap between position changes is only a stall if a scroll was
             // actually running: otherwise it is a finger held still, or a phone in

@@ -152,17 +152,45 @@ fun TailFollow(
         }
     }
 
-    // Growth inside the tail: an exact, self-limiting correction.
+    // Growth inside the tail: an exact, self-limiting correction — for a tail that
+    // fits.
+    //
+    // A message taller than the window is not chased, and this is the rule that keeps
+    // the correction from becoming the teleport it replaced. "How far the tail is cut
+    // off by" is the whole remaining height of the row once the row is taller than the
+    // screen, so chasing it meant scrolling thousands of pixels at a time: measured,
+    // corrections of 3625px, each one replacing every row on screen. The reader is
+    // instead left where they are — the answer carries on below the fold and they read
+    // it at their own pace, which is what the old oversize rule was for.
     LaunchedEffect(state) {
         snapshotFlow { tailOverflow(state) }.collect { overflow ->
-            if (overflow > 0f && following.value && !holding() && !state.isScrollInProgress) {
-                onMove("tail-growth")
-                state.dispatchRawDelta(overflow)
+            if (overflow <= 0f || !following.value || holding() || state.isScrollInProgress) {
+                return@collect
             }
+            if (tailIsTallerThanViewport(state)) {
+                following.value = false
+                return@collect
+            }
+            onMove("tail-growth")
+            state.dispatchRawDelta(overflow)
         }
     }
 
     return following
+}
+
+/**
+ * Whether the last row in the list is taller than the window it is being read in.
+ *
+ * If it is, following it would mean pinning the newest line of a message whose
+ * beginning cannot be on screen at the same time, and the "correction" would be the
+ * height of the whole message.
+ */
+private fun tailIsTallerThanViewport(state: LazyListState): Boolean {
+    val info = state.layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return false
+    if (last.index != info.totalItemsCount - 1) return false
+    return last.size > info.viewportEndOffset - info.viewportStartOffset
 }
 
 /**

@@ -22,6 +22,9 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import android.util.LruCache
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,13 +59,55 @@ import uk.xa0.dsh.ui.theme.DshType
  * No WebView, no TextView-with-HTML: every block becomes Compose layout, so
  * selection, theming and scrolling behave natively.
  */
+/**
+ * Parsed markdown for [text], remembered, cached, and — when it is long — parsed off
+ * the main thread.
+ *
+ * Parsing is the expensive half of drawing a message: measured in `ParseCostTest`,
+ * 1.5ms for a 2.4KB answer and 3.9ms for an 18KB one. Three things follow from that.
+ *
+ *  1. A frame is 11ms on this display. A long message that scrolls into view therefore
+ *     spends a third of the frame it arrives in, and a scroll that brings three heavy
+ *     rows in at once pays for all three on one frame — which is what the late frames
+ *     in the recorder's histograms are.
+ *  2. `remember(text)` does not survive the row leaving the composition, so flicking
+ *     up and back down re-parsed everything on the way back. The cache makes a second
+ *     visit free, and changes nothing on screen.
+ *  3. Short documents are still parsed inline, because a fraction of a frame is not
+ *     worth a frame of blank row. Long ones are parsed on a background thread and the
+ *     row draws one frame later — a blank row for 11ms reads far better than a hitch
+ *     that drops three frames, and the alternative is 4ms of every such frame.
+ */
+private const val INLINE_PARSE_CHARS = 4096
+
+/** Bounded, keyed on the text itself: identical messages across sessions share it. */
+private val parseCache = object : LruCache<String, List<MdBlock>>(48) {}
+
+@Composable
+private fun parsedMarkdown(text: String): List<MdBlock> {
+    if (text.length <= INLINE_PARSE_CHARS) {
+        return remember(text) {
+            parseCache.get(text) ?: Markdown.parse(text).also { parseCache.put(text, it) }
+        }
+    }
+    val cached = remember(text) { parseCache.get(text) }
+    var parsed by remember(text) { mutableStateOf(cached) }
+    LaunchedEffect(text) {
+        if (parsed == null) {
+            parsed = withContext(Dispatchers.Default) { Markdown.parse(text) }
+                .also { parseCache.put(text, it) }
+        }
+    }
+    return parsed.orEmpty()
+}
+
 @Composable
 fun MarkdownText(
     text: String,
     modifier: Modifier = Modifier,
     color: Color = DshTheme.colors.labelPrimary,
 ) {
-    val blocks = remember(text) { Markdown.parse(text) }
+    val blocks = parsedMarkdown(text)
     val colors = DshTheme.colors
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(DshSpacing.xl)) {

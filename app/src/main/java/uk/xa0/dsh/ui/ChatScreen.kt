@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
@@ -1778,25 +1779,30 @@ private fun ChatHeader(
                     .padding(DshSpacing.md),
             )
             Spacer(Modifier.width(HEADER_SEAT_GAP))
-            Column(Modifier.weight(1f)) {
-                // The title is the way *up* when this session is a subagent: the name is
-                // what the reader is looking at, and the lineage seat only ever goes
-                // down. The arrow is the whole hint — it is drawn only when the tap
-                // actually leads somewhere (`SubagentParent` is null otherwise, so a
-                // top-level session's title is not secretly clickable).
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = if (parent != null) {
-                        Modifier
-                            .clip(RoundedCornerShape(DshRadius.sm))
-                            .clickableNoRipple(onClick = onParent)
-                            .semantics {
-                                contentDescription = "Open parent session: ${parent.title}"
-                            }
-                    } else {
-                        Modifier
-                    },
-                ) {
+            // The way *up* is the whole seat, not just the words in it.
+            //
+            // The tap used to be on the title row, so it was only as wide as the arrow
+            // and the name and only as tall as one line — a tap a few pixels to the
+            // right of the title, in space that belongs to nothing else, did nothing at
+            // all. A bar's empty space belongs to the thing the bar is about.
+            val seat = Modifier.weight(1f).fillMaxHeight()
+            Column(
+                modifier = if (parent != null) {
+                    seat
+                        .clip(RoundedCornerShape(DshRadius.sm))
+                        .clickableNoRipple(onClick = onParent)
+                        .semantics {
+                            contentDescription = "Open parent session: ${parent.title}"
+                        }
+                } else {
+                    seat
+                },
+                verticalArrangement = Arrangement.Center,
+            ) {
+                // The arrow is the whole hint — it is drawn only when the tap actually
+                // leads somewhere (`SubagentParent` is null otherwise, so a top-level
+                // session's title is not secretly clickable).
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     if (parent != null) {
                         Icon(
                             Icons.Rounded.ArrowUpward,

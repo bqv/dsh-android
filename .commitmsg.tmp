@@ -1,0 +1,19 @@
+Do not chase a tail taller than the window, and let the whole subagent bar go up
+
+Two things, one of them a lurch I introduced.
+
+The growth correction is "how far the tail is cut off by", which stops being a small
+number the moment the tail row is taller than the window: it becomes the height of the
+whole message. The recorder caught it on the phone — corrections of 3625px, each one
+replacing every row on screen, the old oversize teleport back in a new form. The rule
+that prevented it was in the code this replaced and I dropped it: a message taller
+than the screen is not chased. The reader is left where they are, the answer carries on
+below the fold, and they read it at their own pace. A test grows the tail to twice the
+viewport and asserts the list does not move.
+
+And the subagent bar's way up is now the whole seat rather than the words in it. The
+tap was on the title row, so it was as wide as the arrow and the name and one line
+tall; a tap a few pixels right of the title, in space belonging to nothing else, did
+nothing. The seat fills the bar's height and its full width.
+
+332 green.

@@ -282,6 +282,25 @@ class TailFollowTest {
         )
     }
 
+    @Test
+    fun `a tail row taller than the viewport is not chased`() {
+        // The correction is "how far the tail is cut off by", which for a row taller
+        // than the window is the height of the whole message. Chasing that scrolled
+        // 3625px at a time on the phone and replaced every row on screen.
+        val scene = atTail()
+        val before = topOf(16)
+
+        scene.tailDp = viewportDp * 2
+        rule.waitForIdle()
+
+        assertEquals(
+            "the list should not have moved for an over-tall tail row",
+            before,
+            topOf(16),
+            1f,
+        )
+    }
+
     /** Not a rule: the numbers the rules above are written against. */
     @Test
     fun `diagnostic - the geometry of the tail`() {
