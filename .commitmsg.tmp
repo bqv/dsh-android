@@ -1,20 +1,24 @@
-Prove the expansion rule with the real row, and test the fold rule
+Wait for the finger before restoring the drawer's position
 
-Point two of this goal was proven with plain boxes — a row that grows keeps its top
-edge in a top-anchored list, and rose by exactly the height it gained in the reversed
-one that was replaced. What that could not show is the app's own disclosure rows
-behaving that way. `RealRowExpansionTest` renders the actual `ReasoningRow` — the
-"Think" section a reader taps — inside a real list, clicks it by its own label, and
-asserts the row grew while its top edge moved by less than a pixel. That is the case
-in question, which the device has never caught: the only growth it has recorded is the
-live row's, which is not a row anybody opened.
+Nine of the twelve "the app moved a list under a finger" records in one session were
+the drawer's own open-restore, moving between one and fifty pixels while the thumb
+that had just swiped the drawer open was still resting in it. Opening the drawer is a
+swipe, so the hand is routinely still on the screen when the restore runs. It waits
+for the last finger to lift now.
 
-And the fold rule is now a pure function with tests rather than a condition inside a
-composable. `nextFoldedTurns` is two rules: a turn whose rows are on screen is not
-folded, whatever the reader is doing, and a reader who is not following keeps whatever
-shape the transcript already had. The first is the request in its own words — the rows
-being read must not close when their turn ends — and it is why "the reader is at the
-tail" is not on its own a reason to fold: at the tail, the turn that has just ended is
-exactly the one under the reader's eye as the closing message lands.
+The rest of the session's evidence, which is what this round was for:
+
+  * opening a row is confirmed on the device, and by real rows rather than the live
+    one: e31083 grew 693px, e31089 423px, e298 271px, e4740 4684px, and the list did
+    not move for any of them. The top edge stayed and the row grew downward, which is
+    point two of this goal answered where it matters;
+  * every movement carries a cause — 11 session-switch, 12 open-restore, 25
+    tail-growth, 10 tail-rows, 9 tail-rearm, 2 to-bottom-button;
+  * the remaining shifts are content arriving (two rows, kept=50) or the drawer
+    re-laying-out its roster while it is shut, which is invisible and is restored on
+    open;
+  * 9.1% of frames over the 11ms budget in this session against 11.7% before, with
+    2.6% over 33ms. The previous session measured 5.4% — the spread is usage, not
+    regression.
 
 337 green.

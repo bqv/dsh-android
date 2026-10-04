@@ -58,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -341,10 +342,15 @@ fun SessionsDrawer(
         }
     }
     LaunchedEffect(drawerOpen) {
-        if (drawerOpen) {
-            ScrollDiag.prog("drawer", "open-restore")
-            listState.scrollToItem(drawerAt)
-        }
+        if (!drawerOpen) return@LaunchedEffect
+        // Do not move a list a finger is on. Opening the drawer is a swipe, so the
+        // hand that opened it is routinely still on the screen when this runs, and the
+        // recorder found it: nine of twelve "the app moved the list under a finger"
+        // records were this restore, moving one to fifty pixels while the thumb that
+        // had just swiped the drawer open was still resting in it.
+        snapshotFlow { drawerTouch.isDown }.first { !it }
+        ScrollDiag.prog("drawer", "open-restore")
+        listState.scrollToItem(drawerAt)
     }
 
     // The roster's order is held still while the drawer is open. It is refreshed
