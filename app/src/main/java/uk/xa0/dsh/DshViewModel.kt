@@ -1618,8 +1618,24 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
             val restart = session.restart()
             if (restart == null) {
+                // The stream is not coming back, but whether the *shell* is gone is a
+                // different question: a dropped attachment is worth keeping the seat
+                // for, and an exited shell is not. The host's own list is the
+                // authority, and the answer is the difference between offering
+                // "Reconnect" and returning to the conversation.
+                //
+                // A failed list is not an answer: on a blip the seat stays, because
+                // guessing "gone" would throw the reader out of a shell that is still
+                // running.
+                val listed = runCatching { terminalClient.list(agentId) }.getOrNull()
+                val gone = listed != null && listed.none { it.id == info.id }
                 publishTerminal(
                     phase = TerminalPhase.DISCONNECTED, writable = false,
+                    terminals = if (gone) {
+                        _terminal.value.terminals.filterNot { it.id == info.id }
+                    } else {
+                        _terminal.value.terminals
+                    },
                     issue = restartIssue ?: _terminal.value.issue ?: TerminalIssue.ATTACHMENT_ENDED,
                 )
                 return
