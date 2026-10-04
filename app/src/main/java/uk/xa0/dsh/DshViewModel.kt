@@ -1600,7 +1600,21 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             val phase = _terminal.value.phase
             if (phase == TerminalPhase.CLOSED || phase == TerminalPhase.FAILED) return
             // An exited or failed shell has no stream left to hold open.
-            if (session.stopped) return
+            //
+            // And an exited shell is a *closed* one: it leaves the seat. It did not
+            // before, so `terminals` kept holding a shell that was gone, the seat was
+            // never empty, and "closing the last shell returns to the conversation"
+            // never fired for the way a shell usually ends — Ctrl-D, or `exit`. Only
+            // the Close button emptied the list, which is why the rule looked like it
+            // had stopped working.
+            if (session.stopped) {
+                publishTerminal(
+                    phase = TerminalPhase.CLOSED, active = null, writable = false,
+                    terminals = _terminal.value.terminals.filterNot { it.id == info.id },
+                    error = null, issue = null, limit = null,
+                )
+                return
+            }
 
             val restart = session.restart()
             if (restart == null) {
