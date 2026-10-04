@@ -77,6 +77,7 @@ import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
 import uk.xa0.dsh.model.isAutomationSessionId
 import uk.xa0.dsh.model.partitionAutomations
+import uk.xa0.dsh.model.holdOrder
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.diag.DiagLazyList
 import uk.xa0.dsh.diag.ScrollDiag
@@ -313,6 +314,16 @@ fun SessionsDrawer(
     // live-running fold behind `session.running`.
     val rollups = remember(sessions) { indexSubagentRollups(sessions) }
 
+    // The roster's order is held still while the drawer is open. It is refreshed
+    // from the live list whenever the drawer is *shut*, so it is current the moment
+    // it opens, and frozen for as long as somebody is reading it — a session that
+    // receives a message jumps to the top of its group otherwise, under the reader's
+    // eye. See [holdOrder] for why membership is not held with it.
+    var heldOrder by remember { mutableStateOf(emptyList<String>()) }
+    LaunchedEffect(drawerOpen, sessions) {
+        if (!drawerOpen) heldOrder = sessions.map { it.id }
+    }
+
     val sections = remember(
         matched,
         sessions,
@@ -321,6 +332,7 @@ fun SessionsDrawer(
         orderByUpdated,
         showArchived,
         expandedSessions,
+        heldOrder,
     ) {
         val byId = matched.associateBy { it.id }
         // Membership is checked against the *unfiltered* list: a group is only
@@ -347,7 +359,7 @@ fun SessionsDrawer(
                     val children = subagentChildrenOf(sessions, node.id)
                         .filter { showArchived || it.id !in archivedSessionIds }
                         .let { kids ->
-                            if (orderByUpdated) kids else kids.sortedBy { it.updatedAt }
+                            if (orderByUpdated) holdOrder(kids, heldOrder) else kids.sortedBy { it.updatedAt }
                         }
                     children.forEach { walk(it, depth + 1) }
                 }
@@ -366,8 +378,7 @@ fun SessionsDrawer(
         // started in that directory, and fifty of them turn a Workspace into a log.
         // Nothing is hidden — every row is here, in its own section.
         val (automationRuns, conversations) = partitionAutomations(matched) { it.id }
-        val automationSection = automationRuns
-            .sortedByDescending { it.updatedAt }
+        val automationSection = holdOrder(automationRuns, heldOrder)
             .takeIf { it.isNotEmpty() }
             ?.let {
                 Section(
@@ -385,7 +396,7 @@ fun SessionsDrawer(
                 Section(
                     FLAT,
                     "Sessions",
-                    conversations.sortedByDescending { it.updatedAt }.flatMap { disclose(it) },
+                    holdOrder(conversations, heldOrder).flatMap { disclose(it) },
                 ),
             )
             automationSection?.let { sections += it }
@@ -398,7 +409,9 @@ fun SessionsDrawer(
         workspaces.forEach { workspace ->
             val claimedIds = workspace.sessionIds.filter { it !in automationIds }
             var items = claimedIds.mapNotNull { byId[it] }
-            if (orderByUpdated) items = items.sortedByDescending { it.updatedAt }
+            // Manual order is the host's (`workspace.sessionIds`) and does not move
+            // on its own, so only the newest-first view needs holding.
+            if (orderByUpdated) items = holdOrder(items, heldOrder)
             claimed += claimedIds
             // A Workspace with no sessions at all is still a group: "Add
             // workspace…" just created it, and hiding it made the row look inert.
@@ -419,8 +432,7 @@ fun SessionsDrawer(
 
         // Sessions outside every Workspace. The host labels this "Ungrouped"; it
         // has no manual order of its own, so it is always newest-first.
-        val rest = conversations.filterNot { it.id in claimed }
-            .sortedByDescending { it.updatedAt }
+        val rest = holdOrder(conversations.filterNot { it.id in claimed }, heldOrder)
         if (rest.isNotEmpty()) {
             result += Section(
                 key = UNGROUPED,

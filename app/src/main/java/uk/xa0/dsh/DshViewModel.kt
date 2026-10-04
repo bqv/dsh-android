@@ -4191,6 +4191,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess { page ->
                 val added = reducer.applyOlderPage(page)
                 Log.d("$TAG/History", "page before=$before added=$added hasMore=${reducer.hasMore()}")
+                // Older rows land above the reader; the recorder should be able to
+                // tell that from the app moving the list itself.
+                uk.xa0.dsh.diag.ScrollDiag.note(
+                    "page",
+                    "s" to "chat",
+                    "added" to added,
+                    "hasMore" to reducer.hasMore(),
+                )
                 bumpTranscript()
             }.onFailure { error ->
                 // A failed page is not worth the banner: the transcript is still

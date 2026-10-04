@@ -169,6 +169,16 @@ object ScrollDiag {
         )
     }
 
+    /**
+     * A record from the app itself, for something the recorder cannot see: a page of
+     * history landing, a session being opened. Without these, a legitimate rewrite of
+     * the whole row set is indistinguishable from the app moving a list nobody asked
+     * it to move.
+     */
+    fun note(kind: String, vararg pairs: Pair<String, Any?>) {
+        record(kind, *pairs, notable = true)
+    }
+
     /** True while a finger is down on [surface]. */
     fun pointerDown(surface: String): Boolean = (downCounts[surface]?.get() ?: 0) > 0
 

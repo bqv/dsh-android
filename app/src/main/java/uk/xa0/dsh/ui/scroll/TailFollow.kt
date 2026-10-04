@@ -122,13 +122,24 @@ fun TailFollow(
         }
     }
 
-    // New rows: the one discrete move. `visible < 0` is a list that has not been
-    // laid out yet.
+    // New rows: the one discrete move.
+    //
+    // It watches how many rows are *below the fold* rather than how many rows there
+    // are, and that is the whole of why it is reliable. Targeting an index captured
+    // when the count changed goes stale the moment a second row arrives — which,
+    // during a turn, is immediately — and the animation holds `isScrollInProgress`
+    // while it runs, so the retry was skipped too. The list simply stopped arriving
+    // at the newest row. A deficit cannot go stale: if a move lands short, the
+    // deficit is still positive and the next sample asks again.
+    //
+    // The move is instant rather than animated for the same reason. Following means
+    // the rows are already at the bottom of the screen and the new one is just below
+    // it, so there is nothing to smooth — and an animation is a thing that can be
+    // interrupted, left unfinished, or cancelled by the next row.
     LaunchedEffect(state) {
-        snapshotFlow { state.layoutInfo.totalItemsCount }.collect { count ->
-            if (count <= 0 || !following.value || holding() || state.isScrollInProgress) return@collect
-            val visible = state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            if (visible < count - 1) state.animateScrollToItem(count - 1)
+        snapshotFlow { rowsBelowFold(state) }.collect { belowFold ->
+            if (belowFold <= 0 || !following.value || holding() || state.isScrollInProgress) return@collect
+            state.scrollToItem(state.layoutInfo.totalItemsCount - 1)
         }
     }
 
@@ -142,6 +153,16 @@ fun TailFollow(
     }
 
     return following
+}
+
+/**
+ * How many rows there are below the bottom of the viewport, or zero when the last
+ * row in the list is the last row on screen.
+ */
+private fun rowsBelowFold(state: LazyListState): Int {
+    val info = state.layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return 0
+    return (info.totalItemsCount - 1 - last.index).coerceAtLeast(0)
 }
 
 /**

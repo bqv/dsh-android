@@ -300,6 +300,9 @@ fun ChatScreen(vm: DshViewModel) {
     // means following it.
     LaunchedEffect(ui.currentSessionId) {
         frozenLive = null
+        // A session switch replaces every row there is, which is indistinguishable
+        // from the app moving a list on its own unless it says so.
+        ScrollDiag.prog("chat", "session-switch")
         followFrom++
     }
 
@@ -1109,10 +1112,13 @@ fun ChatScreen(vm: DshViewModel) {
                         ScrollToBottomButton(
                             onClick = {
                                 ScrollDiag.prog("chat", "to-bottom-button")
+                                // Instant, and to the last index at the moment it
+                                // runs: an animation to an index captured before it
+                                // started lands short whenever a row arrives during
+                                // it, which during a turn is always.
                                 scope.launch {
-                                    listState.animateScrollToItem(
-                                        (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0),
-                                    )
+                                    val last = listState.layoutInfo.totalItemsCount - 1
+                                    if (last >= 0) listState.scrollToItem(last)
                                 }
                             },
                             modifier = Modifier

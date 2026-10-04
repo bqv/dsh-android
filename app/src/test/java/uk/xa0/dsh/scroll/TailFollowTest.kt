@@ -247,6 +247,41 @@ class TailFollowTest {
         )
     }
 
+    @Test
+    fun `a burst of new rows still ends with the newest on screen`() {
+        // The reported instability: rows arriving faster than the move to reach them
+        // can finish. Each one used to be skipped while the previous animation held
+        // `isScrollInProgress`, so the list fell further and further behind.
+        val scene = atTail()
+        repeat(6) { step ->
+            scene.count = 21 + step
+            rule.waitForIdle()
+        }
+
+        // Twenty-six rows, so the newest is index 25.
+        assertTrue(
+            "the newest row should be on screen after a burst, bottom=${bottomOf(25)}",
+            bottomOf(25) <= viewportDp + 1f,
+        )
+        assertEquals(
+            "and the viewport should end on it",
+            25,
+            scene.state!!.layoutInfo.visibleItemsInfo.last().index,
+        )
+    }
+
+    @Test
+    fun `a whole turn arriving at once lands on its last row`() {
+        val scene = atTail()
+        scene.count = 40
+        rule.waitForIdle()
+
+        assertTrue(
+            "the last row should be on screen, bottom=${bottomOf(39)}",
+            bottomOf(39) <= viewportDp + 1f,
+        )
+    }
+
     /** Not a rule: the numbers the rules above are written against. */
     @Test
     fun `diagnostic - the geometry of the tail`() {
