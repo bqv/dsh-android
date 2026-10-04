@@ -55,6 +55,22 @@ class MultipartTest {
     }
 
     @Test
+    fun `the response the host actually sends is parsed`() {
+        // Captured from the live host: `workspaceFiles/readBytes` for a real PNG, byte
+        // for byte. A hand-built body proves the arithmetic; this proves the shape, and
+        // the two disagreed once already.
+        val real = javaClass.getResourceAsStream("/multipart-real.bin")?.readBytes()
+            ?: error("fixture missing")
+        val boundary = boundaryOf(real) ?: error("no boundary in ${real.size} bytes")
+        val data = multipartBytes(real, boundary) ?: error("no part in ${real.size} bytes")
+        assertEquals(885, data.size)
+        assertArrayEquals(
+            byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte()),
+            data.copyOfRange(0, 4),
+        )
+    }
+
+    @Test
     fun `something that is not multipart is refused rather than guessed at`() {
         assertNull(boundaryOf("{\"type\":\"server-response\"}".toByteArray()))
         assertNull(multipartBytes("not multipart at all".toByteArray(), boundary))

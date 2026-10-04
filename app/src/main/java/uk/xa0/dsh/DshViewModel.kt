@@ -84,6 +84,7 @@ import uk.xa0.dsh.net.DeepSeekAccount
 import uk.xa0.dsh.net.DshAuthException
 import uk.xa0.dsh.net.DshRpcException
 import uk.xa0.dsh.net.multipartBytes
+import uk.xa0.dsh.net.boundaryOf
 import uk.xa0.dsh.net.DshUnreachableException
 import uk.xa0.dsh.net.MuxState
 import uk.xa0.dsh.net.StreamEvent
@@ -5802,6 +5803,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         if (url.isBlank()) return null
         markdownImages.get(url)?.let { return it }
         val sessionId = _ui.value.currentSessionId
+        // Logged because every way this can fail is silent: the card simply keeps the
+        // alt text, which is indistinguishable from a picture that was never parsed.
+        Log.d(TAG, "markdown image: url=$url session=$sessionId")
         val bytes = withContext(Dispatchers.IO) {
             runCatching {
                 if (url.startsWith("http://") || url.startsWith("https://")) {
@@ -5823,9 +5827,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     boundaryOf(body)?.let { multipartBytes(body, it) }
                 }
-            }.getOrNull()
+            }.onFailure { Log.w(TAG, "markdown image failed: url=$url", it) }.getOrNull()
         } ?: return null
-        if (bytes.isEmpty()) return null
+        if (bytes.isEmpty()) {
+            Log.w(TAG, "markdown image empty: url=$url")
+            return null
+        }
+        Log.d(TAG, "markdown image ok: url=$url bytes=${bytes.size}")
         markdownImages.put(url, bytes)
         return bytes
     }
@@ -5847,9 +5855,6 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             return body.bytes().takeIf { it.size <= MAX_PREVIEW_IMAGE_BYTES }
         }
     }
-
-    /** The boundary of a multipart body, read from the body's own first line. */
-    private fun boundaryOf(body: ByteArray): String? = boundaryOf(body)
 
     private fun describe(error: Throwable): String = when (error) {
         is DshAuthException -> AUTH_ERROR
