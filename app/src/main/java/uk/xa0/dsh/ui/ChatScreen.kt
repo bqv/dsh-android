@@ -179,6 +179,7 @@ fun ChatScreen(vm: DshViewModel) {
     val live by vm.live.collectAsStateWithLifecycle()
     val todos by vm.todos.collectAsStateWithLifecycle()
     val header by vm.header.collectAsStateWithLifecycle()
+    val terminal by vm.terminal.collectAsStateWithLifecycle()
     val endedTurns by vm.endedTurns.collectAsStateWithLifecycle()
     // The host's settings document is read once the connection is up, not only
     // when the Settings sheet is opened.
@@ -409,17 +410,25 @@ fun ChatScreen(vm: DshViewModel) {
 
     // Closing the last shell returns to the conversation.
     //
-    // The Shell tab is a place you go and then leave by closing what you opened;
-    // with nothing left in it there is nothing to look at and no way back except
-    // the tab strip. Fired on the *transition* to empty rather than on emptiness,
-    // so opening the tab to start a first shell is not immediately undone.
-    LaunchedEffect(Unit) {
-        var previous = -1
-        vm.terminal.collect { state ->
-            val now = state.terminals.size
-            if (previous > 0 && now == 0 && view == ChatView.TERMINAL) view = ChatView.CHAT
-            previous = now
+    // The Shell tab is a place you go and then leave by closing what you opened; with
+    // nothing left in it there is nothing to look at and no way back except the tab
+    // strip. Fired on the *transition* to empty rather than on emptiness, so opening the
+    // tab to start a first shell is not immediately undone.
+    //
+    // Keyed on the seat count rather than run once. It was `LaunchedEffect(Unit)`, which
+    // captures `view`'s state object from the first composition — and
+    // `rememberSaveable(ui.currentSessionId)` replaces that object on every session
+    // switch, so after the first switch the rule read and wrote a dead copy. Measured on
+    // the device: `seats=0 previous=1 view=CHAT` with the Shell tab on screen, and
+    // nothing moved. A changed key re-runs the block, so it sees the live state.
+    val seats = terminal.terminals.size
+    var hadShell by remember { mutableStateOf(false) }
+    LaunchedEffect(seats) {
+        if (seats == 0 && hadShell && view == ChatView.TERMINAL) {
+            android.util.Log.d("DshView", "last shell closed; returning to the conversation")
+            view = ChatView.CHAT
         }
+        hadShell = seats > 0
     }
     // The right panel's `files` surface. A phone has no room for a column beside
     // the transcript, so it takes the whole body with its own back bar.
