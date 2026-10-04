@@ -180,18 +180,27 @@ fun JobsSheet(
     }
 }
 
-/** How much of a job's detail is shown before "Show more". */
-private const val JOB_DETAIL_LINES = 4
+/** How much of a job is shown before "Show more", for the command and the detail. */
+private const val JOB_COLLAPSED_LINES = 4
 
 @Composable
 private fun JobRow(job: JobItem) {
     val colors = DshTheme.colors
-    // The detail is the one unbounded thing here, so it is capped and offered rather
-    // than clipped. `overflows` is only ever written while collapsed: once expanded
-    // there is nothing to overflow, and overwriting it there would take the "Show
-    // less" away and leave the row stuck open.
+    // A job is capped and offered rather than clipped, and *one* offer covers the row:
+    // two toggles, one under the command and one under the detail, would read as two
+    // different things to expand.
+    //
+    // The overflow flags are only ever written while collapsed: once expanded there is
+    // nothing to overflow, and overwriting them there would take the "Show less" away
+    // and leave the row stuck open.
+    //
+    // The command needs this as much as the detail does, which a screenshot settled: a
+    // job whose command is a heredoc runs most of the way down the sheet, and "a command
+    // is a line or three" was a guess that a `python3 - <<'EOF'` disproves.
     var expanded by rememberSaveable(job.id) { mutableStateOf(false) }
-    var overflows by remember(job.id) { mutableStateOf(false) }
+    var labelOverflows by remember(job.id) { mutableStateOf(false) }
+    var detailOverflows by remember(job.id) { mutableStateOf(false) }
+    val offer = expanded || labelOverflows || detailOverflows
     Row(
         Modifier
             .fillMaxWidth()
@@ -209,14 +218,16 @@ private fun JobRow(job: JobItem) {
         Spacer(Modifier.width(DshSpacing.md))
         Column(Modifier.weight(1f)) {
             Text(
-                // The sheet has room and it scrolls, so a job's command is shown in
-                // full rather than clipped. Two lines was enough to read `cd …` and no
+                // Twice what it was. Two lines was enough to read `cd …` and no
                 // further, which is the part of a command that says the least about
                 // what it does — and this row is the only place the command appears,
                 // since the compact seat beside the transcript is one line by design.
                 text = job.label,
                 style = DshType.bodyMedium,
                 color = colors.labelPrimary,
+                maxLines = if (expanded) Int.MAX_VALUE else JOB_COLLAPSED_LINES,
+                overflow = TextOverflow.Ellipsis,
+                onTextLayout = { layout -> if (!expanded) labelOverflows = layout.hasVisualOverflow },
             )
             Text(
                 // Same vocabulary the web's job list uses: a status, then the
@@ -234,25 +245,25 @@ private fun JobRow(job: JobItem) {
                     text = detail,
                     style = DshType.micro,
                     color = colors.labelCaption,
-                    maxLines = if (expanded) Int.MAX_VALUE else JOB_DETAIL_LINES,
+                    maxLines = if (expanded) Int.MAX_VALUE else JOB_COLLAPSED_LINES,
                     overflow = TextOverflow.Ellipsis,
-                    onTextLayout = { layout -> if (!expanded) overflows = layout.hasVisualOverflow },
+                    onTextLayout = { layout -> if (!expanded) detailOverflows = layout.hasVisualOverflow },
                 )
-                if (overflows || expanded) {
-                    Text(
-                        text = if (expanded) "Show less" else "Show more",
-                        style = DshType.micro,
-                        color = colors.link,
-                        modifier = Modifier
-                            .padding(top = 2.dp)
-                            .clip(RoundedCornerShape(DshRadius.sm))
-                            .clickableNoRipple { expanded = !expanded }
-                            // Inside the clickable, so the padding is part of the
-                            // target: a bare line of `micro` text is about 15dp tall,
-                            // which is a third of a comfortable tap.
-                            .padding(vertical = 10.dp, horizontal = 2.dp),
-                    )
-                }
+            }
+            if (offer) {
+                Text(
+                    text = if (expanded) "Show less" else "Show more",
+                    style = DshType.micro,
+                    color = colors.link,
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .clip(RoundedCornerShape(DshRadius.sm))
+                        .clickableNoRipple { expanded = !expanded }
+                        // Inside the clickable, so the padding is part of the target:
+                        // a bare line of `micro` text is about 15dp tall, which is a
+                        // third of a comfortable tap.
+                        .padding(vertical = 10.dp, horizontal = 2.dp),
+                )
             }
         }
     }
