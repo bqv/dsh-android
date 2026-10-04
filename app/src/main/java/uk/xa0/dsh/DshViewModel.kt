@@ -2685,6 +2685,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     if (block != null) {
                         liveProjections = block
                         applySessionProjections(block)
+                        // The subagent catalog lives in these projections, and this is
+                        // where they arrive. The rebuild used to happen only at
+                        // `openSession`, which runs *before* the baseline — so it read an
+                        // empty map every time and the lineage showed nothing, however
+                        // many children the session had.
+                        refreshSubagentCatalog(current)
                     }
                 }
                 publishQueue()
