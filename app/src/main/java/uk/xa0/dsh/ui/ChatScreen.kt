@@ -103,6 +103,7 @@ import uk.xa0.dsh.PENDING_DRAFT_KEY
 import uk.xa0.dsh.DshViewModel
 import uk.xa0.dsh.ReferenceCandidate
 import uk.xa0.dsh.data.BusyEnter
+import uk.xa0.dsh.diag.DiagFrames
 import uk.xa0.dsh.diag.DiagLazyList
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.diag.diagDrag
@@ -1067,6 +1068,7 @@ fun ChatScreen(vm: DshViewModel) {
                     // consumes nothing and scrolls nothing, so what it captures is
                     // the behaviour that existed before any of this was added.
                     DiagLazyList("chat", listState)
+                    DiagFrames()
                     LazyColumn(
                         state = listState,
                         modifier = Modifier

@@ -1,6 +1,7 @@
 package uk.xa0.dsh.model
 
 import org.json.JSONArray
+import androidx.compose.runtime.Immutable
 import org.json.JSONObject
 
 /**
@@ -30,7 +31,21 @@ fun JSONObject?.long(key: String, fallback: Long = 0L): Long = this?.optLong(key
 fun JSONObject?.bool(key: String, fallback: Boolean = false): Boolean =
     this?.optBoolean(key, fallback) ?: fallback
 
-/** One rendered row in the conversation. */
+/**
+ * One rendered row in the conversation.
+ *
+ * `@Immutable` is a promise, and it is what makes scrolling affordable. A transcript
+ * rebuilds its row list whenever the live row's text changes — every few
+ * milliseconds while an answer is written — and `LazyColumn` then recomposes the
+ * rows it can no longer prove unchanged. Without this annotation it can prove
+ * nothing about any of them: measured in `RecomposeCostTest`, a change to an
+ * *off-screen* row recomposed all seven visible ones. With it, none.
+ *
+ * The promise holds because nothing here is ever mutated after construction: the
+ * reducer replaces whole entries in its map rather than editing them, and the lists
+ * these hold are built once and never written to.
+ */
+@Immutable
 sealed interface ChatEntry {
     val seq: Int
 
@@ -123,6 +138,7 @@ enum class NoticeSeverity { INFO, ERROR }
  * name, and files carry a name and size; both are addressed by `attachmentId`
  * for the `session/attachment` read that fetches the bytes.
  */
+@Immutable
 data class MessageAttachment(
     val kind: String,
     val attachmentId: String,
@@ -142,6 +158,7 @@ data class MessageAttachment(
     val localData: String? = null,
 )
 
+@Immutable
 data class TodoItem(val content: String, val status: String) {
     val isDone: Boolean get() = status == "completed"
     val isActive: Boolean get() = status == "in_progress"
@@ -158,6 +175,7 @@ data class LiveBlock(
 )
 
 /** The in-flight assistant attempt, rendered after the durable transcript. */
+@Immutable
 data class LiveAttempt(
     val attemptId: String,
     val turn: Int,

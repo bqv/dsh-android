@@ -10,6 +10,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -124,6 +125,39 @@ fun Modifier.diagDrag(surface: String, offset: () -> Int = { 0 }): Modifier = co
                     offsetBefore = before,
                     offsetAfter = after,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Frame times, batched every couple of seconds.
+ *
+ * One of these is enough for the whole app: every `withFrameNanos` callback fires on
+ * the same frame, so a second watcher would only duplicate the same numbers. The
+ * batch is dropped when the loop was idle, so a phone sitting on a desk does not
+ * fill the log with 60fps of nothing.
+ */
+@Composable
+fun DiagFrames(surface: String = "app") {
+    LaunchedEffect(Unit) {
+        var last = 0L
+        var windowStart = 0L
+        val deltas = ArrayList<Long>(256)
+        while (true) {
+            val now = withFrameNanos { it }
+            if (last != 0L) {
+                val ms = (now - last) / 1_000_000
+                // A gap this long is the app not drawing at all — suspended, or in
+                // the background — not a frame that took 5 hours.
+                if (ms in 1..1_000) deltas += ms
+            }
+            last = now
+            if (windowStart == 0L) windowStart = now
+            if (now - windowStart >= 2_000_000_000L) {
+                ScrollDiag.frames(surface, deltas)
+                deltas.clear()
+                windowStart = now
             }
         }
     }

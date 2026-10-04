@@ -1,6 +1,7 @@
 package uk.xa0.dsh.model
 
 import android.util.Log
+import androidx.compose.runtime.Immutable
 
 /**
  * One row of the transcript after turn-process folding.
@@ -10,6 +11,13 @@ import android.util.Log
  * member rows and splices a synthetic summary row in immediately after the turn's
  * opening user message. This mirrors that shape.
  */
+/**
+ * A row as the transcript draws it. `@Immutable` for the same reason as
+ * [ChatEntry]: a row composable taking one can then be skipped, which is the
+ * difference between a streaming token costing nothing and costing a recomposition
+ * of everything on screen.
+ */
+@Immutable
 sealed interface DisplayRow {
     val key: String
 

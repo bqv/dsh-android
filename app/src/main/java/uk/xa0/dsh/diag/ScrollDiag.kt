@@ -142,6 +142,33 @@ object ScrollDiag {
         record("drag", "s" to surface, "e" to event, notable = event == "cancel")
     }
 
+    /**
+     * One window of frame times, in milliseconds, while the app was drawing.
+     *
+     * This is what "jank" has to mean if it is to be fixed rather than argued
+     * about. The `jank` record below is a gap between two *position changes*, which
+     * is a weak proxy in both directions: a finger held still produces a long gap
+     * with nothing wrong, and the phone asleep produced gaps of five hours that
+     * were being filed as stalls. Frame time is the thing the reader actually
+     * feels, and 16.7ms is the budget.
+     */
+    fun frames(surface: String, deltas: List<Long>) {
+        if (deltas.isEmpty()) return
+        val sorted = deltas.sorted()
+        fun at(q: Double) = sorted[((sorted.size - 1) * q).toInt()]
+        record(
+            "frames",
+            "s" to surface,
+            "n" to sorted.size,
+            "p50" to at(0.5),
+            "p90" to at(0.9),
+            "max" to sorted.last(),
+            "over16" to sorted.count { it > 16 },
+            "over33" to sorted.count { it > 33 },
+            "over50" to sorted.count { it > 50 },
+        )
+    }
+
     /** True while a finger is down on [surface]. */
     fun pointerDown(surface: String): Boolean = (downCounts[surface]?.get() ?: 0) > 0
 
@@ -344,14 +371,17 @@ object ScrollDiag {
             attributed != null ->
                 if (big) record("move", *common, "tag" to attributed, notable = true)
 
+            // A gap between position changes is only a stall if a scroll was
+            // actually running: otherwise it is a finger held still, or a phone in
+            // a pocket.
             down || scrolling ->
-                if (dt > JANK_MS) record("jank", *common)
+                if (dt > JANK_MS && scrolling) record("jank", *common)
 
             // No finger, no fling, and no mark from anything in the app: the
             // list moved on its own.
             big -> record("shift", *common, notable = true)
 
-            dt > JANK_MS -> record("jank", *common)
+            scrolling && dt > JANK_MS -> record("jank", *common)
         }
     }
 
