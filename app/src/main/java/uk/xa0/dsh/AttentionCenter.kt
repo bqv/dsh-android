@@ -102,6 +102,19 @@ class AttentionCenter(private val context: Context) {
      * re-selects immediately, so a background waterfall becomes visible the
      * moment the user opens its session.
      */
+    /**
+     * Sessions that count as on screen because the session they belong to is: the
+     * subagents a reader's open session dispatched. A parent and its children are one
+     * thing the reader attends to, so opening the parent settles their alerts and
+     * stops them buzzing while it is in front.
+     */
+    @Volatile
+    var visibleWith: Set<String> = emptySet()
+        set(value) {
+            field = value
+            value.forEach { markSessionSeen(it) }
+        }
+
     @Volatile
     var visibleSessionId: String? = null
         set(value) {
@@ -344,6 +357,7 @@ class AttentionCenter(private val context: Context) {
             sessionId = sessionId,
             title = "Approval needed",
             text = "$toolName is waiting for your permission.",
+            blocking = true,
         )
         val outcome = withTimeoutOrNull(APPROVAL_TIMEOUT_MS) { deferred.await() }
             ?: JSONObject().put("kind", "next")
@@ -405,6 +419,7 @@ class AttentionCenter(private val context: Context) {
             title = if (parsed.size == 1) "Your $subject is asking"
             else "Your $subject is asking (${parsed.size} questions)",
             text = parsed.first().question,
+            blocking = true,
         )
         val outcome = withTimeoutOrNull(QUESTION_TIMEOUT_MS) { deferred.await() }
             ?: JSONObject().put("kind", "next")
@@ -464,9 +479,23 @@ class AttentionCenter(private val context: Context) {
      * session it is about — buzzing a phone for a card already on screen is noise,
      * and the in-app card is always there.
      */
-    fun alert(id: Int, sessionId: String?, title: String, text: String) {
-        val onScreen = foreground() && (sessionId == null || sessionId == visibleSessionId)
+    fun alert(id: Int, sessionId: String?, title: String, text: String, blocking: Boolean = false) {
+        val onScreen = foreground() &&
+            (sessionId == null || sessionId == visibleSessionId || sessionId in visibleWith)
         if (onScreen) return
+        // A subagent is worth a buzz only when it is *stuck*.
+        //
+        // An approval or a question stalls a child outright, and the parent's screen
+        // cannot show it: the header counts the subagents that are running, and a
+        // child waiting for a human is running as far as that count is concerned. That
+        // is precisely the failure this whole layer exists for — a stalled agent looks
+        // exactly like a working one from the outside.
+        //
+        // A child's error or a bell in its shell is not that. The parent's turn
+        // carries on, the transcript will show what happened, and a notification for
+        // each one turns one dispatch into a stream of buzzes for work the reader
+        // never asked to supervise directly.
+        if (sessionId != null && !blocking && isSubagent(sessionId)) return
         Attention.notify(context, id, title, text, sessionId)
     }
 

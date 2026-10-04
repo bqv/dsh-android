@@ -35,6 +35,7 @@ import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.MessageAttachment
 import uk.xa0.dsh.model.PendingSessionTarget
 import uk.xa0.dsh.model.SessionIntentPlan
+import uk.xa0.dsh.model.subagentTreeIds
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
 import uk.xa0.dsh.model.SessionSearch
@@ -3152,6 +3153,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // jobs the session being left had, and its marker, stay keyed to it.
         publishJobsForCurrent()
         app.attention.visibleSessionId = null
+        app.attention.visibleWith = emptySet()
     }
 
     /**
@@ -4261,6 +4263,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         publishJobsForCurrent()
         _todos.value = emptyList()
         app.attention.visibleSessionId = sessionId
+        // A parent and the subagents it dispatched are one thing the reader attends
+        // to: opening the parent is how you look at their work, so it settles their
+        // alerts and stops them buzzing while it is in front.
+        app.attention.visibleWith = subagentTreeIds(_ui.value.sessions, sessionId)
         // The follow snapshot carries this session's projections; drop the
         // previous session's folded values so a delta cannot merge across them.
         liveProjections = null

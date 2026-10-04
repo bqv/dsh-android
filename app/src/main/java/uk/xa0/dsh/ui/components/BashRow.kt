@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -349,21 +350,29 @@ private fun TerminalOutput(model: BashTerminalModel) {
         val body = if (output.endsWith("\n")) output.dropLast(1) else output
         body.split('\n')
     }
-    // The output wraps. The web can stack a horizontal overflow on `.output` and a
-    // vertical one on its container; a Compose node cannot resolve both axes' drags,
-    // so panning here meant a nested scroller whose gesture had to be told apart from
-    // the transcript's — and the widest lines in a bash output are exactly the ones a
-    // reader wants to read rather than steer. The vertical cap stays, because output
-    // is unbounded in the other direction and the banner is pinned above it.
-    Column(
+    // The output wraps, and only the lines on screen are composed.
+    //
+    // The web can stack a horizontal overflow on `.output` and a vertical one on its
+    // container; a Compose node cannot resolve both axes' drags, so panning here meant
+    // a nested scroller whose gesture had to be told apart from the transcript's — and
+    // the widest lines in a bash output are exactly the ones a reader wants to read
+    // rather than steer.
+    //
+    // Lazy rather than a `Column` inside a `verticalScroll`, because that composed
+    // *every* line of the output and then clipped to 224dp. A command with a thousand
+    // lines of output was a thousand `Text`s on every composition of the row — cheap
+    // when each was `softWrap=false` and laid out as one unbroken line, and not cheap
+    // at all now that each one is line-broken and wrapped. A running command
+    // republishes its output as it arrives, so that cost was paid repeatedly, on
+    // frames nobody was touching.
+    LazyColumn(
         Modifier
             .heightIn(max = 224.dp)
-            .verticalScroll(rememberScrollState())
             .padding(start = 30.dp, end = 14.dp, top = DshSpacing.lg, bottom = DshSpacing.lg),
     ) {
-        lines.forEach { line ->
+        items(lines.size, key = { it }) { index ->
             Text(
-                text = line.ifEmpty { " " },
+                text = lines[index].ifEmpty { " " },
                 style = DshType.codeSmall,
                 color = colors.labelPrimary,
             )

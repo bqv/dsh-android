@@ -1,21 +1,19 @@
-Wrap bash commands and output instead of panning them sideways
+Settle a subagent's alerts when its parent is opened, and only buzz for a stuck one
 
-Both halves of a bash row scrolled horizontally: the command lines, so that an
-ellipsized script line was still reachable, and the output, whose softWrap=false is
-what gave it a widest line to pan.
+Two changes to what raises a notification, both about the same thing: a parent and the
+subagents it dispatched are one piece of work the reader attends to, not several.
 
-Wrapping answers the command case better than panning does. The reason for the
-scroller was sound — `TerminalBlock` ellipsizes, the web recovers the tail because the
-text is selectable, and Compose `Text` is not selectable unless wrapped in a
-SelectionContainer, so an ellipsized script line here was unreachable outright — but
-"reachable if you think to drag it" is not as good as "there". The prompt rows are
-top-aligned now, since a wrapped command makes the row two or three lines tall and a
-centred `$` would float beside the middle of it.
+Opening a session now settles its subagents' alerts as well as its own, and suppresses
+theirs while it is in front. The read used to be a single id, so looking at a parent
+left every child's alert in the shade for work that was already on screen.
 
-The output case is simpler: the widest lines in a bash output are the ones worth
-reading, and a horizontal scroller nested inside a vertically scrolling transcript
-costs a gesture that has to be told apart from the list's. The 224dp vertical cap and
-its scroller stay — output is unbounded in that direction and the banner is pinned
-above it.
+And a subagent is worth a buzz only when it is *stuck*. An approval or a question stalls
+a child outright and the parent's screen cannot show it — the header counts subagents
+that are running, and a child waiting for a human is running as far as that count is
+concerned — which is precisely the failure this layer exists for. A child's error or a
+bell in its shell is not that: the parent's turn carries on, the transcript shows what
+happened, and a notification per child turns one dispatch into a stream of buzzes for
+work nobody asked to supervise directly. So `alert` takes `blocking`, and only the two
+waterfalls pass it.
 
-337 green.
+`subagentTreeIds` is breadth-first and cycle-safe, with five tests. 342 green.
