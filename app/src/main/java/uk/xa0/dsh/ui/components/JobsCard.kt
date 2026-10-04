@@ -22,6 +22,10 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -176,9 +180,18 @@ fun JobsSheet(
     }
 }
 
+/** How much of a job's detail is shown before "Show more". */
+private const val JOB_DETAIL_LINES = 4
+
 @Composable
 private fun JobRow(job: JobItem) {
     val colors = DshTheme.colors
+    // The detail is the one unbounded thing here, so it is capped and offered rather
+    // than clipped. `overflows` is only ever written while collapsed: once expanded
+    // there is nothing to overflow, and overwriting it there would take the "Show
+    // less" away and leave the row stuck open.
+    var expanded by rememberSaveable(job.id) { mutableStateOf(false) }
+    var overflows by remember(job.id) { mutableStateOf(false) }
     Row(
         Modifier
             .fillMaxWidth()
@@ -216,17 +229,26 @@ private fun JobRow(job: JobItem) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            job.detail?.let {
+            job.detail?.let { detail ->
                 Text(
-                    // Twice what it was, and still capped: the detail is prose rather
-                    // than the command, and an unbounded one would bury the row below
-                    // it.
-                    text = it,
+                    text = detail,
                     style = DshType.micro,
                     color = colors.labelCaption,
-                    maxLines = 4,
+                    maxLines = if (expanded) Int.MAX_VALUE else JOB_DETAIL_LINES,
                     overflow = TextOverflow.Ellipsis,
+                    onTextLayout = { layout -> if (!expanded) overflows = layout.hasVisualOverflow },
                 )
+                if (overflows || expanded) {
+                    Text(
+                        text = if (expanded) "Show less" else "Show more",
+                        style = DshType.micro,
+                        color = colors.link,
+                        modifier = Modifier
+                            .padding(top = 2.dp)
+                            .clip(RoundedCornerShape(DshRadius.sm))
+                            .clickableNoRipple { expanded = !expanded },
+                    )
+                }
             }
         }
     }
