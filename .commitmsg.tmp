@@ -1,27 +1,20 @@
-Prove the expansion rule on the device, and mark the drawer's own restore
+Prove the expansion rule with the real row, and test the fold rule
 
-The six things this goal is about now have one answer each, so this round is the two
-gaps in the evidence rather than more fixes.
+Point two of this goal was proven with plain boxes — a row that grows keeps its top
+edge in a top-anchored list, and rose by exactly the height it gained in the reversed
+one that was replaced. What that could not show is the app's own disclosure rows
+behaving that way. `RealRowExpansionTest` renders the actual `ReasoningRow` — the
+"Think" section a reader taps — inside a real list, clicks it by its own label, and
+asserts the row grew while its top edge moved by less than a pixel. That is the case
+in question, which the device has never caught: the only growth it has recorded is the
+live row's, which is not a row anybody opened.
 
-A row that changes height now records it, with its key and the growth in pixels. The
-expansion rule — opening a row keeps its top edge and grows downward — is a property of
-a top-anchored list and `ScrollBehaviourTest` measures it (a 48px row grown to 200px
-moves its top edge by nothing, where the reversed list it replaced rose by exactly the
-192px it gained). What a harness cannot show is that the app is using that layout, so
-the row itself says when it grows, and the reader pairs that with the absence of any
-position record at the same instant.
+And the fold rule is now a pure function with tests rather than a condition inside a
+composable. `nextFoldedTurns` is two rules: a turn whose rows are on screen is not
+folded, whatever the reader is doing, and a reader who is not following keeps whatever
+shape the transcript already had. The first is the request in its own words — the rows
+being read must not close when their turn ends — and it is why "the reader is at the
+tail" is not on its own a reason to fold: at the tail, the turn that has just ended is
+exactly the one under the reader's eye as the closing message lands.
 
-And the drawer's open-restore is marked. It was the last unattributed movement in the
-log: opening the drawer scrolls to the remembered row, which is asked for but looked
-exactly like the app moving a list on its own.
-
-The sweep this round, over 24,053 frames with the reader scrolling:
-  * 5.4% of frames over the 11ms budget, against 11.7% before, and 1.4% over 33ms;
-  * four unattributed movements, all benign — the drawer's roster growing as it first
-    lays out (kept=100, so no visible row changed) and two rows arriving;
-  * everything else named: 16 tail-rearm, 6 tail-rows, 3 tail-growth, 2 session-switch;
-  * 3 dead drags out of 36 heading for history, the rest tracking or flinging, and the
-    fifteen 'dead' drags pointing the other way are drags at the newest row, which
-    correctly do nothing.
-
-332 green.
+337 green.

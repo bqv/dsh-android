@@ -187,6 +187,27 @@ fun buildDisplayRows(
 }
 
 /**
+ * Which closed turns may be folded away, given what the reader can see.
+ *
+ * Two rules, and the second is the one that was asked for in as many words: a turn
+ * whose rows are on screen is not folded, because folding replaces the rows it stands
+ * in for and the reader is looking at them. While a turn is being followed, the turn
+ * that has just ended is exactly the one under the reader's eye when its closing
+ * message lands, so "the reader is at the tail" is not on its own a reason to fold.
+ *
+ * A reader who is not following holds whatever shape the transcript already had —
+ * they are in history, and rewriting rows there is what took one measured reader from
+ * the middle of a turn to the beginning of the session, with 79% of the rows in view
+ * replaced.
+ */
+fun nextFoldedTurns(
+    current: Set<Int>,
+    ended: Set<Int>,
+    onScreen: Set<Int>,
+    following: Boolean,
+): Set<Int> = if (!following) current else ended - onScreen
+
+/**
  * The turn this row belongs to, when it belongs to one.
  *
  * Used to answer "is the reader looking at this turn's rows", which is the question

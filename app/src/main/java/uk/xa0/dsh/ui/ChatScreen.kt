@@ -125,6 +125,7 @@ import uk.xa0.dsh.model.buildToolCallTree
 import uk.xa0.dsh.model.buildTrajectory
 import uk.xa0.dsh.model.subagentComposerState
 import uk.xa0.dsh.model.subagentTargetOf
+import uk.xa0.dsh.model.nextFoldedTurns
 import uk.xa0.dsh.model.turnOrNull
 import uk.xa0.dsh.ui.agentPresetLabel
 import uk.xa0.dsh.ui.components.ApprovalCard
@@ -310,8 +311,7 @@ fun ChatScreen(vm: DshViewModel) {
     // once they have scrolled past it.
     var visibleTurns by remember { mutableStateOf(emptySet<Int>()) }
     LaunchedEffect(following.value, endedTurns, visibleTurns) {
-        if (!following.value) return@LaunchedEffect
-        val wanted = endedTurns - visibleTurns
+        val wanted = nextFoldedTurns(foldedTurns, endedTurns, visibleTurns, following.value)
         if (wanted != foldedTurns) foldedTurns = wanted
     }
 
