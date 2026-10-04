@@ -74,6 +74,7 @@ import uk.xa0.dsh.model.parseSessionStats
 import uk.xa0.dsh.model.parseHostSettings
 import uk.xa0.dsh.model.permissionCommandMode
 import uk.xa0.dsh.model.parseSubagentCatalog
+import uk.xa0.dsh.model.parseSubagentCatalogProjection
 import uk.xa0.dsh.model.str
 import uk.xa0.dsh.model.subagentInterruptArgs
 import uk.xa0.dsh.model.subagentPromptRequest
@@ -831,9 +832,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private val subagentCatalogs = java.util.concurrent.ConcurrentHashMap<String, SubagentCatalog>()
     private val subagentCatalogLock = Any()
     /** Parents with a read in flight, so single-flight survives the dispatch gap. */
-    private val subagentCatalogPending = HashSet<String>()
     /** Parents a fetch was asked for while it was already in flight (`:418`). */
-    private val subagentCatalogStale = HashSet<String>()
     /** Keys of the debounced pulls, so closing a disclosure can drop one. */
     private val subagentCatalogDebounce = HashMap<String, Job>()
     /**
@@ -2685,11 +2684,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // host *pushing* membership — the app's one push-shaped
                 // roster change, and the closest thing here to the `session/added`
                 // that re-reads a catalog in the web (`manager.ts:718-725`).
-                if (value.str("key") == "subagentCatalog") refreshSubagentCatalogSoon(sessionId)
                 val merged = liveProjections ?: JSONObject()
                 merged.put(value.str("key"), value.opt("value"))
                 liveProjections = merged
                 applySessionProjections(merged)
+                // After the merge, not before: the rebuild reads `liveProjections`,
+                // and running it first would read the value this frame replaces.
+                if (value.str("key") == "subagentCatalog") refreshSubagentCatalogSoon(sessionId)
             }
         }
     }
@@ -3829,9 +3830,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // A frame that beats a catalog read's settle is newer than the sample that
         // read carries; recording it here is what stops the response from
         // reverting it (`manager.ts:367-372`).
-        synchronized(subagentCatalogLock) {
-            if (subagentCatalogPending.isNotEmpty()) subagentCatalogActivity[sessionId] = running
-        }
+        // Recorded for every frame now: this used to be gated on a `subagents/list`
+        // read being in flight, because only a response could be reverted by a stale
+        // sample. The catalog is rebuilt from a pushed projection, so there is no
+        // response to race and every frame is worth keeping until a rebuild consumes
+        // it in `withInFlightActivity`.
+        synchronized(subagentCatalogLock) { subagentCatalogActivity[sessionId] = running }
         val sessions = _ui.value.sessions
         val index = sessions.indexOfFirst { it.id == sessionId }
         if (index < 0) return
@@ -3998,40 +4002,32 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * (it is not the reader's problem, and unknown keeps the composer), except for
      * a dead cookie, which the banner has to say.
      */
+    /**
+     * Rebuilds one parent's child catalog from the `subagentCatalog` projection.
+     *
+     * This used to call `subagents/list`, which 0.2.0 does not serve — every session
+     * open paid for a round trip that came back `http/404`, so the catalog was empty
+     * and the lineage sheet had nothing to name its rows with. The host pushes the
+     * same facts as a projection on the parent now, and the app already receives it.
+     *
+     * Only the open session's projections are kept (`liveProjections`), so a catalog
+     * for any other parent is not known here. That is not a loss: the roster still
+     * names those children, and a catalog is only ever read through the tree of the
+     * session on screen.
+     */
     private fun refreshSubagentCatalog(parentSessionId: String) {
         if (parentSessionId.isEmpty()) return
-        synchronized(subagentCatalogLock) {
-            if (!subagentCatalogPending.add(parentSessionId)) {
-                subagentCatalogStale.add(parentSessionId)
-                return
-            }
-        }
-        viewModelScope.launch {
-            val answer = runCatching {
-                client.rpc("subagents/list", JSONObject().put("parentSessionId", parentSessionId))
-            }
-            answer.onSuccess { value ->
-                val catalog = withInFlightActivity(parseSubagentCatalog(value))
-                subagentCatalogs[parentSessionId] = catalog
-                _ui.value = _ui.value.copy(subagentCatalogs = HashMap(subagentCatalogs))
-                applyCatalogActivity(catalog)
-                applyCatalogLabels(parentSessionId, catalog)
-                publishParentAvailable(parentSessionId, catalog)
-            }.onFailure { error ->
-                Log.w(TAG, "subagents/list $parentSessionId failed: ${describe(error)}")
-                if (error is DshAuthException) onAuthFailure("subagents/list", error)
-            }
-            val rearm = synchronized(subagentCatalogLock) {
-                subagentCatalogPending.remove(parentSessionId)
-                val asked = subagentCatalogStale.remove(parentSessionId)
-                // With no read left in flight nothing can fold these, and keeping
-                // them would let a frame about one parent's child decide a later
-                // read of a different parent's catalog.
-                if (subagentCatalogPending.isEmpty()) subagentCatalogActivity.clear()
-                asked
-            }
-            if (rearm) refreshSubagentCatalog(parentSessionId)
-        }
+        if (parentSessionId != _ui.value.currentSessionId) return
+        val catalog = withInFlightActivity(
+            parseSubagentCatalogProjection(liveProjections?.optJSONArray("subagentCatalog")) { id ->
+                _ui.value.sessions.any { it.parentSessionId == id }
+            },
+        )
+        subagentCatalogs[parentSessionId] = catalog
+        _ui.value = _ui.value.copy(subagentCatalogs = HashMap(subagentCatalogs))
+        applyCatalogActivity(catalog)
+        applyCatalogLabels(parentSessionId, catalog)
+        publishParentAvailable(parentSessionId, catalog)
     }
 
     /**

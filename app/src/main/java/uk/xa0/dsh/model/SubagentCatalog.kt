@@ -84,6 +84,42 @@ data class SubagentCatalog(
 }
 
 /**
+ * Parses the `subagentCatalog` session projection.
+ *
+ * 0.2.0 publishes a parent's children as a projection on the parent's own session
+ * rather than answering `subagents/list`, which is not a host method any more and
+ * answered `http/404` on every session open. A row carries an id, a creation time, a
+ * mode and an optional label.
+ *
+ * Activity is deliberately not read from it — the live status frames carry that, and
+ * [withInFlightActivity] folds them in — and neither is `hasChildren`, which comes off
+ * the roster because that is where the lineage actually is.
+ *
+ * `parentAvailable` has no equivalent here and stays null, which the read-only gate
+ * treats as *available*: unknown must not be able to claim the parent is offline.
+ */
+fun parseSubagentCatalogProjection(
+    rows: JSONArray?,
+    hasChildren: (String) -> Boolean = { false },
+): SubagentCatalog {
+    if (rows == null) return SubagentCatalog(emptyList(), null)
+    val entries = ArrayList<SubagentCatalogEntry>(rows.length())
+    for (i in 0 until rows.length()) {
+        val row = rows.optJSONObject(i) ?: continue
+        val id = row.str("id")
+        if (id.isEmpty()) continue
+        entries += SubagentCatalogEntry.Child(
+            id = id,
+            mode = row.str("mode"),
+            label = row.str("label").takeIf { it.isNotBlank() },
+            activity = "",
+            hasChildren = hasChildren(id),
+        )
+    }
+    return SubagentCatalog(entries, null)
+}
+
+/**
  * Parses one `subagents/list` value.
  *
  * A row without an id is dropped rather than addressed by an empty string, and

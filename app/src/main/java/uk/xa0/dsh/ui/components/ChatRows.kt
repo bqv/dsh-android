@@ -15,7 +15,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -958,14 +957,18 @@ internal fun ToolIoCard(sections: List<Pair<String, String>>, isError: Boolean) 
                     color = colors.labelCaption,
                     modifier = Modifier.width(30.dp),
                 )
-                Row(Modifier.horizontalScroll(rememberScrollState())) {
-                    Text(
-                        text = body.ifEmpty { "—" },
-                        style = DshType.codeSmall,
-                        color = if (isError && label == "OUT") colors.error else colors.labelSecondary,
-                        softWrap = false,
-                    )
-                }
+                // Wrapped, not panned. The terminal card did this first and for the
+                // same reason — the widest lines in a tool's own input or output are
+                // the ones worth reading rather than steering — but a *background*
+                // bash call never reaches that card: `bashTerminalModel` declines it
+                // (it has no exit status to draw), so it lands here, and here the
+                // body still scrolled sideways.
+                Text(
+                    text = body.ifEmpty { "—" },
+                    style = DshType.codeSmall,
+                    color = if (isError && label == "OUT") colors.error else colors.labelSecondary,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }
