@@ -98,7 +98,14 @@ editing the live copy. There is no install step to forget.
 
 ## Traps
 
-0. **Probe the running host, never its shipped descriptors.** The wire parameter names
+0. **Never launch with `monkey`.** `adb shell monkey -p <pkg> -c android.intent.category.LAUNCHER 1`
+   does not only start the app: it injects a random input event, and a random
+   swipe-and-tap opens the notification shade and lands on the rotation tile. Measured
+   on the user's phone — `am start` left `accelerometer_rotation` at 0, `monkey` flipped
+   it to 1 every time — and it was blamed on this app for an evening, including a fruitless
+   hunt through permissions. Launch with `adb shell am start -n <pkg>/<activity>`, and
+   check the lock is where the user left it when you are done.
+1. **Probe the running host, never its shipped descriptors.** The wire parameter names
    the gateway validates against are *not* always the ones in the `typert.host.js` files
    installed beside it: reading those said `terminal/environment` takes `agent`, the app
    was changed to send `agent`, and the host answered `missing "agentId"; unexpected
