@@ -252,7 +252,8 @@ object ScrollDiag {
             w.items = items
             w.keys = keys
             w.at = now
-            record("surf", "s" to surface, "on" to true, "items" to items, "vp" to viewportPx)
+            // `i` is where the list opened: a session must come up at its newest row.
+            record("surf", "s" to surface, "on" to true, "items" to items, "vp" to viewportPx, "i" to index)
             return
         }
 
@@ -301,7 +302,7 @@ object ScrollDiag {
             w.items = 0
             w.keys = emptyList()
             w.at = now
-            record("surf", "s" to surface, "on" to true, "items" to 0, "vp" to 0)
+            record("surf", "s" to surface, "on" to true, "items" to 0, "vp" to 0, "i" to value)
             return
         }
         val d = value - w.offset

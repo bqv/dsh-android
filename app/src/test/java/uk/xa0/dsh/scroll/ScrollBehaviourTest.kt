@@ -81,6 +81,9 @@ class ScrollBehaviourTest {
     }
 
     /** The row's top edge in the root, ignoring clipping — it may leave the viewport. */
+    private fun bottomOf(index: Int) =
+        rule.onNodeWithTag("row-$index").getUnclippedBoundsInRoot().bottom.value
+
     private fun topOf(index: Int) =
         rule.onNodeWithTag("row-$index").getUnclippedBoundsInRoot().top.value
 
@@ -155,6 +158,33 @@ class ScrollBehaviourTest {
             96f,
             before - topOf(target),
             24f,
+        )
+    }
+
+    @Test
+    fun `a list can be told to open at its last row`() {
+        // Opening a session must not show the oldest row first and then jump. The
+        // index is not known when the state is created — it depends on how much
+        // history the host sends — so the state is asked to start past the end and
+        // left to clamp.
+        lateinit var state: LazyListState
+        rule.setContent {
+            state = rememberLazyListState(initialFirstVisibleItemIndex = Int.MAX_VALUE)
+            List(state, reverse = false, grown = false)
+        }
+        rule.waitForIdle()
+
+        // The property is that the newest row is at the bottom of the viewport, not
+        // that it is the first *visible* one — six others are on screen above it.
+        assertEquals(
+            "the last row should sit at the bottom of the viewport",
+            300f,
+            bottomOf(rows - 1),
+            1f,
+        )
+        assertTrue(
+            "and the list should be near its end, saw index ${state.firstVisibleItemIndex}",
+            state.firstVisibleItemIndex > rows - 10,
         )
     }
 }

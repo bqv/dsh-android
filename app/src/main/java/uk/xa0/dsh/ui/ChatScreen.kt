@@ -151,6 +151,7 @@ import uk.xa0.dsh.ui.components.TurnProcessRow
 import uk.xa0.dsh.ui.components.TurnStatusRow
 import uk.xa0.dsh.ui.components.UserMessageRow
 import uk.xa0.dsh.ui.components.WorkspaceBrowser
+import uk.xa0.dsh.ui.scroll.TailFollow
 import uk.xa0.dsh.ui.components.composerCommandEntries
 import uk.xa0.dsh.ui.composer.ComposerTriggers
 import uk.xa0.dsh.ui.composer.composerTriggers
@@ -230,115 +231,44 @@ fun ChatScreen(vm: DshViewModel) {
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
-    // With reverseLayout the newest turn is index 0 at the visual bottom, so
-    // "at the bottom" is exactly offset 0 of item 0. `canScrollBackward` is not
-    // usable here: content padding keeps a little scrollable slack, so it reads
-    // true even when the newest message is on screen — which made the button
-    // appear while already at the end.
-    val atBottom by remember {
-        derivedStateOf {
-            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        }
-    }
+    // Asked to start past the end and left to clamp: a session must come up at its
+    // newest row, and how many rows that is only the host knows. Without this the
+    // first frame drew the *oldest* row and the follow moved it half a second later
+    // — measured on the phone as `surf items=179 i=0` followed by a jump to 170.
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = Int.MAX_VALUE)
 
-    // LazyColumn anchors its scroll position by item key, so with reverseLayout a
-    // newly inserted turn lands *below* the viewport rather than following it:
-    // streaming content never auto-scrolls on its own. So follow explicitly while
-    // the user is parked at the end — and only then, so reading history is stable.
-    //
-    // The two halves are deliberately separate effects, and they only ever move the
-    // flag in one direction each:
-    //
-    //  * re-arm on reaching the end, and never clear here — so a momentarily stale
-    //    reading can only ever cause following while already at the end, which is
-    //    what we want anyway;
-    //  * release on a deliberate drag, which is a discrete event that cannot be
-    //    sampled past.
-    //
-    // The previous version inferred the release by sampling `isScrollInProgress`
-    // next to the scroll position. That pair is observable as (scrolling = false,
-    // atEnd = false) — most easily just as a flick ends — and in that case neither
-    // branch ran, so the flag stayed set and the next streamed token dragged the
-    // reader back to the bottom. That is the "it keeps autoscrolling when I have
-    // scrolled up" report.
-    var stickToBottom by remember { mutableStateOf(true) }
-
-    // Whether a finger is on the transcript. See [rememberTouchGate]: the two
-    // effects below move the list on their own, and the flag they used to trust —
-    // `isScrollInProgress` — is off for the whole of the gap between a finger
-    // landing and its first movement past slop.
-    //
-    // That gap is not a technicality. Measured on the phone: 23 of the per-token
-    // follows and 6 of the oversize scrolls below fired with a finger already
-    // down, so a token arriving just after you put your thumb on the list moved
-    // it before you did.
+    // Whether a finger is on the transcript. See [rememberTouchGate]: everything
+    // that moves the list on its own has to ask, because `isScrollInProgress` is off
+    // for the whole of the gap between a finger landing and its first movement past
+    // slop. Measured on the phone before that gate existed: 23 of the per-token
+    // follows fired inside that gap, moving the list before the reader did.
     val touch = rememberTouchGate()
 
-    // Freeze the streaming row while the reader is away from the end.
+    // The conversation is an ordinary, top-anchored list followed at its tail. See
+    // `ui/scroll/TailFollow.kt` for the measurements: the reversed list this
+    // replaces anchored on the row at the *bottom* of the viewport, so a row that
+    // grew grew upwards by exactly the height it gained — taking its own header off
+    // the screen — and every content change moved whatever sat above the anchor.
     //
-    // Releasing the follow above stops the list being *scrolled*, but not the row
-    // being *laid out again*: a thinking segment or a long answer grows every few
-    // milliseconds, and a growing item re-lays-out the list under the reader —
-    // "scrolling up into a text block while it's being written to leads to
-    // involuntary scrolling". Pinning the content at the moment of the drag means
-    // nothing below can reflow while the reader is in history; it unfreezes, and
-    // catches up in one step, when they come back to the end.
+    // `followFrom` is a counter rather than a flag because two separate moments mean
+    // "follow this again", and both of them count even when the reader has scrolled
+    // away: opening a session, and sending a message.
+    var followFrom by remember { mutableStateOf(0) }
+    val following = TailFollow(state = listState, rearmKey = followFrom) { touch.isDown }
+
+    // Freeze the streaming row while the reader is away from the tail.
+    //
+    // Not following stops the list being *scrolled*, but not the row being laid out
+    // again: a thinking segment grows every few milliseconds, and a growing item
+    // re-lays-out the list under the reader — "scrolling up into a text block while
+    // it's being written to leads to involuntary scrolling". Pinning the content at
+    // the moment the follow is released means nothing below can reflow while the
+    // reader is in history; it catches up in one step when they return.
     var frozenLive by remember { mutableStateOf<LiveAttempt?>(null) }
     val currentLive by rememberUpdatedState(live)
-
-    // ...and hold the *shape* of the ended-turn fold for the same reason.
-    //
-    // Folding is what a just-finished turn does to rows that a moment earlier were
-    // the running turn's rows, and when the reader is inside them it rewrites the
-    // whole viewport under them. Measured on a parked reader: at the instant of a
-    // fold 79% of the transcript rows in view were replaced, taking the reader
-    // from the middle of the turn to the beginning of the session.
-    //
-    // Re-pinning the reader's item cannot save that one: every row they can see is
-    // a fold member, so there is no surviving key to pin and Compose falls back to
-    // the raw index. The fix at this level is not to rewrite rows the reader is
-    // reading. The web client folds immediately because its reader is parked at the
-    // end; holding the set while they are away, and applying it in one step when
-    // they return, is the same rule as the live row above.
-    var foldedTurns by remember { mutableStateOf(endedTurns) }
-    LaunchedEffect(stickToBottom, endedTurns) {
-        if (stickToBottom) foldedTurns = endedTurns
-    }
-
-    // A session switch is not a scroll. `listState` and the freeze are remembered
-    // across sessions on purpose (the list must not be rebuilt per session), so
-    // without this an opened session inherits the *previous* one's position and
-    // freeze: the reader lands mid-history in a session they just opened, and the
-    // old session's live row stays pinned over the new one's. Opening a session
-    // means following it.
-    LaunchedEffect(ui.currentSessionId) {
-        frozenLive = null
-        stickToBottom = true
-        if (listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0) {
-            ScrollDiag.prog("chat", "session-switch")
-            listState.scrollToItem(0)
-        }
-    }
-
-    // Following is a *position*, not a gesture.
-    //
-    // This used to unfreeze only on `atEnd == true`, and to arm the freeze only on
-    // `DragInteraction.Start` — so every other way of leaving the bottom was
-    // unhandled: tapping the turn rail (a jump is a programmatic `scrollToItem`,
-    // which emits no DragInteraction), tapping a row to expand or collapse it, and
-    // scrolling part-way into a live row taller than the screen. `atEnd == false`
-    // did nothing at all, which left the app in follow mode with an unfrozen live
-    // row: the autoscroll below then re-pinned the list to the bottom on the very
-    // next token, and a long thinking segment kept being filled in underneath the
-    // reader. That is the reported shape — a think row being actively written to
-    // and not technically at the bottom.
-    LaunchedEffect(listState) {
-        snapshotFlow {
-            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
-        }.distinctUntilChanged().collect { atEnd ->
-            stickToBottom = atEnd
-            if (atEnd) {
+    LaunchedEffect(Unit) {
+        snapshotFlow { following.value }.distinctUntilChanged().collect { follow ->
+            if (follow) {
                 frozenLive = null
             } else if (frozenLive == null) {
                 // Snapshot on the way out only: re-entering history must not
@@ -348,41 +278,44 @@ fun ChatScreen(vm: DshViewModel) {
             }
         }
     }
-    // There is deliberately no "the turn is over, drop the freeze" rule, and
-    // putting one back is the bug this replaces.
+
+    // ...and hold the *shape* of the ended-turn fold for the same reason.
     //
-    // That rule cleared the snapshot on the app's *belief* that the turn had
-    // ended, and the belief flaps: `ownTurnInFlight` is `running && !ownTurnClosed`,
-    // `running` is denied by the roster pull, and a live attempt is legitimately
-    // absent between two steps of the same turn. Measured mid-turn: two "turn
-    // over" instants (00:27:15, 00:27:19) while that same turn ran on to step 6.
-    // Each one dropped the freeze under a reader who was in history, and the next
-    // attempt's reasoning replaced the text they were reading. The freeze now ends
-    // only when a *position* says the reader is done with it — reaching the end,
-    // above. `ownTurnInFlight` itself is untouched, so the seats that read it (the
-    // elapsed clock and the bottom "Deep diving…" status row) are unchanged.
-    LaunchedEffect(listState) {
-        listState.interactionSource.interactions.collect { interaction ->
-            // The position rule above covers this, but only once the drag has
-            // actually moved the list: freezing at touch-down means a token that
-            // lands between the finger going down and the first movement cannot
-            // reflow the row the reader is reaching for.
-            if (interaction is DragInteraction.Start) {
-                frozenLive = currentLive
-                stickToBottom = false
-            }
-        }
+    // Folding is what a just-finished turn does to rows that a moment earlier were
+    // the running turn's rows, and when the reader is inside them it rewrites the
+    // whole viewport: measured on a parked reader, a fold replaced 79% of the rows
+    // in view and took them from the middle of the turn to the beginning of the
+    // session. Re-pinning cannot save that one — every row they can see is a fold
+    // member, so there is no surviving key to pin and Compose falls back to the raw
+    // index. The fix at this level is not to rewrite rows the reader is reading: the
+    // set is held while they are away, and applied in one step when they return.
+    var foldedTurns by remember { mutableStateOf(endedTurns) }
+    LaunchedEffect(following.value, endedTurns) {
+        if (following.value) foldedTurns = endedTurns
     }
+
+    // A session switch is not a scroll. `listState` is remembered across sessions on
+    // purpose — the list must not be rebuilt per session — so without this an opened
+    // session inherits the previous one's position and freeze. Opening a session
+    // means following it.
+    LaunchedEffect(ui.currentSessionId) {
+        frozenLive = null
+        followFrom++
+    }
+
     // Reaching the oldest loaded row asks the host for the page before it.
     // `session/follow` opens a bounded window, so without this the transcript just
     // stops when you scroll up. Requiring the list to be longer than the viewport
     // keeps a short session from paging on open, and the call is itself a no-op once
     // the host reports nothing older.
+    //
+    // The oldest row is at the *top* of a top-anchored list, so this watches the
+    // first visible item rather than the last.
     LaunchedEffect(listState) {
         snapshotFlow {
             val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            info.totalItemsCount > info.visibleItemsInfo.size && last >= info.totalItemsCount - 1
+            val first = info.visibleItemsInfo.firstOrNull()?.index ?: -1
+            info.totalItemsCount > info.visibleItemsInfo.size && first == 0
         }.distinctUntilChanged().collect { atOldest ->
             if (atOldest) vm.loadOlderHistory()
         }
@@ -943,7 +876,7 @@ fun ChatScreen(vm: DshViewModel) {
                         onSend = {
                             val text = draft.text
                             draft = TextFieldValue("")
-                            stickToBottom = true
+                            followFrom++
                             vm.send(text)
                         },
                         onStop = vm::stop,
@@ -962,8 +895,8 @@ fun ChatScreen(vm: DshViewModel) {
                     }
                 }
             } else {
-                // Ascending seq order from the reducer; reversed for reverseLayout
-                // so the newest turn sits at the visual bottom.
+                // Ascending seq order from the reducer, oldest first, so the newest
+                // turn is the last item and therefore the visual bottom.
                 // `frozenLive` while the reader is in history, so the streaming row
                 // cannot grow and reflow the list under them.
                 val shownLive = frozenLive ?: live
@@ -974,7 +907,7 @@ fun ChatScreen(vm: DshViewModel) {
                         expandedTurns = expandedTurns,
                         live = shownLive,
                         fold = foldTurns,
-                    ).asReversed()
+                    )
                 }
 
                 // The tool-call forest, keyed by call id so a row can find its own
@@ -989,9 +922,12 @@ fun ChatScreen(vm: DshViewModel) {
                 }
 
                 // Jump targets: the row index of every real (non-plugin) user
-                // message, oldest first so the rail reads top-to-bottom in time.
-                // Each carries its prompt and the assistant prose that answered
-                // it, which is what the rail's preview shows while you scrub.
+                // message, oldest first so the rail reads top-to-bottom in time —
+                // which in a top-anchored list is also the order of the rows
+                // themselves, so no reversal is needed to match the transcript.
+                // Each carries its prompt and the assistant prose that answered it,
+                // which is what the rail's preview shows while you scrub. The rail
+                // shows the most recent `MAX_RAIL_TICKS` of them.
                 val jumpTargets = remember(rows) {
                     rows.withIndex()
                         .mapNotNull { (index, row) ->
@@ -1006,45 +942,12 @@ fun ChatScreen(vm: DshViewModel) {
                                 null
                             }
                         }
-                        .reversed()
                 }
                 val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
                 // The turn you are reading is the newest target at or above the
                 // first visible row.
                 val activeTarget = remember(jumpTargets, firstVisible) {
                     jumpTargets.filter { it.index <= firstVisible }.maxByOrNull { it.index }?.index
-                }
-
-                // Token deltas change the live row's height without changing the
-                // item count, so height growth has to trigger the follow too.
-                val liveLength = (live?.text?.length ?: 0) + (live?.reasoning?.length ?: 0)
-
-                // The one place the transcript moves itself.
-                //
-                // A message taller than the screen used to be "not chased" by
-                // scrolling *backwards* by the difference between the row's height
-                // and the viewport's — a single instant `scrollBy`, thousands of
-                // pixels, at the moment the row outgrew the screen. Measuring it on
-                // the phone: 2,801px in one step, and it could fire mid-fling or
-                // under a thumb. It is gone. A long answer is simply not chased:
-                // `stickToBottom` is released and the follow below stops asking.
-                //
-                // What remains scrolls only when the list is not already where it
-                // wants to be. `scrollToItem` takes the scroll mutex even when it
-                // turns out to be a no-op, and this effect ran 474 times in one
-                // session — nearly all of them for a list already at offset 0, with
-                // any user drag in that window cancelled against it. `atBottom` is
-                // the same test the effect would have made by moving: if it is
-                // already at the end there is nothing to do.
-                LaunchedEffect(rows.size, liveLength, todos.size) {
-                    // `isScrollInProgress` is not enough on its own: without the
-                    // touch gate a streaming token could jump the list inside the
-                    // touch-down window, which reads as the app fighting the
-                    // finger.
-                    if (!stickToBottom || touch.isDown || listState.isScrollInProgress) return@LaunchedEffect
-                    if (rows.isEmpty() || atBottom) return@LaunchedEffect
-                    ScrollDiag.prog("chat", "follow")
-                    listState.scrollToItem(0)
                 }
 
                 // Bug A: the transcript is the flex child, so a row inserted
@@ -1061,8 +964,9 @@ fun ChatScreen(vm: DshViewModel) {
                     )
                 }
 
-                // reverseLayout keeps the newest turn pinned to the bottom, so a
-                // streaming answer never yanks the viewport while you read history.
+                // A top-anchored list: new rows appear below the fold rather than
+                // moving what is above them, and [TailFollow] decides — only for a
+                // reader already at the tail — when to bring them into view.
                 Box(Modifier.weight(1f)) {
                     // Latent: records the transcript's position and gestures. It
                     // consumes nothing and scrolls nothing, so what it captures is
@@ -1075,7 +979,6 @@ fun ChatScreen(vm: DshViewModel) {
                             .fillMaxSize()
                             .touchGate(touch)
                             .diagDrag("chat") { listState.diagOffset() },
-                        reverseLayout = true,
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
                             start = DshSpacing.xl,
                             end = DshSpacing.xl,
@@ -1084,14 +987,10 @@ fun ChatScreen(vm: DshViewModel) {
                         ),
                         verticalArrangement = Arrangement.spacedBy(DshSpacing.xl),
                     ) {
-                        // The running-turn status line sits at the visual bottom, which
-                    // under reverseLayout means emitting it first. Gated on this
-                    // session's own turn, not the host's `running`: a parent whose
-                    // turn the journal has closed reports a live subagent through the
-                    // header's `+N running` chip, not by wearing this row.
-                    if (ui.ownTurnInFlight) {
-                        item(key = "turn-status") { TurnStatusRow(elapsedMs) }
-                    }
+                    // Gated on this session's own turn, not the host's `running`: a
+                    // parent whose turn the journal has closed reports a live
+                    // subagent through the header's `+N running` chip, not by
+                    // wearing this row.
                     items(items = rows, key = { it.key }) { row ->
                             Box(Modifier.widthIn(max = 920.dp)) {
                               // Text in a Compose row is not selectable until it is
@@ -1173,6 +1072,12 @@ fun ChatScreen(vm: DshViewModel) {
                               }
                             }
                         }
+
+                        // The running-turn status line is the newest thing in the
+                        // transcript, so in a top-anchored list it is emitted last.
+                        if (ui.ownTurnInFlight) {
+                            item(key = "turn-status") { TurnStatusRow(elapsedMs) }
+                        }
                     }
 
                     // Turn navigator rail: one tick per human message that opened a
@@ -1197,13 +1102,18 @@ fun ChatScreen(vm: DshViewModel) {
                         )
                     }
 
-                    // With reverseLayout index 0 is the bottom, so "at the bottom"
-                    // is exactly "cannot scroll backwards".
-                    if (!atBottom) {
+                    // Offered whenever the follow has been released, which is the
+                    // same question as "is the newest row on screen" — there is no
+                    // second notion of being at the bottom to keep in step.
+                    if (!following.value) {
                         ScrollToBottomButton(
                             onClick = {
                                 ScrollDiag.prog("chat", "to-bottom-button")
-                                scope.launch { listState.animateScrollToItem(0) }
+                                scope.launch {
+                                    listState.animateScrollToItem(
+                                        (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0),
+                                    )
+                                }
                             },
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
@@ -1341,18 +1251,16 @@ fun ChatScreen(vm: DshViewModel) {
                         onSend = {
                             val text = draft.text
                             draft = TextFieldValue("")
-                            stickToBottom = true
+                            // Sending is one of the two moments that mean "follow
+                            // again", wherever the reader had got to.
+                            followFrom++
                             vm.send(text, vm.submitMode())
-                            ScrollDiag.prog("chat", "send")
-                            scope.launch { listState.animateScrollToItem(0) }
                         },
                         onSendMode = { mode ->
                             val text = draft.text
                             draft = TextFieldValue("")
-                            stickToBottom = true
+                            followFrom++
                             vm.send(text, mode)
-                            ScrollDiag.prog("chat", "send-mode")
-                            scope.launch { listState.animateScrollToItem(0) }
                         },
                         onToggleBusyEnter = {
                             vm.updateBusyEnter(

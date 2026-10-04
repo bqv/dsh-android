@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,6 +56,9 @@ class TailFollowTest {
         var count by mutableStateOf(20)
         var tailDp by mutableStateOf(48)
         var holding by mutableStateOf(false)
+
+        /** Where the test parks the reader without a drag; null leaves it alone. */
+        var parkAt by mutableStateOf<Int?>(null)
         var state: LazyListState? = null
     }
 
@@ -64,7 +68,12 @@ class TailFollowTest {
             val state = rememberLazyListState()
             scene.state = state
 
-            TailFollow(state = state, itemCount = scene.count) { scene.holding }
+            TailFollow(state = state) { scene.holding }
+
+            // A jump that is not a drag: the rail, or a session's start.
+            scene.parkAt?.let { target ->
+                LaunchedEffect(target) { state.scrollToItem(target) }
+            }
 
             LazyColumn(
                 state = state,
@@ -193,6 +202,48 @@ class TailFollowTest {
             before - (200 - rowDp),
             topOf(16),
             2f,
+        )
+    }
+
+    @Test
+    fun `leaving the tail without a drag releases the follow`() {
+        // The reported bug: the follow was released only by a drag, so leaving the
+        // tail by the rail or a jump left it armed, and the next streamed row pulled
+        // the reader back to the bottom. Nothing here drags.
+        val scene = atTail()
+        scene.parkAt = 6
+        rule.waitForIdle()
+
+        val beforeIndex = scene.state!!.firstVisibleItemIndex
+        assertTrue(
+            "the jump should have taken the reader away from the tail, at $beforeIndex",
+            beforeIndex < scene.count - 6,
+        )
+
+        scene.count = 21
+        rule.waitForIdle()
+
+        assertEquals(
+            "a new row must not pull back a reader who left without dragging",
+            beforeIndex,
+            scene.state!!.firstVisibleItemIndex,
+        )
+    }
+
+    @Test
+    fun `returning to the tail hands the follow back`() {
+        val scene = atTail()
+        scene.parkAt = 6
+        rule.waitForIdle()
+        scene.parkAt = 19
+        rule.waitForIdle()
+
+        scene.count = 21
+        rule.waitForIdle()
+
+        assertTrue(
+            "the newest row should be followed again, bottom=${bottomOf(20)}",
+            bottomOf(20) <= viewportDp + 1f,
         )
     }
 
