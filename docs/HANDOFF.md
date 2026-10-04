@@ -104,7 +104,9 @@ editing the live copy. There is no install step to forget.
    on the user's phone — `am start` left `accelerometer_rotation` at 0, `monkey` flipped
    it to 1 every time — and it was blamed on this app for an evening, including a fruitless
    hunt through permissions. Launch with `adb shell am start -n <pkg>/<activity>`, and
-   check the lock is where the user left it when you are done.
+   check the lock is where the user left it when you are done. The component is not
+   `<applicationId>/.MainActivity` on the debug build — the id carries a `.debug` suffix
+   and the class does not, so it is `uk.xa0.dsh.debug/uk.xa0.dsh.MainActivity`.
 1. **Probe the running host, never its shipped descriptors.** The wire parameter names
    the gateway validates against are *not* always the ones in the `typert.host.js` files
    installed beside it: reading those said `terminal/environment` takes `agent`, the app
