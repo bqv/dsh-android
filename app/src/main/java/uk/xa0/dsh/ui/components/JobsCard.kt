@@ -246,7 +246,11 @@ private fun JobRow(job: JobItem) {
                         modifier = Modifier
                             .padding(top = 2.dp)
                             .clip(RoundedCornerShape(DshRadius.sm))
-                            .clickableNoRipple { expanded = !expanded },
+                            .clickableNoRipple { expanded = !expanded }
+                            // Inside the clickable, so the padding is part of the
+                            // target: a bare line of `micro` text is about 15dp tall,
+                            // which is a third of a comfortable tap.
+                            .padding(vertical = 10.dp, horizontal = 2.dp),
                     )
                 }
             }
