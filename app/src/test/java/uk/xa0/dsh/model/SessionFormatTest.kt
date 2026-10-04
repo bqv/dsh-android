@@ -89,6 +89,42 @@ class SessionFormatTest {
         return reducer.snapshot().filterIsInstance<ChatEntry.ToolCall>().single()
     }
 
+    /** v4: an image result is a part on the message, with its ref nested. */
+    private fun flatImageResult(callId: String) = JSONObject()
+        .put("type", "tool/result")
+        .put("seq", 2)
+        .put("time", 1001L)
+        .put(
+            "data",
+            JSONObject().put("turn", 1).put(
+                "message",
+                JSONObject()
+                    .put("role", "tool")
+                    .put("toolCallId", callId)
+                    .put("isError", false)
+                    .put("content", JSONArray()
+                        .put(JSONObject().put("type", "text").put("text", "<path>/tmp/a.png</path>"))
+                        .put(JSONObject().put("type", "image").put(
+                            "attachment",
+                            JSONObject()
+                                .put("attachmentId", "sha256:abc")
+                                .put("mediaType", "image/png")
+                                .put("bytes", 1234)
+                                .put("name", "a.png"),
+                        ))),
+            ),
+        )
+
+    @Test
+    fun `a flat image result carries its picture`() {
+        // The other half of the wrapper's disappearance, and the half no test covered:
+        // the app read "No output" *and* drew nothing, and only the text was pinned.
+        val entry = resultOf(flatImageResult("call_1"))
+        assertEquals(1, entry.images.size)
+        assertEquals("sha256:abc", entry.images.first().attachmentId)
+        assertEquals("image", entry.images.first().kind)
+    }
+
     @Test
     fun `a flat result carries its text`() {
         assertEquals("total 0\n-rw-r--r-- notes.md", resultOf(flatResult("call_1", "total 0\n-rw-r--r-- notes.md")).result)
