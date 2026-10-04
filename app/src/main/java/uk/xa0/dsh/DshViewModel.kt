@@ -2926,7 +2926,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val value = runCatching {
             client.rpcRaw(
                 "fileReferences/list",
-                JSONObject().put("agentId", sessionId).put("query", query),
+                JSONObject().put("agent", sessionId).put("query", query),
             )
         }.onFailure {
             Log.d("DshRefs", "files failed for '$query': ${it.message}")
@@ -2956,7 +2956,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val value = runCatching {
             client.rpcRaw(
                 "sessionReferenceResolver/candidates",
-                JSONObject().put("agentId", sessionId).put("query", query),
+                JSONObject().put("agent", sessionId).put("query", query),
             )
         }.onFailure {
             Log.d("DshRefs", "sessions failed for '$query': ${it.message}")
@@ -4357,6 +4357,23 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                             onAuthFailure("session/follow", null)
                         } else if (event.code.contains("not-found") || event.code.contains("unavailable")) {
                             _ui.value = _ui.value.copy(error = "Session is no longer available.", errorNeedsSignIn = false)
+                        } else if (_header.value == null) {
+                            // A stream that failed before ever delivering this
+                            // session's opening snapshot leaves the transcript body on
+                            // "Loading…" with nothing to explain it, forever. That is
+                            // exactly what a host which refuses to read a session looks
+                            // like from here — 0.2.0 refusing to migrate a v3 log, say —
+                            // and the host's own words are the only useful thing on
+                            // offer, so they go in the banner.
+                            //
+                            // Guarded on the header so a transient failure *during* a
+                            // live stream still retries quietly, as it always has: the
+                            // difference is whether there is anything on screen to
+                            // explain.
+                            _ui.value = _ui.value.copy(
+                                error = "This session could not be loaded: ${event.message}",
+                                errorNeedsSignIn = false,
+                            )
                         }
                     }
 
@@ -5217,7 +5234,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching {
                 val args = JSONObject()
-                    .put("agentId", sessionId)
+                    .put("agent", sessionId)
                     .put("ref", JSONObject().put("id", goal.id).put("revision", goal.revision))
                 extra?.let { args.put("request", it) }
                 client.rpc(method, args)
@@ -5334,7 +5351,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 client.rpc(
                     "agentPresets/select",
-                    JSONObject().put("agentId", sessionId).put("agentPreset", id),
+                    JSONObject().put("agent", sessionId).put("agentPreset", id),
                 )
             }.onSuccess {
                 _ui.value = _ui.value.copy(currentAgentPreset = id, error = null, errorNeedsSignIn = false)
@@ -5383,7 +5400,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _commands.value = emptyList()
         viewModelScope.launch {
             val parsed = runCatching {
-                val list = client.rpcRaw("commands/list", JSONObject().put("agentId", sessionId)) as? JSONArray
+                val list = client.rpcRaw("commands/list", JSONObject().put("agent", sessionId)) as? JSONArray
                     ?: JSONArray()
                 (0 until list.length()).mapNotNull { index ->
                     val item = list.optJSONObject(index) ?: return@mapNotNull null
@@ -5432,7 +5449,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val value = client.rpc(
             "commands/execute",
             JSONObject()
-                .put("agentId", sessionId)
+                .put("agent", sessionId)
                 .put("line", line)
                 .put("submittedAttachments", JSONArray()),
         )
@@ -5564,7 +5581,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     val value = client.rpc(
                         "fileUploads/upload",
                         JSONObject()
-                            .put("agentId", sessionId)
+                            .put("agent", sessionId)
                             .put(
                                 "request",
                                 JSONObject().put("data", encoded).put("name", name),
@@ -5682,8 +5699,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 if (format.isImage && format != PreviewFormat.SVG) {
                     return loadImageBytes(sessionId, path, format)
                 }
+                // `workspaceFileScope`, not `workspaceFileScopeId`: the host's wire
+                // parameter was renamed, and a strict codec rejects the old name
+                // outright rather than ignoring it.
                 val args = JSONObject()
-                    .put("workspaceFileScopeId", sessionId)
+                    .put("workspaceFileScope", sessionId)
                     .put("path", path)
                     .put(
                         "range",
@@ -5728,14 +5748,19 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         path: String,
         format: PreviewFormat,
     ): FilePreview {
+        // The byte window moved under `options` when the scope was renamed: `read`
+        // still takes a bare `range`, `readBytes` takes `WorkspaceByteReadOptions`.
         val args = JSONObject()
-            .put("workspaceFileScopeId", sessionId)
+            .put("workspaceFileScope", sessionId)
             .put("path", path)
             .put(
-                "range",
-                JSONObject()
-                    .put("offset", 0)
-                    .put("length", MAX_PREVIEW_IMAGE_BYTES),
+                "options",
+                JSONObject().put(
+                    "range",
+                    JSONObject()
+                        .put("offset", 0)
+                        .put("length", MAX_PREVIEW_IMAGE_BYTES),
+                ),
             )
         return try {
             val value = client.rpc("workspaceFiles/readBytes", args)

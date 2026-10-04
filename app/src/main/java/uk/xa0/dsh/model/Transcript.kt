@@ -814,14 +814,51 @@ class TranscriptReducer {
      * content instead of text, and the text extractor deliberately ignores it.
      */
     private fun toolImagesOf(data: JSONObject): List<MessageAttachment> {
-        val content = data.obj("message")?.arr("content") ?: return emptyList()
         val images = ArrayList<MessageAttachment>()
-        for (i in 0 until content.length()) {
-            val part = content.optJSONObject(i) ?: continue
-            if (part.str("type") != "tool-result") continue
-            images += attachmentsOf(part.arr("content")).filter { it.kind == "image" }
+        for (part in resultPartsOf(data)) {
+            images += attachmentsOf(part).filter { it.kind == "image" }
         }
         return images
+    }
+
+    /**
+     * The parts of a `tool/result` message, whichever session format wrote it.
+     *
+     * Session format v4 — what a 0.2.0 host writes — puts the result's parts straight
+     * into the message:
+     *
+     *     {"content": [{"type": "text", "text": "…"}], "isError": false}
+     *
+     * Up to and including v3 they were wrapped in a single part that also carried the
+     * error flag:
+     *
+     *     {"content": [{"type": "tool-result", "content": [{"type": "text", …}],
+     *                   "isError": false}]}
+     *
+     * Both are read, because both are on disk and a transcript from last week is still
+     * a transcript. Anything that reads a tool result goes through here rather than
+     * spelling out one of the two shapes — this is what the wrapper's disappearance
+     * cost when it was spelled out in two places: **every** bash row in the app read
+     * "No output" and every image result rendered as nothing, from one field that
+     * stopped being a wrapper.
+     *
+     * Returns the parts as a list of arrays so a caller that expects the old nesting
+     * needs no special case: a v3 message yields one array, a v4 message yields one
+     * array per part.
+     */
+    private fun resultPartsOf(data: JSONObject): List<JSONArray> {
+        val content = data.obj("message")?.arr("content") ?: return emptyList()
+        val out = ArrayList<JSONArray>(content.length())
+        for (i in 0 until content.length()) {
+            val part = content.optJSONObject(i) ?: continue
+            val wrapped = if (part.str("type") == "tool-result") part.arr("content") else null
+            if (wrapped != null) {
+                out += wrapped
+            } else {
+                out += JSONArray().put(part)
+            }
+        }
+        return out
     }
 
     private fun reasoningOf(content: JSONArray?): String {
@@ -835,21 +872,22 @@ class TranscriptReducer {
     }
 
     private fun toolResultOf(data: JSONObject): Pair<String, Boolean> {
-        val content = data.obj("message")?.arr("content") ?: return "" to false
+        val message = data.obj("message") ?: return "" to false
+        // The error flag moved with the wrapper: it was on the `tool-result` part and
+        // is on the message itself now. Read both, so a failed call still reads as one
+        // whichever format it came from.
+        var isError = message.bool("isError") ||
+            message.arr("content")?.let { content ->
+                (0 until content.length()).any { content.optJSONObject(it)?.bool("isError") == true }
+            } == true
         val builder = StringBuilder()
-        var isError = false
-        for (i in 0 until content.length()) {
-            val part = content.optJSONObject(i) ?: continue
-            if (part.str("type") != "tool-result") continue
-            if (part.bool("isError")) isError = true
-            val inner = part.arr("content")
-            if (inner != null) {
-                for (j in 0 until inner.length()) {
-                    val node = inner.optJSONObject(j) ?: continue
-                    if (node.str("type") == "text") {
-                        if (builder.isNotEmpty()) builder.append('\n')
-                        builder.append(node.str("text"))
-                    }
+        for (inner in resultPartsOf(data)) {
+            for (j in 0 until inner.length()) {
+                val node = inner.optJSONObject(j) ?: continue
+                if (node.bool("isError")) isError = true
+                if (node.str("type") == "text") {
+                    if (builder.isNotEmpty()) builder.append('\n')
+                    builder.append(node.str("text"))
                 }
             }
         }
