@@ -3890,15 +3890,23 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // A session that stopped is the one thing this client can tell you
             // about that the web UI cannot: you may have walked away mid-turn.
             justFinished.forEach { sessionId ->
+                // A subagent finishing its turn is not news. The parent's turn is what
+                // the reader is waiting for, the child's result arrives in the parent's
+                // transcript anyway, and a dispatch of three children ended in four
+                // notifications — three of them about work nobody was supervising
+                // directly. Its row still takes the green "done" dot, which is the quiet
+                // half of the same signal.
+                //
+                // Everything else still speaks for a child: a question or an approval
+                // stalls it where the parent's screen cannot show that, and an error or
+                // a bell is an event rather than a status.
+                if (app.attention.isSubagent(sessionId)) return@forEach
                 val title = _ui.value.sessions.firstOrNull { it.id == sessionId }?.title
-                // A subagent can outlive its parent's turn, so "the agent" was
-                // simply the wrong noun for the child's own idle alert.
-                val subject = if (app.attention.isSubagent(sessionId)) "subagent" else "agent"
                 alert(
                     id = Attention.idleId(sessionId),
                     sessionId = sessionId,
                     title = if (title.isNullOrBlank()) "Session is idle" else "Done: $title",
-                    text = "The $subject finished its turn. Tap to open the session.",
+                    text = "The agent finished its turn. Tap to open the session.",
                 )
             }
         }

@@ -1,19 +1,21 @@
-Settle a subagent's alerts when its parent is opened, and only buzz for a stuck one
+Only silence the subagent "done" alert, and put the rest of the child's alerts back
 
-Two changes to what raises a notification, both about the same thing: a parent and the
-subagents it dispatched are one piece of work the reader attends to, not several.
+The previous commit read the request as "a child is worth a buzz only when it is
+stuck" and dropped a subagent's error and terminal bell along with its idle alert. That
+was too much: the thing to stop is the "Done: <title>" notification, and everything
+else about a child still matters.
 
-Opening a session now settles its subagents' alerts as well as its own, and suppresses
-theirs while it is in front. The read used to be a single id, so looking at a parent
-left every child's alert in the shade for work that was already on screen.
+So the blocking flag is gone and `alert` is back to one rule — post unless the reader is
+looking at it. The idle alert is silenced where it is raised instead: a subagent
+finishing its turn is not news, because the parent's turn is what the reader is waiting
+for and the child's result arrives in the parent's transcript anyway. A dispatch of
+three children ended in four notifications, three of them about work nobody was
+supervising directly. The row still takes its green "done" dot, which is the quiet half
+of the same signal.
 
-And a subagent is worth a buzz only when it is *stuck*. An approval or a question stalls
-a child outright and the parent's screen cannot show it — the header counts subagents
-that are running, and a child waiting for a human is running as far as that count is
-concerned — which is precisely the failure this layer exists for. A child's error or a
-bell in its shell is not that: the parent's turn carries on, the transcript shows what
-happened, and a notification per child turns one dispatch into a stream of buzzes for
-work nobody asked to supervise directly. So `alert` takes `blocking`, and only the two
-waterfalls pass it.
+A question or an approval still speaks for a child, because they stall it where the
+parent's screen cannot show that the header counts a waiting child as running. An error
+or a bell still speaks for it too, because those are events rather than a status.
 
-`subagentTreeIds` is breadth-first and cycle-safe, with five tests. 342 green.
+The `visibleWith` half of that commit stands: opening a parent settles its subagents'
+alerts and suppresses them while it is in front. 342 green.
