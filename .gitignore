@@ -30,3 +30,6 @@ local.properties
 .secrets/
 __pycache__/
 *.pyc
+
+# Scratch file for `git commit -F`; never part of the repository.
+.commitmsg.tmp
