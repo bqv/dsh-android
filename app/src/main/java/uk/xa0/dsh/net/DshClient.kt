@@ -304,6 +304,59 @@ class DshClient(context: Context) {
             }
         }
 
+    /**
+     * One unary gateway call whose answer is **not** JSON.
+     *
+     * `workspaceFiles/readBytes` answers `multipart/form-data` on 0.2.0, holding the
+     * file's bytes in its first part. [rpcRaw] reads the body as a string and, when it
+     * will not parse as an envelope, throws with the first 400 characters as the
+     * message — which is why the Files panel used to display an HTTP response body
+     * (`Content-Disposition: form-data; name="bytes-0"` over PNG chunks) where a
+     * picture belonged.
+     *
+     * A *failed* call still answers JSON, so that is checked first and its structured
+     * error is raised as usual.
+     */
+    suspend fun rpcBytes(method: String, args: JSONObject = JSONObject()): ByteArray =
+        withContext(Dispatchers.IO) {
+            val envelope = JSONObject()
+                .put("type", "client-request")
+                .put("rpcId", UUID.randomUUID().toString())
+                .put("method", method)
+                .put("payload", JSONObject().put("args", args))
+
+            val request = Request.Builder()
+                .url(apiUrl(method))
+                .post(envelope.toString().toRequestBody(JSON))
+                .build()
+
+            base.newCall(request).execute().use { response ->
+                val type = response.header("content-type").orEmpty()
+                if (response.code == 401 || response.code == 403) {
+                    throw DshAuthException("Session expired (HTTP ${response.code})")
+                }
+                val body = response.body?.bytes() ?: ByteArray(0)
+                if (type.contains("json", ignoreCase = true)) {
+                    val text = body.toString(Charsets.UTF_8)
+                    val parsed = runCatching { JSONObject(text) }.getOrNull()
+                    val result = parsed?.optJSONObject("result")
+                    if (result != null && !result.optBoolean("ok")) {
+                        val error = result.optJSONObject("error")
+                        throw DshRpcException(
+                            code = error?.optString("code").orEmpty().ifEmpty { "unknown" },
+                            message = error?.optString("message").orEmpty().ifEmpty { "Host rejected the call" },
+                            details = error?.optJSONObject("details"),
+                        )
+                    }
+                    throw DshRpcException("protocol", "Expected bytes, got JSON", null)
+                }
+                body
+            }
+        }
+
+    /** The OkHttp client, for the one caller that fetches a picture from the internet. */
+    fun httpClient(): okhttp3.OkHttpClient = base
+
     /** Convenience wrapper matching the host's `_request`-style parameter naming. */
     suspend fun listSessions(): JSONObject = rpc("session/list", JSONObject().put("_request", JSONObject()))
 

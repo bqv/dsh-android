@@ -83,6 +83,7 @@ import uk.xa0.dsh.net.BalanceFailure
 import uk.xa0.dsh.net.DeepSeekAccount
 import uk.xa0.dsh.net.DshAuthException
 import uk.xa0.dsh.net.DshRpcException
+import uk.xa0.dsh.net.multipartBytes
 import uk.xa0.dsh.net.DshUnreachableException
 import uk.xa0.dsh.net.MuxState
 import uk.xa0.dsh.net.StreamEvent
@@ -5760,30 +5761,95 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 ),
             )
         return try {
-            val value = client.rpc("workspaceFiles/readBytes", args)
-            val bytes = Base64.decode(value.str("data"), Base64.DEFAULT)
-            if (!value.bool("eof", true)) {
-                // The host omits `eof` when the window covered the file, and sends the
-                // file's own size in `bytes` either way.
-                val size = value.int("bytes")
-                return FilePreview.Unavailable(
-                    if (size > 0) "Too large to preview ($size bytes)." else "Too large to preview.",
-                )
-            }
+            // 0.2.0 answers this one with `multipart/form-data`, not JSON with base64.
+            // Read as text it was an HTTP body shown to the reader — the panel printed
+            // `Content-Disposition: form-data; name="bytes-0"` over PNG chunks — because
+            // the JSON parse failed and the failure message *is* the body's first 400
+            // characters.
+            val body = client.rpcBytes("workspaceFiles/readBytes", args)
+            val bytes = boundaryOf(body)?.let { multipartBytes(body, it) }
+                ?: return FilePreview.Unavailable("The host answered in a form this app cannot read.")
             if (bytes.isEmpty()) {
                 return FilePreview.Unavailable("This file is empty.")
             }
             FilePreview.Image(
                 bytes = bytes,
                 format = format,
-                sizeBytes = value.int("bytes").takeIf { it > 0 },
-                absolutePath = value.str("absolutePath").takeIf { it.isNotEmpty() },
+                sizeBytes = bytes.size,
+                absolutePath = null,
             )
         } catch (error: Throwable) {
             if (error is DshAuthException) onAuthFailure("workspaceFiles/readBytes", error)
             FilePreview.Unavailable(describe(error))
         }
     }
+
+    /** Decoded bytes for a markdown picture, keyed by the address it was written as. */
+    private val markdownImages = android.util.LruCache<String, ByteArray>(24)
+
+    /**
+     * The bytes behind one `![alt](url)`.
+     *
+     * Two kinds of address turn up in a transcript, and they are fetched differently:
+     * an `https://…` picture is somewhere on the internet, and anything else is a path
+     * in this session's workspace — which is the same `workspaceFiles/readBytes` the
+     * Files panel uses, multipart and all.
+     *
+     * Nothing is fetched twice: the cache is keyed by the address as written, and it is
+     * small because a picture is held as raw bytes until it is decoded.
+     */
+    suspend fun markdownImageBytes(url: String): ByteArray? {
+        if (url.isBlank()) return null
+        markdownImages.get(url)?.let { return it }
+        val sessionId = _ui.value.currentSessionId
+        val bytes = withContext(Dispatchers.IO) {
+            runCatching {
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    fetchRemoteImage(url)
+                } else {
+                    val scope = sessionId ?: return@runCatching null
+                    val body = client.rpcBytes(
+                        "workspaceFiles/readBytes",
+                        JSONObject()
+                            .put("workspaceFileScopeId", scope)
+                            .put("path", url)
+                            .put(
+                                "options",
+                                JSONObject().put(
+                                    "range",
+                                    JSONObject().put("offset", 0).put("length", MAX_PREVIEW_IMAGE_BYTES),
+                                ),
+                            ),
+                    )
+                    boundaryOf(body)?.let { multipartBytes(body, it) }
+                }
+            }.getOrNull()
+        } ?: return null
+        if (bytes.isEmpty()) return null
+        markdownImages.put(url, bytes)
+        return bytes
+    }
+
+    /**
+     * One picture from the open internet.
+     *
+     * A markdown picture is a URL the *model* wrote, so it is fetched with no
+     * credentials, no cookies and no redirects into the host's own API, and capped
+     * before it is read into memory: an address in a transcript is not a reason to
+     * download a gigabyte.
+     */
+    private fun fetchRemoteImage(url: String): ByteArray? {
+        val request = okhttp3.Request.Builder().url(url).get().build()
+        client.httpClient().newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val body = response.body ?: return null
+            if (body.contentLength() > MAX_PREVIEW_IMAGE_BYTES) return null
+            return body.bytes().takeIf { it.size <= MAX_PREVIEW_IMAGE_BYTES }
+        }
+    }
+
+    /** The boundary of a multipart body, read from the body's own first line. */
+    private fun boundaryOf(body: ByteArray): String? = boundaryOf(body)
 
     private fun describe(error: Throwable): String = when (error) {
         is DshAuthException -> AUTH_ERROR

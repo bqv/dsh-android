@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +31,7 @@ import uk.xa0.dsh.ui.ChatScreen
 import uk.xa0.dsh.ui.SetupScreen
 import uk.xa0.dsh.ui.components.DshMark
 import uk.xa0.dsh.ui.theme.DshSpacing
+import uk.xa0.dsh.ui.markdown.LocalImageBytes
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
 
@@ -116,6 +118,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // How a markdown picture gets its bytes, provided once for every surface
+            // that can render one — the transcript, reasoning, tool output, the
+            // trajectory. `vm::markdownImageBytes` is stable, so this is not a new
+            // fetcher per recomposition.
+            CompositionLocalProvider(LocalImageBytes provides vm::markdownImageBytes) {
             DshTheme(themeMode = ui.themeMode) {
                 // Composed before the screen so the screen's own Back handlers — the
                 // drawer, the sheets, the Files panel, a non-Chat view — are asked
@@ -143,6 +150,7 @@ class MainActivity : ComponentActivity() {
                         AppPhase.READY -> ChatScreen(vm)
                     }
                 }
+            }
             }
         }
     }

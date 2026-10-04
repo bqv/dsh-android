@@ -22,6 +22,14 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import uk.xa0.dsh.ui.theme.DshRadius
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.foundation.Image
+import android.graphics.BitmapFactory
 import android.util.LruCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -246,6 +254,92 @@ private fun TableRow(cells: List<List<InlineToken>>, header: Boolean) {
     }
 }
 
+/**
+ * The same run, with its pictures drawn instead of described.
+ *
+ * A picture cannot live inside a `Text`, so a run containing one is broken at the
+ * pictures: the words either side keep their own `Text`, and the picture is drawn
+ * between them. Everything without an image — which is almost everything — stays one
+ * `Text` and one layout.
+ *
+ * The alt text is what a reader sees until the bytes land, and what stays if they never
+ * do: a broken picture is not worth a red box, but silence is worth less than the
+ * sentence the author wrote to describe it.
+ */
+@Composable
+private fun InlineWithImages(
+    tokens: List<InlineToken>,
+    style: androidx.compose.ui.text.TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    // The runs are emitted inline rather than through a local `flushRun()`: a nested
+    // function cannot invoke a composable, and both of these are composables.
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(DshSpacing.sm)) {
+        var run = ArrayList<InlineToken>()
+        tokens.forEach { token ->
+            if (token.style == InlineStyle.IMAGE) {
+                if (run.isNotEmpty()) {
+                    InlineText(run.toList(), style, color)
+                    run = ArrayList()
+                }
+                MarkdownImage(url = token.url.orEmpty(), alt = token.text, style = style)
+            } else {
+                run += token
+            }
+        }
+        if (run.isNotEmpty()) InlineText(run.toList(), style, color)
+    }
+}
+
+/**
+ * One picture from a message body.
+ *
+ * The bytes come from [LocalImageBytes], which the app provides: the renderer has no
+ * business knowing whether a markdown picture is an `https://` address or a path in the
+ * session's workspace.
+ */
+@Composable
+private fun MarkdownImage(
+    url: String,
+    alt: String,
+    style: androidx.compose.ui.text.TextStyle,
+) {
+    val colors = DshTheme.colors
+    val fetch = LocalImageBytes.current
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, url) {
+        value = if (url.isBlank()) null else fetch(url)?.let { decodeImage(it) }
+    }
+    val image = bitmap
+    if (image == null) {
+        Text(text = alt.ifBlank { url }, style = style, color = colors.labelTertiary)
+        return
+    }
+    val shape = RoundedCornerShape(DshRadius.md)
+    Image(
+        bitmap = image,
+        contentDescription = alt.takeIf { it.isNotBlank() },
+        contentScale = ContentScale.FillWidth,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .border(0.5.dp, colors.borderL1, shape),
+    )
+}
+
+/** Decodes bytes into a drawable, or null when they are not a picture. */
+private fun decodeImage(bytes: ByteArray): ImageBitmap? =
+    runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }.getOrNull()
+
+/**
+ * How a markdown picture gets its bytes.
+ *
+ * A composition local rather than a parameter because the renderer is reached from a
+ * dozen places — messages, reasoning, tool output — and every one of them would
+ * otherwise have to thread a fetcher through. The app provides it once.
+ */
+val LocalImageBytes = compositionLocalOf<suspend (String) -> ByteArray?> { { null } }
+
 @Composable
 private fun InlineText(
     tokens: List<InlineToken>,
@@ -253,6 +347,11 @@ private fun InlineText(
     color: Color,
     modifier: Modifier = Modifier,
 ) {
+    // A run with a picture in it is broken up; see [InlineWithImages].
+    if (tokens.any { it.style == InlineStyle.IMAGE }) {
+        InlineWithImages(tokens, style, color, modifier)
+        return
+    }
     val colors = DshTheme.colors
     val uriHandler = LocalUriHandler.current
 
@@ -277,6 +376,9 @@ private fun InlineText(
 
                     InlineStyle.LINK -> SpanStyle(color = colors.link, textDecoration = TextDecoration.Underline)
                     InlineStyle.STRIKE -> SpanStyle(color = color, textDecoration = TextDecoration.LineThrough)
+                    // Unreachable: a run reaching this builder has had its pictures
+                    // taken out. The alt text is the honest fallback if one ever does.
+                    InlineStyle.IMAGE -> SpanStyle(color = colors.labelTertiary)
                 }
                 if (token.url != null) {
                     pushStringAnnotation(tag = "url", annotation = token.url)

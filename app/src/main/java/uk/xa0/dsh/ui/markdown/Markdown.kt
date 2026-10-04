@@ -11,7 +11,7 @@ package uk.xa0.dsh.ui.markdown
  * the layout, and a table is only recognised once its `|---|` separator lands.
  */
 
-enum class InlineStyle { NORMAL, BOLD, ITALIC, BOLD_ITALIC, CODE, LINK, STRIKE }
+enum class InlineStyle { NORMAL, BOLD, ITALIC, BOLD_ITALIC, CODE, LINK, STRIKE, IMAGE }
 
 data class InlineToken(
     val text: String,
@@ -279,6 +279,27 @@ object Markdown {
                 }
             }
 
+            // `![alt](url)` is a picture, not a link with a stray `!` in front of it.
+            // Treated as a link it drew as blue underlined words — the alt text and the
+            // whole URL — which is what every markdown picture in a transcript looked
+            // like.
+            if (text[i] == '!' && i + 1 < text.length && text[i + 1] == '[') {
+                val close = text.indexOf(']', i + 1)
+                if (close > i + 1 && close + 1 < text.length && text[close + 1] == '(') {
+                    val urlEnd = text.indexOf(')', close + 2)
+                    if (urlEnd > close) {
+                        flush()
+                        tokens += InlineToken(
+                            text = text.substring(i + 2, close),
+                            style = InlineStyle.IMAGE,
+                            url = text.substring(close + 2, urlEnd),
+                        )
+                        i = urlEnd + 1
+                        continue
+                    }
+                }
+            }
+
             if (text[i] == '[') {
                 val close = text.indexOf(']', i)
                 if (close > i && close + 1 < text.length && text[close + 1] == '(') {
@@ -351,7 +372,7 @@ object Markdown {
     private fun emphasise(tokens: List<InlineToken>, style: InlineStyle): List<InlineToken> =
         tokens.map { token ->
             when (token.style) {
-                InlineStyle.CODE, InlineStyle.LINK -> token
+                InlineStyle.CODE, InlineStyle.LINK, InlineStyle.IMAGE -> token
                 InlineStyle.NORMAL -> token.copy(style = style)
                 else -> token.copy(style = combine(style, token.style))
             }
