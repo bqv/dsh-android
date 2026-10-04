@@ -68,7 +68,7 @@ class TailFollowTest {
             val state = rememberLazyListState()
             scene.state = state
 
-            TailFollow(state = state) { scene.holding }
+            TailFollow(state = state, holding = { scene.holding })
 
             // A jump that is not a drag: the rail, or a session's start.
             scene.parkAt?.let { target ->

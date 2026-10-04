@@ -255,7 +255,12 @@ fun ChatScreen(vm: DshViewModel) {
     // "follow this again", and both of them count even when the reader has scrolled
     // away: opening a session, and sending a message.
     var followFrom by remember { mutableStateOf(0) }
-    val following = TailFollow(state = listState, rearmKey = followFrom) { touch.isDown }
+    val following = TailFollow(
+        state = listState,
+        rearmKey = followFrom,
+        holding = { touch.isDown },
+        onMove = { ScrollDiag.prog("chat", it) },
+    )
 
     // Freeze the streaming row while the reader is away from the tail.
     //

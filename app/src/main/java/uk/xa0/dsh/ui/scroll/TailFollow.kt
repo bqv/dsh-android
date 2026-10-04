@@ -61,6 +61,13 @@ fun TailFollow(
     state: LazyListState,
     rearmKey: Any? = Unit,
     holding: () -> Boolean = { false },
+    /**
+     * Called just before the list is moved, with a short name for why. A follow is
+     * asked for, but it looks exactly like the app moving a list nobody asked it to
+     * move — the recorder showed unmarked jumps of 84 rows beside a session switch
+     * and could not tell them apart. This is how the caller says which it was.
+     */
+    onMove: (String) -> Unit = {},
 ): State<Boolean> {
     val following = remember { mutableStateOf(true) }
 
@@ -69,6 +76,7 @@ fun TailFollow(
         // The count is zero until the first measure, and scrolling before that is
         // scrolling an empty list.
         val count = snapshotFlow { state.layoutInfo.totalItemsCount }.filter { it > 0 }.first()
+        onMove("tail-rearm")
         state.scrollToItem(count - 1)
     }
 
@@ -139,6 +147,7 @@ fun TailFollow(
     LaunchedEffect(state) {
         snapshotFlow { rowsBelowFold(state) }.collect { belowFold ->
             if (belowFold <= 0 || !following.value || holding() || state.isScrollInProgress) return@collect
+            onMove("tail-rows")
             state.scrollToItem(state.layoutInfo.totalItemsCount - 1)
         }
     }
@@ -147,6 +156,7 @@ fun TailFollow(
     LaunchedEffect(state) {
         snapshotFlow { tailOverflow(state) }.collect { overflow ->
             if (overflow > 0f && following.value && !holding() && !state.isScrollInProgress) {
+                onMove("tail-growth")
                 state.dispatchRawDelta(overflow)
             }
         }

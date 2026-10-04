@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -64,9 +65,28 @@ private val MATRIX_CELLS = listOf(
     0 to 0, 4 to 0, 8 to 0, 8 to 4, 8 to 8, 4 to 8, 0 to 8, 0 to 4,
 )
 
+/**
+ * Whether the animated dots actually animate.
+ *
+ * The drawer stays composed while it is shut, so every running session's chase was
+ * being rendered at the display's rate for a sheet nobody could see. That is not a
+ * drawing cost so much as an idle one: the app never stopped producing frames, so it
+ * never idled, and every scroll frame had to share the display with an animation that
+ * was not on screen. Measured before this existed: ~175 frames every two seconds with
+ * nothing happening.
+ *
+ * A surface that is off screen provides `false`; the dot still shows its state, it
+ * just stops moving.
+ */
+val LocalAnimatedDots = compositionLocalOf { true }
+
 @Composable
 private fun OngoingChase(size: Dp, modifier: Modifier) {
     val color = DshTheme.colors.ongoing
+    if (!LocalAnimatedDots.current) {
+        SolidDot(color, size, modifier)
+        return
+    }
     val transition = rememberInfiniteTransition(label = "dot-chase")
     val progress by transition.animateFloat(
         initialValue = 0f,

@@ -50,6 +50,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -88,6 +89,7 @@ import uk.xa0.dsh.ui.components.DotState
 import uk.xa0.dsh.ui.components.DshMark
 import uk.xa0.dsh.ui.components.DshTextField
 import uk.xa0.dsh.ui.components.StateDot
+import uk.xa0.dsh.ui.components.LocalAnimatedDots
 import uk.xa0.dsh.ui.search.SessionSearchRow
 import uk.xa0.dsh.ui.search.SessionSearchRowItem
 import uk.xa0.dsh.ui.search.SessionSearchStatus
@@ -528,6 +530,9 @@ fun SessionsDrawer(
     }
 
 
+    // The drawer is composed while it is shut, so nothing in it needs to animate
+    // until it is on screen — see [LocalAnimatedDots].
+    CompositionLocalProvider(LocalAnimatedDots provides drawerOpen) {
     Column(
         Modifier
             .fillMaxSize()
@@ -865,6 +870,7 @@ fun SessionsDrawer(
                 onClick = onAbout,
             )
         }
+    }
     }
 }
 
