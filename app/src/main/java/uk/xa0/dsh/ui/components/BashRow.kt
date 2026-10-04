@@ -3,7 +3,6 @@ package uk.xa0.dsh.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -279,18 +278,22 @@ private fun TerminalBanner(model: BashTerminalModel) {
                 .weight(1f)
                 .verticalScroll(rememberScrollState()),
         ) {
-            // The prompt rows pan sideways as one block. TerminalBlock's `.command`
-            // ellipsizes, but on the web that tail is still reachable: the text is
-            // mouse-selectable and Copy takes the output (TerminalBlock.tsx:177), so
-            // nothing else carries the command. Compose `Text` is not selectable
-            // unless wrapped in a SelectionContainer, so an ellipsized script line
-            // here is unreachable outright. The horizontal scroller is a child of
-            // the vertical one rather than the same node - two scrollables on one
-            // node cannot both claim a drag - and a real descendant is dispatched
-            // first in the Main pass, ahead of the drawer's 96dp edge band.
-            Column(Modifier.horizontalScroll(rememberScrollState())) {
+            // The prompt rows wrap rather than panning sideways.
+            //
+            // They used to pan, for a good reason: TerminalBlock's `.command`
+            // ellipsizes, and on the web the tail is still reachable because the text
+            // is mouse-selectable and Copy takes it (`TerminalBlock.tsx:177`). Compose
+            // `Text` is not selectable unless wrapped in a SelectionContainer, so an
+            // ellipsized script line here was unreachable outright. Wrapping answers
+            // that better than panning does — the line is simply *there*, rather than
+            // there if you think to drag it — and it costs the reader nothing, where a
+            // sideways pan inside a vertically scrolling transcript costs them a
+            // gesture that has to be told apart from the list's.
+            Column {
                 commandLines.forEachIndexed { index, line ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Top-aligned: a wrapped command makes the row two or three lines
+                    // tall, and a centred prompt would float beside the middle of it.
+                    Row(verticalAlignment = Alignment.Top) {
                         // The cwd labels the call, so only the first row carries it;
                         // later rows keep a bare `$` to stay aligned.
                         Text(
@@ -304,7 +307,6 @@ private fun TerminalBanner(model: BashTerminalModel) {
                             text = line.ifEmpty { " " },
                             style = DshType.codeSmall,
                             color = colors.labelPrimary,
-                            softWrap = false,
                         )
                     }
                 }
@@ -347,31 +349,24 @@ private fun TerminalOutput(model: BashTerminalModel) {
         val body = if (output.endsWith("\n")) output.dropLast(1) else output
         body.split('\n')
     }
+    // The output wraps. The web can stack a horizontal overflow on `.output` and a
+    // vertical one on its container; a Compose node cannot resolve both axes' drags,
+    // so panning here meant a nested scroller whose gesture had to be told apart from
+    // the transcript's — and the widest lines in a bash output are exactly the ones a
+    // reader wants to read rather than steer. The vertical cap stays, because output
+    // is unbounded in the other direction and the banner is pinned above it.
     Column(
         Modifier
             .heightIn(max = 224.dp)
-            // Vertical cap on the output (the banner stays pinned).
-            .verticalScroll(rememberScrollState()),
+            .verticalScroll(rememberScrollState())
+            .padding(start = 30.dp, end = 14.dp, top = DshSpacing.lg, bottom = DshSpacing.lg),
     ) {
-        // A `pre` body: softWrap=false under an unbounded width is what gives the
-        // text its widest line, so there is real overflow to pan. The horizontal
-        // scroller gets its own node inside the vertical one - the web can stack
-        // both overflows on `.output`, a single Compose node cannot resolve both
-        // axes' drags - and being a descendant, it claims a horizontal drag in the
-        // Main pass before the drawer's edge band does.
-        Column(
-            Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(start = 30.dp, end = 14.dp, top = DshSpacing.lg, bottom = DshSpacing.lg),
-        ) {
-            lines.forEach { line ->
-                Text(
-                    text = line.ifEmpty { " " },
-                    style = DshType.codeSmall,
-                    color = colors.labelPrimary,
-                    softWrap = false,
-                )
-            }
+        lines.forEach { line ->
+            Text(
+                text = line.ifEmpty { " " },
+                style = DshType.codeSmall,
+                color = colors.labelPrimary,
+            )
         }
     }
 }

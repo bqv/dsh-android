@@ -1,24 +1,21 @@
-Wait for the finger before restoring the drawer's position
+Wrap bash commands and output instead of panning them sideways
 
-Nine of the twelve "the app moved a list under a finger" records in one session were
-the drawer's own open-restore, moving between one and fifty pixels while the thumb
-that had just swiped the drawer open was still resting in it. Opening the drawer is a
-swipe, so the hand is routinely still on the screen when the restore runs. It waits
-for the last finger to lift now.
+Both halves of a bash row scrolled horizontally: the command lines, so that an
+ellipsized script line was still reachable, and the output, whose softWrap=false is
+what gave it a widest line to pan.
 
-The rest of the session's evidence, which is what this round was for:
+Wrapping answers the command case better than panning does. The reason for the
+scroller was sound — `TerminalBlock` ellipsizes, the web recovers the tail because the
+text is selectable, and Compose `Text` is not selectable unless wrapped in a
+SelectionContainer, so an ellipsized script line here was unreachable outright — but
+"reachable if you think to drag it" is not as good as "there". The prompt rows are
+top-aligned now, since a wrapped command makes the row two or three lines tall and a
+centred `$` would float beside the middle of it.
 
-  * opening a row is confirmed on the device, and by real rows rather than the live
-    one: e31083 grew 693px, e31089 423px, e298 271px, e4740 4684px, and the list did
-    not move for any of them. The top edge stayed and the row grew downward, which is
-    point two of this goal answered where it matters;
-  * every movement carries a cause — 11 session-switch, 12 open-restore, 25
-    tail-growth, 10 tail-rows, 9 tail-rearm, 2 to-bottom-button;
-  * the remaining shifts are content arriving (two rows, kept=50) or the drawer
-    re-laying-out its roster while it is shut, which is invisible and is restored on
-    open;
-  * 9.1% of frames over the 11ms budget in this session against 11.7% before, with
-    2.6% over 33ms. The previous session measured 5.4% — the spread is usage, not
-    regression.
+The output case is simpler: the widest lines in a bash output are the ones worth
+reading, and a horizontal scroller nested inside a vertically scrolling transcript
+costs a gesture that has to be told apart from the list's. The 224dp vertical cap and
+its scroller stay — output is unbounded in that direction and the banner is pinned
+above it.
 
 337 green.
