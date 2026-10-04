@@ -196,11 +196,14 @@ private fun JobRow(job: JobItem) {
         Spacer(Modifier.width(DshSpacing.md))
         Column(Modifier.weight(1f)) {
             Text(
+                // The sheet has room and it scrolls, so a job's command is shown in
+                // full rather than clipped. Two lines was enough to read `cd …` and no
+                // further, which is the part of a command that says the least about
+                // what it does — and this row is the only place the command appears,
+                // since the compact seat beside the transcript is one line by design.
                 text = job.label,
                 style = DshType.bodyMedium,
                 color = colors.labelPrimary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 // Same vocabulary the web's job list uses: a status, then the
@@ -215,10 +218,13 @@ private fun JobRow(job: JobItem) {
             )
             job.detail?.let {
                 Text(
+                    // Twice what it was, and still capped: the detail is prose rather
+                    // than the command, and an unbounded one would bury the row below
+                    // it.
                     text = it,
                     style = DshType.micro,
                     color = colors.labelCaption,
-                    maxLines = 2,
+                    maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
