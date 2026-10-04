@@ -32,7 +32,7 @@ class TerminalClient(private val client: DshClient) {
      * refuses anything larger instead of clipping it.
      */
     suspend fun environment(agentId: String): TerminalEnvironmentInfo {
-        val value = client.rpc("terminal/environment", args("agent" to agentId))
+        val value = client.rpc("terminal/environment", args("agentId" to agentId))
         return TerminalEnvironmentInfo(
             cwd = value.optString("cwd"),
             maxInputBytes = value.optInt("maxInputBytes", 64 * 1024),
@@ -44,7 +44,7 @@ class TerminalClient(private val client: DshClient) {
 
     /** `terminal/shells` — the profiles present in the session's execution environment. */
     suspend fun shells(agentId: String): List<TerminalShellInfo> {
-        val value = client.rpcRaw("terminal/shells", args("agent" to agentId))
+        val value = client.rpcRaw("terminal/shells", args("agentId" to agentId))
         val array = value as? org.json.JSONArray ?: return emptyList()
         return (0 until array.length()).mapNotNull { index ->
             val shell = array.optJSONObject(index) ?: return@mapNotNull null
@@ -89,29 +89,29 @@ class TerminalClient(private val client: DshClient) {
             .put("cols", columns)
             .put("rows", rows)
         if (shellPath != null) request.put("shellPath", shellPath)
-        return infoOf(client.rpc("terminal/create", args("agent" to agentId, "request" to request)))
+        return infoOf(client.rpc("terminal/create", args("agentId" to agentId, "request" to request)))
     }
 
     suspend fun write(agentId: String, id: String, attachmentId: String, data: String) {
         client.rpcRaw("terminal/write", args(
-            "agent" to agentId, "id" to id, "attachmentId" to attachmentId, "data" to data,
+            "agentId" to agentId, "id" to id, "attachmentId" to attachmentId, "data" to data,
         ))
     }
 
     suspend fun resize(agentId: String, id: String, attachmentId: String, columns: Int, rows: Int) {
         client.rpcRaw("terminal/resize", args(
-            "agent" to agentId, "id" to id, "attachmentId" to attachmentId,
+            "agentId" to agentId, "id" to id, "attachmentId" to attachmentId,
             "cols" to columns, "rows" to rows,
         ))
     }
 
     suspend fun rename(agentId: String, id: String, title: String) {
-        client.rpcRaw("terminal/rename", args("agent" to agentId, "id" to id, "title" to title))
+        client.rpcRaw("terminal/rename", args("agentId" to agentId, "id" to id, "title" to title))
     }
 
     /** `terminal/close` — the only thing that kills the shell; detaching never does. */
     suspend fun close(agentId: String, id: String) {
-        client.rpcRaw("terminal/close", args("agent" to agentId, "id" to id))
+        client.rpcRaw("terminal/close", args("agentId" to agentId, "id" to id))
     }
 
     /**
@@ -123,7 +123,7 @@ class TerminalClient(private val client: DshClient) {
      */
     fun follow(agentId: String, id: String, attachmentId: String): Flow<StreamEvent> =
         client.mux().openStream("terminal/follow", args(
-            "agent" to agentId, "id" to id, "attachmentId" to attachmentId,
+            "agentId" to agentId, "id" to id, "attachmentId" to attachmentId,
         ))
 
     private fun args(vararg pairs: Pair<String, Any?>): JSONObject {

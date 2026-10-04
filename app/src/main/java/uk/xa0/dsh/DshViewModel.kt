@@ -2927,7 +2927,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val value = runCatching {
             client.rpcRaw(
                 "fileReferences/list",
-                JSONObject().put("agent", sessionId).put("query", query),
+                JSONObject().put("agentId", sessionId).put("query", query),
             )
         }.onFailure {
             Log.d("DshRefs", "files failed for '$query': ${it.message}")
@@ -2957,7 +2957,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val value = runCatching {
             client.rpcRaw(
                 "sessionReferenceResolver/candidates",
-                JSONObject().put("agent", sessionId).put("query", query),
+                JSONObject().put("agentId", sessionId).put("query", query),
             )
         }.onFailure {
             Log.d("DshRefs", "sessions failed for '$query': ${it.message}")
@@ -5230,7 +5230,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching {
                 val args = JSONObject()
-                    .put("agent", sessionId)
+                    .put("agentId", sessionId)
                     .put("ref", JSONObject().put("id", goal.id).put("revision", goal.revision))
                 extra?.let { args.put("request", it) }
                 client.rpc(method, args)
@@ -5347,7 +5347,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 client.rpc(
                     "agentPresets/select",
-                    JSONObject().put("agent", sessionId).put("agentPreset", id),
+                    JSONObject().put("agentId", sessionId).put("agentPreset", id),
                 )
             }.onSuccess {
                 _ui.value = _ui.value.copy(currentAgentPreset = id, error = null, errorNeedsSignIn = false)
@@ -5396,7 +5396,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _commands.value = emptyList()
         viewModelScope.launch {
             val parsed = runCatching {
-                val list = client.rpcRaw("commands/list", JSONObject().put("agent", sessionId)) as? JSONArray
+                val list = client.rpcRaw("commands/list", JSONObject().put("agentId", sessionId)) as? JSONArray
                     ?: JSONArray()
                 (0 until list.length()).mapNotNull { index ->
                     val item = list.optJSONObject(index) ?: return@mapNotNull null
@@ -5445,7 +5445,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val value = client.rpc(
             "commands/execute",
             JSONObject()
-                .put("agent", sessionId)
+                .put("agentId", sessionId)
                 .put("line", line)
                 .put("submittedAttachments", JSONArray()),
         )
@@ -5577,7 +5577,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     val value = client.rpc(
                         "fileUploads/upload",
                         JSONObject()
-                            .put("agent", sessionId)
+                            .put("agentId", sessionId)
                             .put(
                                 "request",
                                 JSONObject().put("data", encoded).put("name", name),
@@ -5695,11 +5695,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 if (format.isImage && format != PreviewFormat.SVG) {
                     return loadImageBytes(sessionId, path, format)
                 }
-                // `workspaceFileScope`, not `workspaceFileScopeId`: the host's wire
-                // parameter was renamed, and a strict codec rejects the old name
-                // outright rather than ignoring it.
+                // `workspaceFileScopeId` — checked against the *running* host rather
+                // than against the descriptor files it ships, which disagree with what
+                // its gateway validates.
                 val args = JSONObject()
-                    .put("workspaceFileScope", sessionId)
+                    .put("workspaceFileScopeId", sessionId)
                     .put("path", path)
                     .put(
                         "range",
@@ -5744,10 +5744,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         path: String,
         format: PreviewFormat,
     ): FilePreview {
-        // The byte window moved under `options` when the scope was renamed: `read`
-        // still takes a bare `range`, `readBytes` takes `WorkspaceByteReadOptions`.
+        // The byte window is nested: `read` takes a bare `range`, `readBytes` takes
+        // `options` holding it. That part is real — with a bare `range` the host
+        // answers `missing "options"; unexpected "range"`.
         val args = JSONObject()
-            .put("workspaceFileScope", sessionId)
+            .put("workspaceFileScopeId", sessionId)
             .put("path", path)
             .put(
                 "options",

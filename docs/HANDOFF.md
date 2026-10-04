@@ -98,7 +98,15 @@ editing the live copy. There is no install step to forget.
 
 ## Traps
 
-0. **The JVM harness cannot measure text.** Robolectric lays text out with stub
+0. **Probe the running host, never its shipped descriptors.** The wire parameter names
+   the gateway validates against are *not* always the ones in the `typert.host.js` files
+   installed beside it: reading those said `terminal/environment` takes `agent`, the app
+   was changed to send `agent`, and the host answered `missing "agentId"; unexpected
+   "agent"` — the whole Shell tab, every agent-scoped call, and the Files panel, broken
+   by a "fix" that a single request would have refuted. One `POST` to
+   `http://127.0.0.1:8081/api/<endpoint>` with the candidate arguments settles any of
+   these in a second (cookie recipe in `~/ref/NOTES.md`), and the error names the field.
+1. **The JVM harness cannot measure text.** Robolectric lays text out with stub
    metrics — probed in `TextOverflowProbeTest`, 24,892 characters measure as a single
    260px line, about 0.6px per glyph — so nothing wraps and `hasVisualOverflow` is false
    however long the string is. Box layout, row positions, gesture effects and list shape
