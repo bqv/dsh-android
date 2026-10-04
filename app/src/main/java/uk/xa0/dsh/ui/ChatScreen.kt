@@ -109,6 +109,7 @@ import uk.xa0.dsh.diag.DiagLazyList
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.diag.diagDrag
 import uk.xa0.dsh.diag.diagOffset
+import uk.xa0.dsh.diag.diagRowGrowth
 import uk.xa0.dsh.model.GeneralSettings
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.DisplayRow
@@ -1028,7 +1029,11 @@ fun ChatScreen(vm: DshViewModel) {
                     // subagent through the header's `+N running` chip, not by
                     // wearing this row.
                     items(items = rows, key = { it.key }) { row ->
-                            Box(Modifier.widthIn(max = 920.dp)) {
+                            Box(
+                                Modifier
+                                    .widthIn(max = 920.dp)
+                                    .diagRowGrowth(row.key),
+                            ) {
                               // Text in a Compose row is not selectable until it is
                               // inside a SelectionContainer, and on the web every one
                               // of these rows is. It is per row rather than around the

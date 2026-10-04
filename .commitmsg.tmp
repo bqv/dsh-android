@@ -1,19 +1,27 @@
-Do not chase a tail taller than the window, and let the whole subagent bar go up
+Prove the expansion rule on the device, and mark the drawer's own restore
 
-Two things, one of them a lurch I introduced.
+The six things this goal is about now have one answer each, so this round is the two
+gaps in the evidence rather than more fixes.
 
-The growth correction is "how far the tail is cut off by", which stops being a small
-number the moment the tail row is taller than the window: it becomes the height of the
-whole message. The recorder caught it on the phone — corrections of 3625px, each one
-replacing every row on screen, the old oversize teleport back in a new form. The rule
-that prevented it was in the code this replaced and I dropped it: a message taller
-than the screen is not chased. The reader is left where they are, the answer carries on
-below the fold, and they read it at their own pace. A test grows the tail to twice the
-viewport and asserts the list does not move.
+A row that changes height now records it, with its key and the growth in pixels. The
+expansion rule — opening a row keeps its top edge and grows downward — is a property of
+a top-anchored list and `ScrollBehaviourTest` measures it (a 48px row grown to 200px
+moves its top edge by nothing, where the reversed list it replaced rose by exactly the
+192px it gained). What a harness cannot show is that the app is using that layout, so
+the row itself says when it grows, and the reader pairs that with the absence of any
+position record at the same instant.
 
-And the subagent bar's way up is now the whole seat rather than the words in it. The
-tap was on the title row, so it was as wide as the arrow and the name and one line
-tall; a tap a few pixels right of the title, in space belonging to nothing else, did
-nothing. The seat fills the bar's height and its full width.
+And the drawer's open-restore is marked. It was the last unattributed movement in the
+log: opening the drawer scrolls to the remembered row, which is asked for but looked
+exactly like the app moving a list on its own.
+
+The sweep this round, over 24,053 frames with the reader scrolling:
+  * 5.4% of frames over the 11ms budget, against 11.7% before, and 1.4% over 33ms;
+  * four unattributed movements, all benign — the drawer's roster growing as it first
+    lays out (kept=100, so no visible row changed) and two rows arriving;
+  * everything else named: 16 tail-rearm, 6 tail-rows, 3 tail-growth, 2 session-switch;
+  * 3 dead drags out of 36 heading for history, the rest tracking or flinging, and the
+    fifteen 'dead' drags pointing the other way are drags at the newest row, which
+    correctly do nothing.
 
 332 green.

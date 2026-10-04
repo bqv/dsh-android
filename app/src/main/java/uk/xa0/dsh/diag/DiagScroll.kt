@@ -8,6 +8,11 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -159,6 +164,33 @@ fun DiagFrames(surface: String = "app") {
                 deltas.clear()
                 windowStart = now
             }
+        }
+    }
+}
+
+/**
+ * Records a row changing height under its own key.
+ *
+ * This exists to make one claim provable on a device rather than in a harness: that
+ * opening a row keeps its top edge and grows downward. A top-anchored list does that
+ * by construction, and `ScrollBehaviourTest` measures it — a 48px row grown to 200px
+ * does not move its top edge, where the reversed list it replaced rose by exactly the
+ * 192px it gained. What a harness cannot show is that this is the layout the app
+ * actually uses. So a row that changes height says so, and the reader pairs that with
+ * the absence of any position record at the same instant.
+ */
+fun Modifier.diagRowGrowth(key: String): Modifier = composed {
+    var lastHeight by remember { mutableStateOf(0) }
+    Modifier.onSizeChanged { size ->
+        val previous = lastHeight
+        lastHeight = size.height
+        if (previous != 0 && previous != size.height) {
+            ScrollDiag.note(
+                "rowgrow",
+                "s" to "chat",
+                "key" to key,
+                "grew" to (size.height - previous),
+            )
         }
     }
 }

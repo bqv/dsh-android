@@ -341,7 +341,10 @@ fun SessionsDrawer(
         }
     }
     LaunchedEffect(drawerOpen) {
-        if (drawerOpen) listState.scrollToItem(drawerAt)
+        if (drawerOpen) {
+            ScrollDiag.prog("drawer", "open-restore")
+            listState.scrollToItem(drawerAt)
+        }
     }
 
     // The roster's order is held still while the drawer is open. It is refreshed
