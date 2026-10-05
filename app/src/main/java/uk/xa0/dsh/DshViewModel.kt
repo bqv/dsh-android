@@ -5124,7 +5124,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             "model catalog: groups=${catalog.optJSONArray("groups")?.length() ?: -1} " +
                 "models=${options.size} providers=${order.joinToString()}",
         )
-        val default = catalog.optJSONObject("default")
+        // The session's own choice outranks the catalog's `default`.
+        //
+        // `default` is the *global* agent default, not this session's selection — so a
+        // session switched to a local model still drew the chip from the default, and
+        // the display disagreed with the state: `lastUsed: deepseek-flash`,
+        // `next: dsh-local/gemma-4-26B` on the host, DeepSeek on the chip. The session's
+        // `modelSelection.next` projection is the state the next turn will actually use.
+        val sessionChoice = liveProjections?.obj("modelSelection")?.obj("next")
+        val default = sessionChoice ?: catalog.optJSONObject("default")
         val selected = default?.let { selection ->
             options.firstOrNull {
                 it.provider == selection.str("provider") && it.model == selection.str("model")
@@ -5156,6 +5164,23 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     .put("model", option.model)
                 chosenEffort?.let { request.put("reasoningEffort", it) }
                 client.rpc("session/selectModel", JSONObject().put("request", request))
+            }.onSuccess { value ->
+                // The host is the authority on what it selected, and it does not
+                // always select what was asked for — a provider it will not route, a
+                // model it resolves differently. The chip used to be set from the
+                // *request* and never corrected, so picking a model the host declined
+                // left the display claiming it while the turns answered with another.
+                val chosen = value.obj("selected") ?: return@onSuccess
+                val provider = chosen.str("provider")
+                val model = chosen.str("model")
+                val resolved = _ui.value.models.firstOrNull {
+                    it.provider == provider && it.model == model
+                }
+                _ui.value = _ui.value.copy(
+                    selectedModel = resolved ?: option,
+                    selectedEffort = chosen.str("reasoningEffort").takeIf { it.isNotEmpty() }
+                        ?: chosenEffort,
+                )
             }.onFailure { error -> showFailure(error, "session/selectModel") }
         }
     }
