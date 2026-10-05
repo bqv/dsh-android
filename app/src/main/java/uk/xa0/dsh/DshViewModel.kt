@@ -36,6 +36,7 @@ import uk.xa0.dsh.model.MessageAttachment
 import uk.xa0.dsh.model.PendingSessionTarget
 import uk.xa0.dsh.model.SessionIntentPlan
 import uk.xa0.dsh.model.subagentTreeIds
+import uk.xa0.dsh.model.staleLiveRunning
 import uk.xa0.dsh.model.warrantsIdleAlert
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
@@ -3896,14 +3897,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * button back to Send mid-turn.
      */
     private fun reconcileLiveRunning(list: List<SessionItem>) {
-        val current = _ui.value.currentSessionId
-        val quiet = System.currentTimeMillis() - lastEventAt > LIVE_QUIET_MS
-        val stale = liveRunning.filter { id ->
-            val item = list.firstOrNull { it.id == id } ?: return@filter true
-            if (item.isSubagent || item.running) return@filter false
-            if (id == current && !quiet) return@filter false
-            true
-        }
+        val stale = staleLiveRunning(
+            live = liveRunning,
+            list = list,
+            current = _ui.value.currentSessionId,
+            quiet = System.currentTimeMillis() - lastEventAt > LIVE_QUIET_MS,
+        )
         if (stale.isEmpty()) return
         stale.forEach { liveRunning.remove(it) }
         Log.d(TAG, "cleared stale live-running: $stale")

@@ -1654,9 +1654,15 @@ private fun LineageSheet(
     onOpen: (String) -> Unit,
 ) {
     val colors = DshTheme.colors
-    val rows = remember(sessions, rootId) {
-        flattenLineage(sessions, rootId).filter { it.session.running }
-    }
+    val all = remember(sessions, rootId) { flattenLineage(sessions, rootId) }
+    val rows = remember(all) { all.filter { it.session.running } }
+    // Logged while "nothing is running" is being chased: the chip, the sheet and the
+    // roster each answer a different question, and this says which one is empty.
+    android.util.Log.d(
+        "DshView",
+        "lineage root=$rootId sessions=${sessions.size} descendants=${all.size} " +
+            "running=${rows.size}",
+    )
     Column(
         Modifier
             .fillMaxWidth()
