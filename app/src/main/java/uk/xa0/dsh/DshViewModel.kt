@@ -5116,6 +5116,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        // Logged while "only DeepSeek is listed" is being chased: the host answers this
+        // call with five provider groups, so if fewer arrive here the loss is between
+        // the socket and this loop rather than anywhere the sheet can see.
+        Log.d(
+            TAG,
+            "model catalog: groups=${catalog.optJSONArray("groups")?.length() ?: -1} " +
+                "models=${options.size} providers=${order.joinToString()}",
+        )
         val default = catalog.optJSONObject("default")
         val selected = default?.let { selection ->
             options.firstOrNull {
