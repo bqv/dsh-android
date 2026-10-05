@@ -485,8 +485,13 @@ fun ChatScreen(vm: DshViewModel) {
         }
     }
 
-    val attachLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) vm.addAttachment(uri)
+    // `GetMultipleContents`, not `GetContent`: the picker offered one file at a time
+    // while the share sheet beside it had always taken several, and the view model
+    // stages one uri at a time regardless — the loop is the whole difference.
+    val attachLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetMultipleContents(),
+    ) { uris ->
+        uris.forEach { vm.addAttachment(it) }
     }
 
     /**
