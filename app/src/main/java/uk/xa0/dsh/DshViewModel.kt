@@ -2686,6 +2686,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     if (block != null) {
                         liveProjections = block
                         applySessionProjections(block)
+                        refreshSelectedModel()
                         // The subagent catalog lives in these projections, and this is
                         // where they arrive. The rebuild used to happen only at
                         // `openSession`, which runs *before* the baseline — so it read an
@@ -5145,6 +5146,24 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             selectedEffort = default?.str("reasoningEffort")?.takeIf { it.isNotEmpty() }
                 ?: selected?.defaultEffort,
         )
+    }
+
+    /**
+     * Points the model chip at the session on screen.
+     *
+     * `loadModels` runs once, at connect, so reading the selection there alone left the
+     * chip on whatever the *first* session had and carrying it across every switch —
+     * the model "persisted across sessions" instead of being loaded from each one's own
+     * state. This runs wherever the open session's projections land.
+     */
+    private fun refreshSelectedModel() {
+        val choice = liveProjections?.obj("modelSelection")?.obj("next") ?: return
+        val option = _ui.value.models.firstOrNull {
+            it.provider == choice.str("provider") && it.model == choice.str("model")
+        } ?: return
+        val effort = choice.str("reasoningEffort").takeIf { it.isNotEmpty() } ?: option.defaultEffort
+        if (_ui.value.selectedModel == option && _ui.value.selectedEffort == effort) return
+        _ui.value = _ui.value.copy(selectedModel = option, selectedEffort = effort)
     }
 
     /**
