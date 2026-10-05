@@ -4363,7 +4363,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                         when (value.optString("type")) {
                             "snapshot" -> {
                                 reducer.applySnapshot(value)
-                                applySessionProjections(value.obj("projections")?.obj("values"))
+                                // The snapshot is the *only* place a session switch
+                                // delivers projections: the control baseline is once per
+                                // connection, so anything read only from there keeps the
+                                // previous session's values forever. That was the model
+                                // chip carrying across switches, and the same shape would
+                                // leave the subagent catalog stale on a switch too.
+                                value.obj("projections")?.obj("values")?.let { block ->
+                                    liveProjections = block
+                                    applySessionProjections(block)
+                                    refreshSelectedModel()
+                                    refreshSubagentCatalog(sessionId)
+                                }
                                 bumpTranscript()
                                 Log.d(TAG, "follow snapshot: ${value.optJSONArray("records")?.length() ?: 0} records, cursor=${value.optInt("cursor")}")
                             }
