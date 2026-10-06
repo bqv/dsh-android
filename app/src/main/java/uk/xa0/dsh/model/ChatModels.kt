@@ -198,3 +198,18 @@ data class SessionHeader(
     val agentPreset: String?,
     val parentSession: String?,
 )
+
+/**
+ * Where a provider sorts in the model picker.
+ *
+ * Mirrors the web client's `orderModelProviders` (`dsh-client-ui-model-selection`): the
+ * signed-in DeepSeek account first, the official provider second, everything else after —
+ * and since the sort is stable, the rest keep the order the catalog returned them in.
+ * The app previously used the host's settings order, so the same catalog came out in a
+ * different sequence from the desktop.
+ */
+fun providerRank(id: String): Int = when (id) {
+    "deepseek-account" -> 0
+    "deepseek-official" -> 1
+    else -> 2
+}

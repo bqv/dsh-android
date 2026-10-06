@@ -29,6 +29,7 @@ import uk.xa0.dsh.data.DshConfig
 import uk.xa0.dsh.data.DraftStore
 import uk.xa0.dsh.data.ThemeMode
 import uk.xa0.dsh.model.AccountBalance
+import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.JobsMarker
 import uk.xa0.dsh.model.LiveAttempt
@@ -37,6 +38,8 @@ import uk.xa0.dsh.model.PendingSessionTarget
 import uk.xa0.dsh.model.SessionIntentPlan
 import uk.xa0.dsh.model.subagentTreeIds
 import uk.xa0.dsh.model.staleLiveRunning
+import uk.xa0.dsh.model.runningAfter
+import uk.xa0.dsh.model.providerRank
 import uk.xa0.dsh.model.warrantsIdleAlert
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
@@ -716,6 +719,15 @@ data class UiState(
 @OptIn(FlowPreview::class)
 /** Live running sessions reported by the host, shared with [SessionItem.withLiveRunning]. */
 private val liveRunningIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+/**
+ * Ids a live frame has explicitly reported as stopped.
+ *
+ * Kept apart from [liveRunningIds] because "a live frame said stopped" and "no frame has
+ * mentioned it" are different facts, and only the first may end a subagent — the roster
+ * stops mentioning a child the moment it is not attached, without anything having ended.
+ */
+private val stoppedLiveIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
 class DshViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -1835,6 +1847,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             revision = _terminal.value.revision + 1,
         )
     }
+    /**
+     * Folds a fresh roster sample into the rows the UI already holds.
+     *
+     * The previous row is what lets a subagent's running survive a sample that has
+     * simply stopped mentioning it — see [runningAfter]. Ordinary sessions keep the
+     * list's word.
+     */
+    private fun mergeRoster(list: List<SessionItem>): List<SessionItem> {
+        val previous = _ui.value.sessions.associateBy { it.id }
+        return list.map { it.withLiveRunning(previous[it.id]) }
+    }
+
     /** Sessions the host says are running right now, from `api-session/status`. */
     private val liveRunning: MutableSet<String> = liveRunningIds
     /** Client-side fallback for the running clock when `turn/start` is off-window. */
@@ -1943,6 +1967,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // the agent hung waiting on a client that would never reply. The centre
         // owns the single subscription and relays the one signal the UI needs.
         app.attention.onLiveStatus = { sessionId, running -> applyLiveStatus(sessionId, running) }
+        // A provider registering or disappearing changes the catalog, and the app has no
+        // other way to hear about it: the list is fetched per connect. The host forwards
+        // this event for exactly that purpose and the web refreshes on it, so a local
+        // router that comes up is not invisible until the next reconnect.
+        app.attention.onAdaptersUpdated = {
+            viewModelScope.launch {
+                loadModels()
+                refreshSelectedModel()
+            }
+        }
         // The notification copy names the subject; only the client's session list
         // knows whether a waterfall came from a subagent.
         app.attention.isSubagent = { id ->
@@ -2376,7 +2410,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             ensureControlStream()
             reopenFollowIfStopped()
             runCatching { fetchSessions() }.onSuccess { list ->
-                _ui.value = _ui.value.copy(sessions = list.map { it.withLiveRunning() })
+                _ui.value = _ui.value.copy(sessions = mergeRoster(list))
             }
         }
     }
@@ -2486,7 +2520,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 runCatching { fetchSessions() }
                     .onFailure { if (it is DshAuthException) onAuthFailure("session/list", it) }
                     .onSuccess { list ->
-                        _ui.value = _ui.value.copy(sessions = list.map { it.withLiveRunning() })
+                        _ui.value = _ui.value.copy(sessions = mergeRoster(list))
                         warnOnMissingMembers(list)
                         syncRunningFromList(list)
                     }
@@ -3691,7 +3725,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             val sessions = runCatching { fetchSessions() }
             sessions.onSuccess { list ->
                 _ui.value = _ui.value.copy(
-                    sessions = list.map { it.withLiveRunning() },
+                    sessions = mergeRoster(list),
                     sessionsLoading = false,
                 )
                 warnOnMissingMembers(list)
@@ -3728,7 +3762,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             if (elapsed < REFRESH_MIN_SPIN_MS) delay(REFRESH_MIN_SPIN_MS - elapsed)
             sessions.onSuccess { list ->
                 _ui.value = _ui.value.copy(
-                    sessions = list.map { it.withLiveRunning() },
+                    sessions = mergeRoster(list),
                     sessionsLoading = false,
                 )
                 warnOnMissingMembers(list)
@@ -3835,7 +3869,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             sessions.onFailure { error ->
                 if (error is DshAuthException) onAuthFailure("session/list", error)
             }.onSuccess { list ->
-                _ui.value = _ui.value.copy(sessions = list.map { it.withLiveRunning() })
+                _ui.value = _ui.value.copy(sessions = mergeRoster(list))
                 warnOnMissingMembers(list)
                 syncRunningFromList(list)
             }
@@ -3866,7 +3900,20 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * of the "finished while you were elsewhere" dots.
      */
     private fun applyLiveStatus(sessionId: String, running: Boolean) {
-        if (running) liveRunning.add(sessionId) else liveRunning.remove(sessionId)
+        // The *only* live running signal for a child — the roster reports one as running
+        // only while it is attached — so whether it arrives at all is the first question
+        // worth answering, and it was the one thing nothing recorded. In the diag file
+        // rather than logcat: the test phone's ROM hides third-party app logs.
+        ScrollDiag.note("livestatus", "id" to sessionId, "running" to running)
+        if (running) {
+            liveRunning.add(sessionId)
+            stoppedLiveIds.remove(sessionId)
+        } else {
+            // Remembered, because "a live frame said stopped" and "no frame has mentioned
+            // it" are different facts, and only the first may end a subagent.
+            liveRunning.remove(sessionId)
+            stoppedLiveIds.add(sessionId)
+        }
         // A frame that beats a catalog read's settle is newer than the sample that
         // read carries; recording it here is what stops the response from
         // reverting it (`manager.ts:367-372`).
@@ -5150,9 +5197,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 it.provider == selection.str("provider") && it.model == selection.str("model")
             }
         }
+        // Same order as the desktop: stable, so everything outside the two DeepSeek
+        // providers keeps the catalog's own sequence.
+        val orderedOptions = options.sortedBy { providerRank(it.provider) }
+        val orderedProviders = order.sortedBy { providerRank(it) }
         _ui.value = _ui.value.copy(
-            models = options,
-            providerOrder = order,
+            models = orderedOptions,
+            providerOrder = orderedProviders,
             selectedModel = selected,
             selectedEffort = default?.str("reasoningEffort")?.takeIf { it.isNotEmpty() }
                 ?: selected?.defaultEffort,
@@ -6057,8 +6108,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
  * from. The event stream and the parent's `subagents/list` catalog are the two
  * sources that can, and this reads the fold they share.
  */
-private fun SessionItem.withLiveRunning(): SessionItem =
-    if (running) this else copy(running = id in liveRunningIds)
+private fun SessionItem.withLiveRunning(previous: SessionItem? = null): SessionItem =
+    copy(
+        running = runningAfter(
+            sampleRunning = running,
+            isSubagent = isSubagent,
+            previousRunning = previous?.running == true,
+            live = id in liveRunningIds,
+            stopped = id in stoppedLiveIds,
+        ),
+    )
 
 /**
  * Overlays one `subagents/list` child row's label and mode onto a roster row.

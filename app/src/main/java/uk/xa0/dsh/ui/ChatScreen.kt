@@ -1661,12 +1661,15 @@ private fun LineageSheet(
     val colors = DshTheme.colors
     val all = remember(sessions, rootId) { flattenLineage(sessions, rootId) }
     val rows = remember(all) { all.filter { it.session.running } }
-    // Logged while "nothing is running" is being chased: the chip, the sheet and the
-    // roster each answer a different question, and this says which one is empty.
-    android.util.Log.d(
-        "DshView",
-        "lineage root=$rootId sessions=${sessions.size} descendants=${all.size} " +
-            "running=${rows.size}",
+    // The chip, the sheet and the roster each answer a different question, and this says
+    // which one is empty. In the diag file rather than logcat: the test phone's ROM hides
+    // app logs.
+    uk.xa0.dsh.diag.ScrollDiag.note(
+        "lineage",
+        "root" to rootId,
+        "sessions" to sessions.size,
+        "descendants" to all.size,
+        "running" to rows.size,
     )
     Column(
         Modifier

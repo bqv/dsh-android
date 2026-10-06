@@ -224,6 +224,9 @@ class AttentionCenter(private val context: Context) {
 
     // ---------------------------------------------------------------- inbound
 
+    /** Called when the host's LLM adapters change, so the catalog can be re-read. */
+    var onAdaptersUpdated: (() -> Unit)? = null
+
     private fun handleEmit(value: JSONObject) {
         if (value.str("type") != "emit") return
         when (value.str("event")) {
@@ -232,6 +235,13 @@ class AttentionCenter(private val context: Context) {
                 val sessionId = args.optString(0)
                 if (sessionId.isNotEmpty()) onLiveStatus?.invoke(sessionId, args.optBoolean(1))
             }
+
+            // The provider set changed: a local router started or stopped, an account
+            // signed in, a plugin loaded. The host forwards this precisely so a client
+            // can re-read the catalog, and the web refreshes on it. Without it the app
+            // shows whatever was true at connect — a router that came up afterwards is
+            // simply absent until the next reconnect.
+            "llm/adapters-updated" -> onAdaptersUpdated?.invoke()
 
             "api-session/error" -> {
                 val args = value.arr("args")

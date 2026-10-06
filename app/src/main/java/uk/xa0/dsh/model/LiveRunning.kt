@@ -36,3 +36,33 @@ fun staleLiveRunning(
         else -> true
     }
 }.toSet()
+
+/**
+ * The running flag one roster row should carry, given everything already known.
+ *
+ * `session/list` reports a subagent as running **only while it is attached**, and `false`
+ * the moment it is not — so the roster can promote a child to running and then take it
+ * away again a second later, without anything having stopped. Measured on the device:
+ * a parent with three live children showed `running=3` and then `running=0` 105ms later,
+ * the tree still holding all three.
+ *
+ * The list stays authoritative for an ordinary session, which is what makes a "stopped"
+ * that arrived while the app was not listening visible at all. For a subagent it may only
+ * ever add: the previous answer stands until a live frame contradicts it.
+ */
+fun runningAfter(
+    sampleRunning: Boolean,
+    isSubagent: Boolean,
+    previousRunning: Boolean,
+    live: Boolean,
+    stopped: Boolean,
+): Boolean = when {
+    sampleRunning -> true
+    // Ahead of [live]: a frame that explicitly says *stopped* is the more specific fact,
+    // and it is the only thing that may end a subagent. The two sets are exclusive by
+    // construction, so this order only matters if that ever stops being true.
+    stopped -> false
+    live -> true
+    !isSubagent -> false
+    else -> previousRunning
+}
