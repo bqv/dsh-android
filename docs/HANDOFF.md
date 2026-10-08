@@ -197,6 +197,33 @@ editing the live copy. There is no install step to forget.
     `directoryPicker/createDirectory` among them. `DshClient.rpcRaw` returns
     `result.value` untouched; `rpc` casts to `JSONObject` and is the wrong door for
     those.
+15. **`session/list`'s `running` is an *attachment* fact, not a liveness fact — the
+    running state of a child is in its `subagentTiming` projection.** The host builds a
+    row with `running: ctx.agents.get(id)?.status === 'running'` for a session it has
+    attached, and `summarizeCold` hard-codes `running: false, agentAvailable: false` for
+    every one it has not (`dsh-api-session-controller/lib/index.js`, `summaryFor` /
+    `summarizeCold`). Both carry `projections`, and for a descriptor-backed child
+    `subagentTiming.active` is present exactly while its own journal has a `turn/start`
+    with no `turn/end` — so a cold child that is still working reads `running: false,
+    active: {since: <the open turn/start's own time>, through: <last event time, kept
+    fresh>}`. Measured 2026-10-09 on the running host: of 773 rows carrying
+    `subagentTiming`, `running: true & active: null` and `running: false & active:
+    non-null` were both **0**; and a child watched across a real transition moved from
+    `running: true, active.since = 1791474924448` to `running: false, settledMs:
+    1691625, lastTurnCompleted: true` in the same moment its journal gained
+    `turn/end completed` at 1791476616073 (its unmatched `turn/start` was at exactly
+    1791474924448).
+16. **Only `session.v4` records get the full projection fold.** 773 session
+    directories hold `session.v4.jsonl.zstd` and exactly those 773 roster rows carried
+    `subagentTiming`; the 1,126 with a legacy `session.v3.jsonl.zstd` fold to `{title}`
+    alone. So "the roster can always prove a child is running" is true for current
+    records and not for legacy ones, where a live `api-session/status` frame is still the
+    only evidence. `RunningBook` reads both and needs neither to be complete.
+17. **`subagentCatalog` carries no activity, and `subagents/list` does not exist.**
+    The projection is identity only (`id`, `createdAt`, `mode`, `label`), so any fold
+    that reads a running state out of it is inventing one — an `activity == ""` default
+    once wiped the row of every child on every catalog rebuild. `subagents/list` 404s on
+    0.2.0.
 
 15. **An mDNS answer is not all in the answer section.** Android answers a
     `_adb-tls-connect._tcp` PTR query with the PTR under *answers* and the SRV,

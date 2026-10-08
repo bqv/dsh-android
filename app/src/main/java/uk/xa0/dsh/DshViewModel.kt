@@ -37,9 +37,10 @@ import uk.xa0.dsh.model.MessageAttachment
 import uk.xa0.dsh.model.PendingSessionTarget
 import uk.xa0.dsh.model.SessionIntentPlan
 import uk.xa0.dsh.model.subagentTreeIds
-import uk.xa0.dsh.model.staleLiveRunning
-import uk.xa0.dsh.model.runningAfter
+import uk.xa0.dsh.model.RunningBook
+import uk.xa0.dsh.model.durableRunningOf
 import uk.xa0.dsh.model.providerRank
+import uk.xa0.dsh.model.withRunning
 import uk.xa0.dsh.model.warrantsIdleAlert
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
@@ -54,8 +55,6 @@ import uk.xa0.dsh.model.SessionTarget
 import uk.xa0.dsh.model.SessionTargetCandidate
 import uk.xa0.dsh.model.SessionTargetPlan
 import uk.xa0.dsh.model.SessionTargets
-import uk.xa0.dsh.model.SUBAGENT_ACTIVITY_INACTIVE
-import uk.xa0.dsh.model.SUBAGENT_ACTIVITY_RUNNING
 import uk.xa0.dsh.model.SUBAGENT_ATTACHMENT_INVALID
 import uk.xa0.dsh.model.SUBAGENT_ATTACHMENT_REFUSAL
 import uk.xa0.dsh.model.SUBAGENT_FILE_UNSUPPORTED
@@ -77,7 +76,6 @@ import uk.xa0.dsh.model.parseSessionSearchResults
 import uk.xa0.dsh.model.parseSessionStats
 import uk.xa0.dsh.model.parseHostSettings
 import uk.xa0.dsh.model.permissionCommandMode
-import uk.xa0.dsh.model.parseSubagentCatalog
 import uk.xa0.dsh.model.parseSubagentCatalogProjection
 import uk.xa0.dsh.model.str
 import uk.xa0.dsh.model.subagentInterruptArgs
@@ -152,6 +150,14 @@ data class SessionItem(
     val title: String,
     val cwd: String?,
     val updatedAt: Long,
+    /**
+     * Whether this session's agent is working now.
+     *
+     * Derived, never sampled: it is `RunningBook.running(id)` and nothing else, folded
+     * in by `withRunning` at the two places a row is built or repainted. Nothing may
+     * OR a live frame into it at a display site — that is what let the drawer, the
+     * header chip and the lineage sheet each answer the same question differently.
+     */
     val running: Boolean,
     val isSubagent: Boolean,
     /** A provisional session with nothing in it yet; the host sends `title: null`. */
@@ -363,7 +369,7 @@ const val PENDING_DRAFT_KEY = "pending"
 private const val SEARCH_DEBOUNCE_MS = 250L
 
 /**
- * The pause before a `subagents/list` pull that a frame asked for.
+ * The pause before a `subagentCatalog` projection rebuild that a frame asked for.
  *
  * Deliberately the same trailing-edge shape and 500ms as `refreshSessionsSoon`:
  * membership frames arrive in bursts (a parent spawning its children one after
@@ -376,9 +382,12 @@ private const val CATALOG_DEBOUNCE_MS = 500L
 
 /**
  * How long after the last live frame the host's own bookkeeping is trusted over
- * a fold. Shared by [DshViewModel.reconcileLiveRunning] and the catalog fold: a
- * read sampled a beat before the host flushed a child's stop frame must not
- * blink the open session's Stop button back to Send mid-turn.
+ * a fold, for the *composer* only.
+ *
+ * A roster read sampled a beat before the host flushed the open session's own stop
+ * frame must not blink its Stop button back to Send mid-turn. Rows do not need this
+ * grace any more — [RunningBook] orders a frame against the pull's cut instead of
+ * guessing from a clock — so this guards `UiState.running` and nothing else.
  */
 private const val LIVE_QUIET_MS = 1500L
 
@@ -531,6 +540,13 @@ data class UiState(
      * land, which a bare String could not.
      */
     val draftRestore: DraftRestore? = null,
+    /**
+     * Whether the session on screen is working — what the composer's Stop button reads.
+     *
+     * A different fact from [SessionItem.running]'s row dot: this one also carries a
+     * send's optimistic echo, which no roster read can know about yet. Its roster half
+     * is still taken from the open row, so the two cannot contradict each other.
+     */
     val running: Boolean = false,
     /**
      * The journal has closed this session's own turn, whatever the agent registry
@@ -539,18 +555,17 @@ data class UiState(
      */
     val ownTurnClosed: Boolean = false,
     /**
-     * `parentAvailable` for the open addressed child, from `subagents/list`.
+     * `parentAvailable` for the open addressed child, from its parent's catalog.
      * Null for every ordinary session and until that read lands — the composer
      * gate treats unknown as available on purpose, so the composer can never
      * flicker into a read-only frame it would have to take back.
      */
     val subagentParentAvailable: Boolean? = null,
     /**
-     * The `subagents/list` catalogs this client holds, keyed by the parent they
-     * describe. Each is the host's own direct-child answer for that parent: the
-     * durable rows, their modes and labels, and the live Agent status the list
-     * summary is not a dependable source for — it serves any session the
-     * controller has not attached as cold, and that reads `running: false`.
+     * The subagent catalogs this client holds, keyed by the parent they describe.
+     * Each is the host's own direct-child projection for that parent: identity only —
+     * the durable rows, their modes and labels. It carries no activity, and no reader
+     * may infer any; a child's running state lives in `RunningBook` alone.
      */
     val subagentCatalogs: Map<String, SubagentCatalog> = emptyMap(),
     val models: List<ModelOption> = emptyList(),
@@ -717,18 +732,6 @@ data class UiState(
  * Compose layer stays free of protocol knowledge.
  */
 @OptIn(FlowPreview::class)
-/** Live running sessions reported by the host, shared with [SessionItem.withLiveRunning]. */
-private val liveRunningIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-
-/**
- * Ids a live frame has explicitly reported as stopped.
- *
- * Kept apart from [liveRunningIds] because "a live frame said stopped" and "no frame has
- * mentioned it" are different facts, and only the first may end a subagent — the roster
- * stops mentioning a child the moment it is not attached, without anything having ended.
- */
-private val stoppedLiveIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-
 class DshViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application as DshApplication
@@ -835,8 +838,8 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private var historyJob: Job? = null
 
     /**
-     * The `subagents/list` reads behind both the composer's read-only gate and the
-     * per-child activity the roster cannot report. Kept apart from [historyJob]
+     * The parent-catalog rebuilds behind both the composer's read-only gate and the
+     * labels a lineage row is named with. Kept apart from [historyJob]
      * because opening a child must not cancel its own history pager (or vice
      * versa).
      *
@@ -851,19 +854,19 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     /** Keys of the debounced pulls, so closing a disclosure can drop one. */
     private val subagentCatalogDebounce = HashMap<String, Job>()
     /**
+     * The single authority on which sessions are running.
+     *
+     * Every row's `running` flag is this object's answer and nothing else — see
+     * [RunningBook] for why a roster cut and a live frame can be ordered against one
+     * another rather than guessed at, and for what each of them actually proves.
+     */
+    private val runningBook = RunningBook()
+    /**
      * Parents whose catalog a disclosure is currently showing, the app's
      * `openCatalogs` (`manager.ts:438`). Membership under one of these is the
      * change a reader would actually see, so only these are re-read on a frame.
      */
     private val subagentCatalogOpen = HashSet<String>()
-    /**
-     * Child activity seen on a live frame while a catalog read was in flight.
-     *
-     * The sample a response carries predates that frame, so folding it raw would
-     * let it un-run a child the user just watched start (or re-run one that
-     * stopped) — the web's `activityRows` (`:367-372`, `withCatalogMutations`).
-     */
-    private val subagentCatalogActivity = HashMap<String, Boolean>()
     /**
      * child id → durable parent id, from the last roster pull.
      *
@@ -1848,19 +1851,73 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
     /**
-     * Folds a fresh roster sample into the rows the UI already holds.
+     * Folds a fresh roster sample into the rows the UI holds.
      *
-     * The previous row is what lets a subagent's running survive a sample that has
-     * simply stopped mentioning it — see [runningAfter]. Ordinary sessions keep the
-     * list's word.
+     * A one-line fold into [RunningBook]'s answer, which is the point: there is no
+     * previous row to consult and no second opinion to reconcile, because the book is
+     * the only thing that decides.
      */
-    private fun mergeRoster(list: List<SessionItem>): List<SessionItem> {
-        val previous = _ui.value.sessions.associateBy { it.id }
-        return list.map { it.withLiveRunning(previous[it.id]) }
+    private fun mergeRoster(list: List<SessionItem>): List<SessionItem> =
+        list.map { it.withRunning(runningBook) }
+
+    /** The last running summary written to the diag file, so an unchanged pull is silent. */
+    private var lastRunningSummary: String? = null
+
+    /**
+     * Records what one pull did to running state, for a device to read back.
+     *
+     * The bug this replaces was only ever diagnosed from a diag file, and what it looked
+     * like was a *sequence*: a count that appeared and then vanished. So the counts, the
+     * ids behind them and every flag that moved are written here, once per change rather
+     * than once per pull.
+     *
+     * The load-bearing field is `held`: rows the book answers `true` for while the pull's
+     * own `running` said `false`. That is the state the previous implementation could not
+     * represent — it had no way to keep a child the host served cold — and `heldActive`
+     * splits it by which evidence did the holding: `subagentTiming.active` (the child's
+     * own open turn, invisible to `running`) or a live status frame that outranks this
+     * cut. `wire` and `active` are the pull's raw material, so a reader can check the
+     * arithmetic rather than trust the summary.
+     */
+    private fun noteRunningPull(wire: Map<String, Boolean>, active: Set<String>) {
+        val before = HashMap<String, Boolean>(_ui.value.sessions.size + 8)
+        for (row in _ui.value.sessions) before[row.id] = row.running
+        val ids = HashSet<String>(wire.size + 8)
+        ids.addAll(wire.keys)
+        ids.addAll(before.keys)
+        var running = 0
+        var held = 0
+        var heldActive = 0
+        val heldIds = ArrayList<String>(4)
+        val changed = ArrayList<String>(4)
+        for (id in ids) {
+            val was = before[id]
+            val answer = runningBook.running(id)
+            if (was != null && was != answer) changed += id
+            if (!answer) continue
+            running++
+            if (wire[id] == true) continue
+            held++
+            if (id in active) heldActive++
+            heldIds += id
+        }
+        val summary = "${wire.size}:$running:$held:$heldActive:${changed.size}"
+        if (summary == lastRunningSummary) return
+        lastRunningSummary = summary
+        ScrollDiag.note(
+            "roster",
+            "rows" to wire.size,
+            "running" to running,
+            "wire" to wire.count { it.value },
+            "active" to active.size,
+            "held" to held,
+            "heldActive" to heldActive,
+            "changed" to changed.size,
+            "ids" to heldIds.take(6).joinToString(","),
+            "changedIds" to changed.take(6).joinToString(","),
+        )
     }
 
-    /** Sessions the host says are running right now, from `api-session/status`. */
-    private val liveRunning: MutableSet<String> = liveRunningIds
     /** Client-side fallback for the running clock when `turn/start` is off-window. */
     private var runningSince: Long? = null
     /** Latest pending queue per session, from the host-wide control stream. */
@@ -2522,10 +2579,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     .onSuccess { list ->
                         _ui.value = _ui.value.copy(sessions = mergeRoster(list))
                         warnOnMissingMembers(list)
-                        syncRunningFromList(list)
+                        publishRosterRunning()
                     }
-                // The roster cannot correct a subagent's activity, so the catalogs
-                // are what a resume repaints them from (`manager.ts:796-798`).
+                // Identity, not activity: a resume repaints the labels and modes the
+                // lineage rows are named with, which the follow snapshot re-delivers
+                // (`manager.ts:796-798`). Running state came from the pull above.
                 refreshWatchedCatalogs()
                 Log.d(TAG, "resume: streams re-subscribed")
             } finally {
@@ -3578,6 +3636,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun fetchSessions(): List<SessionItem> {
+        // Taken *before* the request goes out, so a live frame that lands while this
+        // read is in flight is stamped as possibly newer than the cut it answers — the
+        // roster read carries `running` and `subagentTiming` as of the host's own
+        // moment, which the answer may predate. See [RunningBook].
+        val pull = runningBook.beginPull()
         val value = client.rpc("session/list", JSONObject().put("_request", JSONObject()))
         val items = value.optJSONArray("items") ?: JSONArray()
         // A subagent's own stored title is its opening prompt ("You are ..."), which
@@ -3597,6 +3660,29 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val result = ArrayList<SessionItem>(items.length())
+        // The durable answer this pull proves, per id: the host's live-Agent sample,
+        // or an open turn in the session's own journal. Both live in this row — see
+        // [durableRunningOf]. Collected here because this is the only place the wire
+        // shape is known; `wire` and `active` are kept apart from the answer so the
+        // diag record can say which of the two carried it (`noteRunningPull`).
+        val durable = HashMap<String, Boolean>(items.length())
+        val wire = HashMap<String, Boolean>(items.length())
+        val active = HashSet<String>(items.length() / 8)
+        for (i in 0 until items.length()) {
+            val item = items.optJSONObject(i) ?: continue
+            val id = item.str("sessionId")
+            if (id.isEmpty()) continue
+            durable[id] = durableRunningOf(item)
+            wire[id] = item.optBoolean("running")
+            if (item.obj("projections")?.obj("values")?.obj("subagentTiming")?.obj("active") != null) {
+                active += id
+            }
+        }
+        // Applied before the rows are built, so `withRunning` below reads this cut and
+        // not the previous one.
+        runningBook.applyPull(pull, durable)
+        noteRunningPull(wire, active)
+
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
             val projections = item.obj("projections")?.obj("values")
@@ -3635,6 +3721,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 ),
                 cwd = cwd,
                 updatedAt = item.optLong("updatedAt"),
+                // The raw wire sample is kept only as `fetchSessions`'s own record of
+                // what the host said; every row the UI is handed has already been
+                // folded through the book by [mergeRoster].
                 running = item.optBoolean("running"),
                 isSubagent = item.str("origin") == "subagent",
                 blank = blank,
@@ -3709,11 +3798,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * Re-reads every watched catalog, the app's half of `handleConnected`
      * (`manager.ts:789-799`).
      *
-     * A frozen process collected no frames, so the sample it holds is the only
-     * thing still claiming a child is running — and the roster pull that precedes
-     * this cannot correct a subagent ([reconcileLiveRunning] exempts them). This is
-     * the read that can, which is why a resume owes it rather than waiting for the
-     * child's next frame.
+     * This is about *identity*, not activity: the roster pull that precedes it is what
+     * carries running state now (see [RunningBook]), but the label and mode a disclosure
+     * names its rows with come from the projection the follow snapshot re-delivers, so a
+     * resume repaints them from here rather than waiting for a frame that may never come.
      */
     private fun refreshWatchedCatalogs() {
         for (parent in watchedCatalogParents()) refreshSubagentCatalog(parent)
@@ -3729,7 +3817,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     sessionsLoading = false,
                 )
                 warnOnMissingMembers(list)
-                syncRunningFromList(list)
+                publishRosterRunning()
             }.onFailure { error ->
                 _ui.value = _ui.value.copy(sessionsLoading = false)
                 if (error is DshAuthException) onAuthFailure("session/list", error)
@@ -3766,7 +3854,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     sessionsLoading = false,
                 )
                 warnOnMissingMembers(list)
-                syncRunningFromList(list)
+                publishRosterRunning()
             }.onFailure { error ->
                 _ui.value = _ui.value.copy(sessionsLoading = false)
                 // The pull is a direct user action, so a genuine failure says so
@@ -3871,7 +3959,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess { list ->
                 _ui.value = _ui.value.copy(sessions = mergeRoster(list))
                 warnOnMissingMembers(list)
-                syncRunningFromList(list)
+                publishRosterRunning()
             }
         }
     }
@@ -3890,83 +3978,70 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Applies one live `api-session/status` frame to the row it names.
+     * Applies one live `api-session/status` frame.
      *
-     * `session/list` is the authority for ordinary sessions, and for a subagent it
-     * is one only while the child is attached — an unattached child is served cold
-     * and reads `running: false` (`api-session-controller/list.ts:152`). So a
-     * child's activity arrives both from this event and from [applyCatalogActivity].
-     * Rows are patched in place; the list refresh keeps ownership of ordering and
-     * of the "finished while you were elsewhere" dots.
+     * The frame is handed to [runningBook], which owns the ordering rule that decides
+     * whether it outranks the roster cut already held — the frame itself is never
+     * applied to a row directly, because a second path that patches `running` is a
+     * second answer to the same question. This host emits the frame only on an
+     * `agent/status` *transition*, so it can never be the whole truth: a client that
+     * connects while a child is already running sees no "started" frame at all, and
+     * the child's own journal (via the roster's `subagentTiming`) is what covers that.
      */
     private fun applyLiveStatus(sessionId: String, running: Boolean) {
-        // The *only* live running signal for a child — the roster reports one as running
-        // only while it is attached — so whether it arrives at all is the first question
-        // worth answering, and it was the one thing nothing recorded. In the diag file
-        // rather than logcat: the test phone's ROM hides third-party app logs.
+        // In the diag file rather than logcat: the test phone's ROM hides third-party
+        // app logs, and "did the frame arrive at all" is the first question worth
+        // answering about a signal that is transition-only.
         ScrollDiag.note("livestatus", "id" to sessionId, "running" to running)
-        if (running) {
-            liveRunning.add(sessionId)
-            stoppedLiveIds.remove(sessionId)
-        } else {
-            // Remembered, because "a live frame said stopped" and "no frame has mentioned
-            // it" are different facts, and only the first may end a subagent.
-            liveRunning.remove(sessionId)
-            stoppedLiveIds.add(sessionId)
-        }
-        // A frame that beats a catalog read's settle is newer than the sample that
-        // read carries; recording it here is what stops the response from
-        // reverting it (`manager.ts:367-372`).
-        // Recorded for every frame now: this used to be gated on a `subagents/list`
-        // read being in flight, because only a response could be reverted by a stale
-        // sample. The catalog is rebuilt from a pushed projection, so there is no
-        // response to race and every frame is worth keeping until a rebuild consumes
-        // it in `withInFlightActivity`.
-        synchronized(subagentCatalogLock) { subagentCatalogActivity[sessionId] = running }
+        runningBook.frame(sessionId, running)
+        publishRunning(sessionId)
+    }
+
+    /**
+     * Republishes one row from the book, and nothing else.
+     *
+     * The single write path for `SessionItem.running` outside [mergeRoster]: the new
+     * value is read back from [runningBook] rather than taken from the event that
+     * prompted the repaint, so the row can only ever carry the authority's answer.
+     */
+    private fun publishRunning(sessionId: String) {
         val sessions = _ui.value.sessions
         val index = sessions.indexOfFirst { it.id == sessionId }
         if (index < 0) return
+        val running = runningBook.running(sessionId)
         if (sessions[index].running == running) return
+        // A row's flag changing is the whole subject of this fix, so it is recorded
+        // with its cause: which id, which answer, and whether it is a subagent.
+        ScrollDiag.note(
+            "running",
+            "id" to sessionId,
+            "running" to running,
+            "subagent" to sessions[index].isSubagent,
+            "via" to "frame",
+        )
         val updated = sessions.toMutableList()
         updated[index] = updated[index].copy(running = running)
         _ui.value = _ui.value.copy(sessions = updated)
     }
 
     /**
-     * Drops live "running" claims that a whole-world `session/list` pull denies.
+     * Publishes everything that follows from a roster pull: the "finished while you
+     * were not looking" dots, and the composer's own running flag.
      *
-     * The live set is only as good as the frames that reached this process, and a
-     * backgrounded app receives none: a session it saw start kept its ongoing dot
-     * for as long as the id stayed in the set, because the display is
-     * `list.running || live` and the list's "no" could not win. The pull is the
-     * authority, so it wins — with two exemptions. A subagent is never reported as
-     * running by `session/list` at all, and the open session is held back by the
-     * same quiet window that keeps a racing pull from blinking the composer's Stop
-     * button back to Send mid-turn.
+     * The rows have already been folded through the book by [mergeRoster], so this
+     * reads its answer off them rather than asking a second time — one authority, one
+     * question. [list] is not consulted for running at all; it is the raw sample, kept
+     * only so a caller can name what vanished.
+     *
+     * The composer's `running` is a *different* fact from a row's dot: it is this
+     * client's own turn on the session on screen, which a send sets optimistically and
+     * which the follow stream settles. Its value is still taken from the row here, so
+     * the two cannot contradict each other, and the quiet guard only delays believing a
+     * "no" that races the host's own bookkeeping.
      */
-    private fun reconcileLiveRunning(list: List<SessionItem>) {
-        val stale = staleLiveRunning(
-            live = liveRunning,
-            list = list,
-            current = _ui.value.currentSessionId,
-            quiet = System.currentTimeMillis() - lastEventAt > LIVE_QUIET_MS,
-        )
-        if (stale.isEmpty()) return
-        stale.forEach { liveRunning.remove(it) }
-        Log.d(TAG, "cleared stale live-running: $stale")
-    }
-
-    private fun syncRunningFromList(list: List<SessionItem>) {
-        // `session/list` outranks a live frame for an ordinary session: a `true`
-        // the list contradicts is a "stopped" that arrived while the app was not
-        // listening (a frozen process collects nothing), and trusting it forever
-        // left the row's ongoing dot stuck on for a session that had long finished.
-        reconcileLiveRunning(list)
-
-        // The effective set, not the raw one: the list reports every subagent as
-        // not running, so a child's own finish is only ever visible through the
-        // live frames folded in here.
-        val nowRunning = list.filter { it.withLiveRunning().running }.map { it.id }.toSet()
+    private fun publishRosterRunning() {
+        val sessions = _ui.value.sessions
+        val nowRunning = sessions.filter { it.running }.map { it.id }.toSet()
 
         // A green "done" dot means "finished running while you were not looking":
         // a session that stopped since the last refresh, which is not the open one.
@@ -3987,7 +4062,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 if (!warrantsIdleAlert(sessionId, app.attention.isSubagent(sessionId))) {
                     return@forEach
                 }
-                val title = _ui.value.sessions.firstOrNull { it.id == sessionId }?.title
+                val title = sessions.firstOrNull { it.id == sessionId }?.title
                 alert(
                     id = Attention.idleId(sessionId),
                     sessionId = sessionId,
@@ -3998,16 +4073,8 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
         previousRunning = nowRunning
 
-        // The caller mapped the fresh list through `withLiveRunning` *before* this
-        // ran, so a stale claim cleared above is still painted on its row. Fold the
-        // cleaned set in once more and republish only when it actually changes.
-        val corrected = _ui.value.sessions.map { it.withLiveRunning() }
-        if (corrected != _ui.value.sessions) {
-            _ui.value = _ui.value.copy(sessions = corrected)
-        }
-
         val current = _ui.value.currentSessionId ?: return
-        val item = list.firstOrNull { it.id == current } ?: return
+        val item = sessions.firstOrNull { it.id == current } ?: return
         // Only believe "not running" once the stream has been quiet briefly,
         // otherwise a list fetch that races the host's own bookkeeping would
         // flicker the stop button back to send mid-turn.
@@ -4070,7 +4137,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * One `subagents/list` read, single-flight per parent.
+     * One parent-catalog rebuild, single-flight per parent.
      *
      * A second ask while one is in flight is not a second call: the response the
      * caller is waiting on predates whatever asked again, so the ask is recorded
@@ -4079,13 +4146,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * carrier of a membership change observed mid-flight would be the next
      * unrelated frame.
      *
-     * A response is folded into three places, in this order: the live-running set
-     * (per-child `activity`, the one source that covers a child `session/list`
-     * serves cold), the roster's label/mode for the rows it names, and — when the
-     * parent still belongs to the session on screen — `parentAvailable`, which is
-     * the read-only gate's only input. A failure is deliberately left as unknown
-     * (it is not the reader's problem, and unknown keeps the composer), except for
-     * a dead cookie, which the banner has to say.
+     * A catalog is identity only — the label and the mode — so it is folded into two
+     * places: the roster's label/mode for the rows it names, and, when the parent still
+     * belongs to the session on screen, `parentAvailable`, the read-only gate's only
+     * input. It is deliberately **not** folded into running state: the projection has
+     * no activity field, and the `subagents/list` reply that once carried one is not a
+     * host method on 0.2.0. See [RunningBook] for where a child's activity comes from.
+     * A failure is deliberately left as unknown (it is not the reader's problem, and
+     * unknown keeps the composer), except for a dead cookie, which the banner has to say.
      */
     /**
      * Rebuilds one parent's child catalog from the `subagentCatalog` projection.
@@ -4103,14 +4171,22 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshSubagentCatalog(parentSessionId: String) {
         if (parentSessionId.isEmpty()) return
         if (parentSessionId != _ui.value.currentSessionId) return
-        val catalog = withInFlightActivity(
-            parseSubagentCatalogProjection(liveProjections?.optJSONArray("subagentCatalog")) { id ->
-                _ui.value.sessions.any { it.parentSessionId == id }
-            },
-        )
+        val catalog = parseSubagentCatalogProjection(
+            liveProjections?.optJSONArray("subagentCatalog"),
+        ) { id ->
+            _ui.value.sessions.any { it.parentSessionId == id }
+        }
         subagentCatalogs[parentSessionId] = catalog
         _ui.value = _ui.value.copy(subagentCatalogs = HashMap(subagentCatalogs))
-        applyCatalogActivity(catalog)
+        // Recorded because this rebuild is what used to erase running state: it folded
+        // the projection's absent `activity` in as "not running" and wiped every child's
+        // row. A device reading the diag can now see a rebuild land between two roster
+        // summaries and check that no child moved.
+        ScrollDiag.note(
+            "catalog",
+            "parent" to parentSessionId,
+            "children" to catalog.children.size,
+        )
         applyCatalogLabels(parentSessionId, catalog)
         publishParentAvailable(parentSessionId, catalog)
     }
@@ -4132,69 +4208,6 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 refreshSubagentCatalog(parentSessionId)
             }
         }
-    }
-
-    /**
-     * Folds child activity frames observed while a read was in flight over its
-     * response, and forgets the ones it consumed.
-     *
-     * Only the ids the response actually names are taken: an id that belongs to
-     * some other parent's catalog is that catalog's problem, and this read is not
-     * evidence either way about it.
-     */
-    private fun withInFlightActivity(catalog: SubagentCatalog): SubagentCatalog {
-        val overrides = synchronized(subagentCatalogLock) {
-            if (subagentCatalogActivity.isEmpty()) return catalog
-            val consumed = HashMap<String, Boolean>()
-            for (child in catalog.children) {
-                subagentCatalogActivity.remove(child.id)?.let { consumed[child.id] = it }
-            }
-            consumed
-        }
-        if (overrides.isEmpty()) return catalog
-        return catalog.copy(
-            entries = catalog.entries.map { entry ->
-                if (entry !is SubagentCatalogEntry.Child) return@map entry
-                val running = overrides[entry.id] ?: return@map entry
-                entry.copy(
-                    activity = if (running) SUBAGENT_ACTIVITY_RUNNING else SUBAGENT_ACTIVITY_INACTIVE,
-                )
-            },
-        )
-    }
-
-    /**
-     * Applies one catalog to the app's live-running view.
-     *
-     * This is the app's stand-in for the web's per-row catalog dot, which reads
-     * `entry.activity` verbatim (`SubagentHeaderLineage.tsx`) — so the catalog's
-     * answer wins in both directions, including over a stale `running: true` that
-     * no whole-roster pull can clear, because [reconcileLiveRunning] exempts
-     * subagents from the list's authority. `activity` and the list's `running` are
-     * the same Agent-registry sample (`subagent/control.ts:catalogView` and
-     * `api-session-controller/list.ts:114-152`), so they can only differ by the
-     * instant they were taken, and the catalog is the later read.
-     *
-     * The one exemption is the open session, which keeps the quiet-window guard
-     * [reconcileLiveRunning] documents: a read sampled a beat before the host
-     * flushed that session's own stop frame must not blink the composer's Stop
-     * back to Send mid-turn.
-     */
-    private fun applyCatalogActivity(catalog: SubagentCatalog) {
-        val current = _ui.value.currentSessionId
-        val quiet = System.currentTimeMillis() - lastEventAt > LIVE_QUIET_MS
-        val sessions = _ui.value.sessions
-        val patched = sessions.toMutableList()
-        var changed = false
-        for (child in catalog.children) {
-            if (!child.running && child.id == current && !quiet) continue
-            if (child.running) liveRunning.add(child.id) else liveRunning.remove(child.id)
-            val index = patched.indexOfFirst { it.id == child.id }
-            if (index < 0 || patched[index].running == child.running) continue
-            patched[index] = patched[index].copy(running = child.running)
-            changed = true
-        }
-        if (changed) _ui.value = _ui.value.copy(sessions = patched)
     }
 
     /**
@@ -6100,31 +6113,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 /**
- * Overlays the live `api-session/status` signal onto one host list row.
- *
- * A subagent is reported accurately only while its session is attached; one the
- * controller serves cold reads `running: false`, and the child runs inside its
- * parent's agent, so the list summary is not where a child's activity can be read
- * from. The event stream and the parent's `subagents/list` catalog are the two
- * sources that can, and this reads the fold they share.
- */
-private fun SessionItem.withLiveRunning(previous: SessionItem? = null): SessionItem =
-    copy(
-        running = runningAfter(
-            sampleRunning = running,
-            isSubagent = isSubagent,
-            previousRunning = previous?.running == true,
-            live = id in liveRunningIds,
-            stopped = id in stoppedLiveIds,
-        ),
-    )
-
-/**
- * Overlays one `subagents/list` child row's label and mode onto a roster row.
+ * Overlays one `subagentCatalog` child row's label and mode onto a roster row.
  *
  * A subagent's own stored title is its opening prompt ("You are …"), so both
  * display fields come from the durable descriptor instead. The title follows the
  * label only for a subagent: the label is never a plain session's name.
+ *
+ * Identity only, deliberately: the catalog says nothing about activity, so nothing
+ * here may touch `running`.
  */
 private fun SessionItem.withCatalog(child: SubagentCatalogEntry.Child?): SessionItem {
     if (child == null) return this

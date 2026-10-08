@@ -1,32 +1,24 @@
 package uk.xa0.dsh.model
 
 import org.json.JSONArray
-import org.json.JSONObject
 
 /**
- * The wire vocabulary of `subagents/list`, the parent-scoped catalog of direct
- * subagent children.
+ * The wire vocabulary of a parent's subagent catalog.
  *
- * The same durable rows reach this client from the other end as the *parent's*
- * `subagentCatalog` projection on `session/list` / `session/control`. That
- * projection carries identity only (`id`, `createdAt`, `mode`, `label` —
- * `subagent/projection-types.ts`); this reply is the only source of the two
- * fields that describe the child's present life: `activity`, the host's own
- * sample of whether the child's Agent is running, and `hasChildren`, whether a
- * deeper level exists.
+ * A parent's children reach this client as the *parent's* `subagentCatalog`
+ * projection on `session/list` / `session/control`: identity only (`id`,
+ * `createdAt`, `mode`, `label` — `subagent/projection-types.ts`).
  *
- * It matters because `session/list` reports every subagent as not running — the
- * child runs inside its parent's Agent, so the host's list summary has nothing
- * to go on — which left this client inferring child activity from the live
- * status frames alone, where one missed frame stranded a child as forever idle
- * or forever running.
+ * **The catalog says nothing about whether a child is running, and must never be
+ * read as if it did.** The projection has no activity field at all, and the
+ * `subagents/list` reply that once carried one (`activity`) is not a host method
+ * on 0.2.0 — it answered `http/404` on every session open. This file used to keep
+ * both, and the client folded the activity-less projection into a running set
+ * anyway: every rebuild stamped each child `inactive`, which wiped the row of a
+ * child that was working. A child's activity has exactly one home now —
+ * [RunningBook], fed by the roster's `subagentTiming` and by `api-session/status`
+ * frames.
  */
-
-/** `activity` for a child whose Agent is live right now. */
-const val SUBAGENT_ACTIVITY_RUNNING = "running"
-
-/** `activity` for a child that exists only in persistence. */
-const val SUBAGENT_ACTIVITY_INACTIVE = "inactive"
 
 /** One `entries[]` row. Mirrors the wire union in `subagent/control-types.ts`. */
 sealed interface SubagentCatalogEntry {
@@ -42,11 +34,8 @@ sealed interface SubagentCatalogEntry {
         override val id: String,
         val mode: String,
         val label: String?,
-        val activity: String,
         val hasChildren: Boolean,
-    ) : SubagentCatalogEntry {
-        val running: Boolean get() = activity == SUBAGENT_ACTIVITY_RUNNING
-    }
+    ) : SubagentCatalogEntry
 
     /**
      * A candidate the host could not describe: a settled child whose descriptor
@@ -60,7 +49,7 @@ sealed interface SubagentCatalogEntry {
     ) : SubagentCatalogEntry
 }
 
-/** One `subagents/list` reply: the direct children of one parent. */
+/** One parent's child catalog: its direct children, identity only. */
 data class SubagentCatalog(
     val entries: List<SubagentCatalogEntry>,
     /**
@@ -89,11 +78,10 @@ data class SubagentCatalog(
  * 0.2.0 publishes a parent's children as a projection on the parent's own session
  * rather than answering `subagents/list`, which is not a host method any more and
  * answered `http/404` on every session open. A row carries an id, a creation time, a
- * mode and an optional label.
+ * mode and an optional label — and nothing about whether the child is working, which
+ * is why no reader may infer activity from this value.
  *
- * Activity is deliberately not read from it — the live status frames carry that, and
- * [withInFlightActivity] folds them in — and neither is `hasChildren`, which comes off
- * the roster because that is where the lineage actually is.
+ * `hasChildren` comes off the roster, because that is where the lineage actually is.
  *
  * `parentAvailable` has no equivalent here and stays null, which the read-only gate
  * treats as *available*: unknown must not be able to claim the parent is offline.
@@ -112,45 +100,8 @@ fun parseSubagentCatalogProjection(
             id = id,
             mode = row.str("mode"),
             label = row.str("label").takeIf { it.isNotBlank() },
-            activity = "",
             hasChildren = hasChildren(id),
         )
     }
     return SubagentCatalog(entries, null)
-}
-
-/**
- * Parses one `subagents/list` value.
- *
- * A row without an id is dropped rather than addressed by an empty string, and
- * an unrecognized `kind` is dropped rather than guessed at: the union is
- * open-ended on the host (`unsupported` is reserved, `reason` is expected to
- * grow), and inventing a child from an unknown row would put a fabricated
- * address on the wire.
- *
- * `activity` is compared against [SUBAGENT_ACTIVITY_RUNNING] rather than against
- * its opposite, so a row that omits the field — impossible in the declared
- * union, but not in a hand-rolled reply — cannot claim to be running.
- */
-fun parseSubagentCatalog(value: JSONObject?): SubagentCatalog {
-    if (value == null) return SubagentCatalog(emptyList(), null)
-    val rows = value.arr("entries") ?: JSONArray()
-    val entries = ArrayList<SubagentCatalogEntry>(rows.length())
-    for (i in 0 until rows.length()) {
-        val row = rows.optJSONObject(i) ?: continue
-        val id = row.str("id")
-        if (id.isEmpty()) continue
-        when (row.str("kind")) {
-            "child" -> entries += SubagentCatalogEntry.Child(
-                id = id,
-                mode = row.str("mode"),
-                label = row.str("label").takeIf { it.isNotBlank() },
-                activity = row.str("activity"),
-                hasChildren = row.optBoolean("hasChildren"),
-            )
-
-            "diagnostic" -> entries += SubagentCatalogEntry.Diagnostic(id, row.str("reason"))
-        }
-    }
-    return SubagentCatalog(entries, parseSubagentParentAvailable(value))
 }
