@@ -67,7 +67,7 @@ data class SubagentRollup(val total: Int, val running: Int) {
  * [sessions] is the flat `session/list` roster, which is what makes this possible
  * at all: subagent records are in it with `parentSessionId` set.
  *
- * [catalogs] are the `subagents/list` reads this client happens to hold, keyed by
+ * [catalogs] are the `subagentCatalog` projections this client happens to hold, keyed by
  * the parent they describe. Each one floors its parent's *total* at the number of
  * direct children the host itself reports — the web's `Math.max(healthy.length,
  * descendants.count)` on the trigger's own label (`SubagentHeaderLineage.tsx`),

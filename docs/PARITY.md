@@ -52,9 +52,14 @@ of where the app stands against them.
       (`ui/ChatScreen.kt`), so the query box filters title/cwd only and the
       "Searching session history…" line never appears. The ViewModel half has no caller
 - [x] Live session status dot. The `ongoing` chase plus the green done / amber warning
-      solids (`ui/components/StateDot.kt`); live `api-session/status` frames are
-      reconciled against each `session/list` pull, so a running claim the whole-world
-      list denies is dropped rather than left stuck (`DshViewModel.reconcileLiveRunning`)
+      solids (`ui/components/StateDot.kt`). One authority answers "is this session
+      running": `RunningBook` (`model/LiveRunning.kt`), fed by each `session/list` pull —
+      the host's own `running` agent-status sample — and by live `api-session/status`
+      frames, which are stamped with the pull they raced and are retired by the next one.
+      `SessionItem.running` is that answer and nothing else; no surface ORs a frame into it
+      any more, and no projection is read as activity. `subagentTiming.active` is an open
+      turn in the child's journal, *not* liveness — see `docs/HANDOFF.md` item 15 for the
+      crash orphans that prove it
 - [x] Row actions — Rename / Fork session / Copy session id / Archive, and Restore on
       the archived filter (`DshViewModel.renameSession`, `forkSession`, `archiveSession`,
       `unarchiveSession`)

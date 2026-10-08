@@ -310,12 +310,12 @@ fun SessionsDrawer(
 
     // One walk of the roster supplies every row's activity badge and caret.
     //
-    // Deliberately the roster alone, with no `subagents/list` catalogs: the caret
+    // Deliberately the roster alone, with no `subagentCatalog` projections: the caret
     // here gates on `total`, and the tree it expands is the roster
     // (`subagentChildrenOf`). Flooring the total from a catalog would offer a caret
     // for a child the roster has not delivered — one that opens onto nothing. The
-    // per-child `activity` those catalogs carry does reach these rows, through the
-    // live-running fold behind `session.running`.
+    // catalogs carry no activity at all, so nothing here has to avoid folding one:
+    // `session.running` is the single authority's answer (`RunningBook`).
     val rollups = remember(sessions) { indexSubagentRollups(sessions) }
 
     // Where the drawer opens.

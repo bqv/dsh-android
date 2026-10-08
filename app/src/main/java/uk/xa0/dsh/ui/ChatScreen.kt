@@ -603,7 +603,7 @@ fun ChatScreen(vm: DshViewModel) {
     // The web's `selectReadOnlySubagent`: an addressed child claims the composer's
     // seat with a status frame instead of taking input — a one-shot record always,
     // a continuable child only once its parent is known to be offline. Availability
-    // is unknown until `subagents/list` lands, and unknown keeps the composer, so
+    // is unknown until the parent's catalog lands, and unknown keeps the composer, so
     // the seat never flickers into a frame it would have to take back.
     val composerState = subagentComposerState(
         target = current?.let { subagentTargetOf(it.id, it.parentSessionId, it.subagentMode) },
