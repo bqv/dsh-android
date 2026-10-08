@@ -949,6 +949,7 @@ fun ToolCallRow(
                     command = backgroundCommand ?: entry.arguments,
                     view = jobOutput,
                     running = jobOutput?.streaming == true,
+                    jobId = backgroundJob,
                 )
             }
             Spacer(Modifier.height(DshSpacing.xs))
@@ -1333,6 +1334,7 @@ fun NoticeRow(
                 command = entry.detail ?: entry.text,
                 view = jobOutput,
                 running = false,
+                jobId = entry.jobId,
                 modifier = Modifier.padding(start = 21.dp),
             )
         }

@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,11 +46,18 @@ import kotlinx.coroutines.delay
 import uk.xa0.dsh.JobItem
 import uk.xa0.dsh.model.JobObservation
 import uk.xa0.dsh.model.JobsWire
+import uk.xa0.dsh.diag.DiagLazyList
+import uk.xa0.dsh.diag.ScrollDiag
+import uk.xa0.dsh.diag.diagDrag
+import uk.xa0.dsh.diag.diagOffset
 import uk.xa0.dsh.ui.clickableNoRipple
+import uk.xa0.dsh.ui.rememberTouchGate
+import uk.xa0.dsh.ui.scroll.TailFollow
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
+import uk.xa0.dsh.ui.touchGate
 
 /**
  * The header's background-jobs seat.
@@ -163,6 +172,13 @@ fun JobsSheet(
     val settledExpanded = settledOpen ?: liveRows.isEmpty()
     val visible = liveRows.size + settledRows.size
 
+    // The roster list, instrumented like every other sheet's list
+    // (`docs/SCROLL-DIAG.md`). It is the surface that can steal a drag meant for an
+    // expanded row's output panel, and the two records together — this list moved,
+    // that one did not — are what name which of them took the gesture.
+    val sheetList = rememberLazyListState()
+    DiagLazyList(JOB_SHEET_SURFACE, sheetList)
+
     // A live row's duration is read at composition, not ticked on a timer.
     //
     // The web's popover re-renders every second while something runs, and this did
@@ -234,7 +250,11 @@ fun JobsSheet(
         }
 
         LazyColumn(
-            Modifier.heightIn(max = 420.dp),
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 420.dp)
+                .diagDrag(JOB_SHEET_SURFACE) { sheetList.diagOffset() },
+            state = sheetList,
             verticalArrangement = Arrangement.spacedBy(DshSpacing.xxs),
         ) {
             if (liveRows.isNotEmpty()) {
@@ -350,6 +370,23 @@ private fun SectionHeading(
 
 /** How much of a job is shown before "Show more", for the command and the detail. */
 private const val JOB_COLLAPSED_LINES = 4
+
+/**
+ * The most of a job's output the panel shows before it scrolls.
+ *
+ * The web's jobs panel caps its terminal at `--dsl-terminal-output-max-height: 288px`
+ * with `overflow: auto`, and the transcript's shell block has used this same 224dp
+ * since before this feature existed (`14732a4`: "The 224dp vertical cap and its
+ * scroller stay — output is unbounded in that direction"). One cap, one scroller,
+ * both places output is read.
+ */
+private val JOB_OUTPUT_MAX_HEIGHT = 224.dp
+
+/** The scroll surface's name in the latent diagnostics (`docs/SCROLL-DIAG.md`). */
+private const val JOB_OUTPUT_SURFACE = "job-output"
+
+/** The roster list's name in the same diagnostics — the other surface a drag can land on. */
+private const val JOB_SHEET_SURFACE = "sheet:jobs"
 
 /** How long an armed stop waits for its confirming press (the web's `KILL_ARM_MS`). */
 private const val KILL_ARM_MS = 3_000L
@@ -500,6 +537,7 @@ private fun JobRow(
                 command = job.label,
                 view = output?.takeIf { it.jobId == job.id },
                 running = live,
+                jobId = job.id,
             )
         }
     }
@@ -543,11 +581,16 @@ private fun StopButton(armed: Boolean, label: String, onPress: () -> Unit) {
  *
  * It is the same surface in both places the output appears, the jobs sheet and a
  * chat-log entry, so a job cannot look like two different things depending on
- * where you opened it.
+ * where you opened it — including how it scrolls, which is the whole point of
+ * asking for it in both places.
  *
  * [view] is null until the first frame lands, and the panel still draws the
  * command: a row that has just been tapped should say what it is watching rather
  * than flashing empty.
+ *
+ * [jobId] identifies the job whose output this is. It is the tail follow's rearm
+ * key, so opening this panel — or swapping it to another job — lands on the newest
+ * line. Defaulted so a caller that has no id still gets a following panel.
  */
 @Composable
 fun JobOutputPanel(
@@ -555,6 +598,7 @@ fun JobOutputPanel(
     view: JobObservation?,
     running: Boolean,
     modifier: Modifier = Modifier,
+    jobId: String? = null,
 ) {
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(DshRadius.card)
@@ -615,7 +659,8 @@ fun JobOutputPanel(
         }
 
         val text = view?.text.orEmpty()
-        if (text.isEmpty()) {
+        val lines = remember(text) { linesOf(text) }
+        if (lines == null) {
             // A running job that has not printed yet says so; a settled one offers
             // the web's `(no output)` rather than an empty box.
             Text(
@@ -629,27 +674,90 @@ fun JobOutputPanel(
                     bottom = DshSpacing.lg,
                 ),
             )
-            return@Column
+        } else {
+            JobOutputStream(lines = lines, jobId = jobId)
         }
-        // Lazy, exactly as the transcript's terminal block is: a running job
-        // republishes its tail as it arrives, and composing every line of a long
-        // output on each of those frames is the cost this avoids.
-        val lines = remember(text) {
-            val body = if (text.endsWith("\n")) text.dropLast(1) else text
-            body.split('\n')
-        }
-        LazyColumn(
-            Modifier
-                .heightIn(max = 224.dp)
-                .padding(start = 30.dp, end = 14.dp, top = DshSpacing.sm, bottom = DshSpacing.lg),
-        ) {
-            items(lines.size, key = { it }) { index ->
-                Text(
-                    text = lines[index].ifEmpty { " " },
-                    style = DshType.codeSmall,
-                    color = colors.labelPrimary,
-                )
-            }
+    }
+}
+
+/** The panel's terminal lines, or null when there is nothing to draw. */
+private fun linesOf(text: String): List<String>? {
+    if (text.isEmpty()) return null
+    // The terminator newline is not an extra blank line to draw.
+    val body = if (text.endsWith("\n")) text.dropLast(1) else text
+    return body.split('\n')
+}
+
+/**
+ * A job's output as a scrollable, tail-following terminal.
+ *
+ * ## Scrolling
+ *
+ * The panel is a fixed window over an unbounded stream, so it scrolls — vertically,
+ * and only vertically. The web wraps rather than panning (`--dsl-terminal-line-whitespace:
+ * pre-wrap` on the jobs panel, and its README says the panel "wraps commands and
+ * output lines in full"), and this app reached the same conclusion for the
+ * transcript's shell block in `14732a4`: a horizontal scroller nested inside a
+ * vertically scrolling surface "costs a gesture that has to be told apart from the
+ * list's". So lines wrap, and there is deliberately no horizontal scroll state.
+ *
+ * The viewport is `heightIn(max = …)`, the web's `max-height` + `overflow: auto`,
+ * and the same 224dp cap the transcript's terminal block uses (kept there by that
+ * same commit: "output is unbounded in that direction").
+ *
+ * ## Following the tail
+ *
+ * The newest line is the interesting one, so the panel follows it — and it is
+ * [TailFollow], the transcript's own rule, rather than a second implementation of
+ * it. That buys the whole behaviour in one call: new lines are followed only while
+ * the reader is at the tail, growth inside the last line is corrected by exactly the
+ * overflow, a deliberate drag releases the follow, releasing it *at* the tail hands
+ * it straight back, and a finger on the list suspends every automatic move. Nothing
+ * here is invented; the rules and the reasoning behind each one are in `TailFollow`.
+ *
+ * [jobId] is the rearm key: opening a job's panel — or switching to another job's —
+ * means "follow this again", the same way opening a session does for the chat.
+ */
+@Composable
+private fun JobOutputStream(lines: List<String>, jobId: String?) {
+    val colors = DshTheme.colors
+    val state = rememberLazyListState()
+    val touch = rememberTouchGate()
+    TailFollow(
+        state = state,
+        rearmKey = jobId,
+        holding = { touch.isDown },
+        onMove = { ScrollDiag.prog(JOB_OUTPUT_SURFACE, it) },
+    )
+    // Latent, additive instrumentation — one call site per surface, the same way
+    // every other scrollable in this app is wired (`docs/SCROLL-DIAG.md`). It draws
+    // nothing and consumes no event; it exists so that the next device run can say
+    // whether a drag on this panel reached the list at all (`child=1 moved=0` is a
+    // gesture something else swallowed; `child=0 moved=0` is one the list never saw),
+    // which is the one thing a harness cannot answer.
+    DiagLazyList(JOB_OUTPUT_SURFACE, state)
+    LazyColumn(
+        state = state,
+        // The text's gutters are inside the *items*, not on the list, so the whole
+        // panel is scrollable: `padding` on the list would put the 30dp gutter
+        // outside the scrollable node, and a drag starting in it — which is where a
+        // thumb naturally lands on a left-aligned block of mono text — would move
+        // nothing. `contentPadding` insets the content while leaving the surface
+        // full-width.
+        contentPadding = PaddingValues(top = DshSpacing.sm, bottom = DshSpacing.lg),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = JOB_OUTPUT_MAX_HEIGHT)
+            .diagDrag(JOB_OUTPUT_SURFACE) { state.diagOffset() }
+            .touchGate(touch),
+    ) {
+        items(lines.size, key = { it }) { index ->
+            Text(
+                text = lines[index].ifEmpty { " " },
+                style = DshType.codeSmall,
+                color = colors.labelPrimary,
+                modifier = Modifier.padding(start = 30.dp, end = 14.dp),
+            )
         }
     }
 }

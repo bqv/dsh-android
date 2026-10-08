@@ -97,6 +97,16 @@ of where the app stands against them.
       interruption notices, and its two-press kill; the chat log opens the same panel,
       from the background shell call that started the job and from its `tool-jobs`
       completion notice. Probes and frame shapes: `docs/JOBS.md`.
+      The output panel scrolls vertically and **follows its tail**: new lines are
+      followed only while the reader is at the bottom, a deliberate drag releases the
+      follow, and returning to the bottom hands it back. That is `TailFollow`
+      (`ui/scroll/TailFollow.kt`) — the transcript's own rule, reused rather than
+      reimplemented — and it is the same component in the sheet and in the chat log, so
+      it behaves the same in both. Lines **wrap** instead of panning sideways: the web's
+      `--dsl-terminal-line-whitespace: pre-wrap`, and this app's own decision for the
+      transcript's shell block (`14732a4`), which rejected a horizontal scroller nested
+      inside a vertical one. Both surfaces are wired into the latent scroll diagnostics
+      (`sheet:jobs` and `job-output`) so a device can say which of them a drag reached.
       Divergences, deliberate: the seat's count is terser than `count.live.*` because the
       phone's header is one row shared with the lineage chip and Files; a running row's
       duration is read at composition rather than ticked once a second — the sheet already
