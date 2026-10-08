@@ -34,9 +34,14 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * That is what this does, on Robolectric, without a device — the same harness
  * `ShellRowExpansionTest` uses for the shell rows.
  *
- * The clock is frozen (`autoAdvance = false`) in every test here: the sheet ticks a
- * live row's duration once a second while something is running, exactly as the web's
- * popover does, and an auto-advancing test clock would chase that loop forever.
+ * The clock is left auto-advancing, as `ShellRowExpansionTest` leaves it, and that
+ * is load-bearing rather than incidental: a click only changes state, and the
+ * recomposition that draws the change needs a frame. `waitForIdle` produces frames
+ * only while the clock advances, so a test that freezes the clock (`autoAdvance =
+ * false`) and then taps sees nothing appear — five of these tests failed exactly
+ * that way. Nothing here holds a frame callback open, which is what makes the
+ * default safe: the sheet reads a live row's duration at composition instead of
+ * ticking it.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = HarnessApplication::class)
@@ -113,7 +118,6 @@ class JobsUiTest {
      */
     @Test
     fun `the sheet renders a live job and opens its output on a tap`() {
-        rule.mainClock.autoAdvance = false
         val observed = mutableListOf<String?>()
         rule.setContent {
             DshTheme {
@@ -157,7 +161,6 @@ class JobsUiTest {
      */
     @Test
     fun `a settled job that retained nothing is not expandable`() {
-        rule.mainClock.autoAdvance = false
         val observed = mutableListOf<String?>()
         rule.setContent {
             DshTheme {
@@ -179,7 +182,6 @@ class JobsUiTest {
 
     @Test
     fun `a settled job that retained output is expandable`() {
-        rule.mainClock.autoAdvance = false
         val observed = mutableListOf<String?>()
         rule.setContent {
             DshTheme {
@@ -202,7 +204,6 @@ class JobsUiTest {
     /** The kill is two-press, and the first press only arms it. */
     @Test
     fun `stopping a running job takes two presses`() {
-        rule.mainClock.autoAdvance = false
         val killed = mutableListOf<String>()
         rule.setContent {
             DshTheme {
@@ -231,7 +232,6 @@ class JobsUiTest {
     /** `Clear` drops the finished section client-side, and only the finished one. */
     @Test
     fun `clear removes the finished rows and leaves the running one`() {
-        rule.mainClock.autoAdvance = false
         rule.setContent {
             DshTheme {
                 JobsSheet(
@@ -300,7 +300,6 @@ class JobsUiTest {
      */
     @Test
     fun `a background shell call opens its job's live output in the chat log`() {
-        rule.mainClock.autoAdvance = false
         val observed = mutableListOf<String?>()
         val entry = ChatEntry.ToolCall(
             seq = 1,

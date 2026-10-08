@@ -93,7 +93,12 @@ of where the app stands against them.
       from the background shell call that started the job and from its `tool-jobs`
       completion notice. Probes and frame shapes: `docs/JOBS.md`.
       Divergences, deliberate: the seat's count is terser than `count.live.*` because the
-      phone's header is one row shared with the lineage chip and Files; and the web has no
+      phone's header is one row shared with the lineage chip and Files; a running row's
+      duration is read at composition rather than ticked once a second — the sheet already
+      recomposes on every output and roster frame, and a 1 Hz state write would hold a
+      frame callback open for the sheet's whole life, which is the idle drain
+      `LocalAnimatedDots` exists to prevent — so a *silent* running job's figure stands
+      still between frames; and the web has no
       live job output in the chat log at all, so that half is this client's addition —
       attached to the two entries that already name a job id.
 - [x] There is **no per-session overflow menu** — rename/fork/archive live on the sidebar row

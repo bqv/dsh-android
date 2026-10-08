@@ -29,7 +29,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -164,15 +163,18 @@ fun JobsSheet(
     val settledExpanded = settledOpen ?: liveRows.isEmpty()
     val visible = liveRows.size + settledRows.size
 
-    // The web ticks a live row's duration once a second while the list is open and
-    // something is running; a frozen "4s" beside a job that has been running for a
-    // minute reads as a stalled job.
-    val now by produceState(initialValue = System.currentTimeMillis(), liveRows.size) {
-        while (liveRows.isNotEmpty()) {
-            delay(1_000)
-            value = System.currentTimeMillis()
-        }
-    }
+    // A live row's duration is read at composition, not ticked on a timer.
+    //
+    // The web's popover re-renders every second while something runs, and this did
+    // the same — but a 1 Hz state write holds a frame callback open for as long as
+    // the sheet is, so the app never goes idle: exactly the cost `LocalAnimatedDots`
+    // exists to avoid elsewhere (`ui/components/StateDot.kt`). It buys almost nothing
+    // here, because the sheet already recomposes on every `job/output` batch a
+    // watched job produces and on every `job/list` roster frame — so a job that is
+    // printing refreshes its duration as often as the host says anything. What is
+    // lost is a *silent* running job holding a figure that stands still between
+    // frames, which is a smaller price than never idling.
+    val now = System.currentTimeMillis()
 
     // A row that leaves the roster cannot stay expanded: its observation stream is
     // gone, and the panel would sit there empty under a heading that no longer has
