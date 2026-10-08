@@ -98,13 +98,14 @@ failure, kept so a real occurrence is diagnosable instead of silent.
   the running-descendant count is drawn next to the dot — the deliberate
   phone-only divergence, since there is no aria layer here.
 * Running has exactly one source: `RunningBook` (`model/LiveRunning.kt`). A
-  whole-world `session/list` pull supplies the durable answer per row —
-  `running`, or the child's own `subagentTiming.active` for a child the host
-  serves cold — and a live `api-session/status` frame may outrank the pull it
-  raced, then is retired by the next pull. `SessionItem.running` is that single
-  answer, so the drawer, the header chip and the lineage sheet cannot disagree.
-  The composer's own `UiState.running` still keeps a 1500 ms quiet grace, because
-  it also carries a send's optimistic echo (`DshViewModel.publishRosterRunning`).
+  whole-world `session/list` pull supplies the durable answer per row — the host's own
+  `running` agent-status sample — and a live `api-session/status` frame may outrank the
+  pull it raced, then is retired by the next pull. `SessionItem.running` is that single
+  answer, so the drawer, the header chip and the lineage sheet cannot disagree. The
+  `subagentTiming.active` projection is deliberately *not* read: it means "this child's
+  journal has an open turn", which a crashed host leaves set forever (`docs/HANDOFF.md`
+  item 15). The composer's own `UiState.running` still keeps a 1500 ms quiet grace,
+  because it also carries a send's optimistic echo (`DshViewModel.publishRosterRunning`).
 * A caret appears only on a session with descendants and discloses that
   session's children inline, indented, via `subagentChildrenOf`.
 * **Children obey the view settings** (user-reported defect): they are filtered

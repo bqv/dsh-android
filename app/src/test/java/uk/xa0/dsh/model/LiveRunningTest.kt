@@ -59,12 +59,12 @@ class LiveRunningTest {
     }
 
     /**
-     * The flash-and-die half, and the reason the epoch is taken at *request* time.
+     * The reason the epoch is taken at *request* time.
      *
-     * A pull issued while three children were running answers `false` for all three,
-     * because the host serves them cold the moment they detach — but a frame for each
-     * arrives while that read is still in flight. Those frames are newer than the cut
-     * the answer carries, so the children stay running.
+     * A pull whose cut predates three children starting answers `false` for all three —
+     * the host's list was computed before their agents attached — while a frame for each
+     * arrives during that read. Those frames are newer than the cut the answer carries,
+     * so the children stay running instead of blinking out and back.
      */
     @Test
     fun `a frame that lands while a pull is in flight survives that pull`() {
@@ -134,19 +134,19 @@ class LiveRunningTest {
     }
 
     /**
-     * The whole regression, end to end: three children running, the roster going cold
-     * for them while their frames land, and the answer staying true — then a real stop
-     * arriving on the next cut and being believed.
+     * The whole regression, end to end: three children whose starts the app was too late
+     * to see, a pull whose cut predates them answering `false`, the answer staying true —
+     * then a real stop arriving on the next cut and being believed.
      */
     @Test
-    fun `three running children do not flash and die when the roster goes cold`() {
+    fun `three children starting under a stale pull do not flash and die`() {
         val book = RunningBook()
         // The roster read that first saw them attached.
         book.applyPull(book.beginPull(), mapOf("c1" to true, "c2" to true, "c3" to true))
         assertTrue(listOf("c1", "c2", "c3").all { book.running(it) })
 
-        // 105ms later: the same three, detached, so the host's own summary says false —
-        // while their status frames and their open turns still say running.
+        // 105ms later: a read taken before they started answers false for all three,
+        // while the "started" frames land during its flight.
         val pull = book.beginPull()
         book.frame("c1", true)
         book.frame("c2", true)
@@ -162,6 +162,22 @@ class LiveRunningTest {
         assertFalse(book.running("c1"))
         assertTrue(book.running("c2"))
         assertTrue(book.running("c3"))
+    }
+
+    /**
+     * The counterexample that bounds the whole design: a pull that says `false` for an id
+     * is the *last* word once it lands, whatever frames it contains. A dead child whose
+     * journal has an open turn is not resurrected by anything here — that reading lives in
+     * `durableRunningOf`, and it reads `running`.
+     */
+    @Test
+    fun `a pull that lands after the last frame is believed`() {
+        val book = RunningBook()
+        val first = book.beginPull()
+        book.applyPull(first, mapOf("dead" to true))
+        book.frame("dead", false)
+        book.applyPull(book.beginPull(), mapOf("dead" to false))
+        assertFalse(book.running("dead"))
     }
 
     @Test

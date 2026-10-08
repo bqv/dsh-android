@@ -1871,23 +1871,27 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * ids behind them and every flag that moved are written here, once per change rather
      * than once per pull.
      *
-     * The load-bearing field is `held`: rows the book answers `true` for while the pull's
-     * own `running` said `false`. That is the state the previous implementation could not
-     * represent — it had no way to keep a child the host served cold — and `heldActive`
-     * splits it by which evidence did the holding: `subagentTiming.active` (the child's
-     * own open turn, invisible to `running`) or a live status frame that outranks this
-     * cut. `wire` and `active` are the pull's raw material, so a reader can check the
-     * arithmetic rather than trust the summary.
+     * `wire`, `active` and `orphan` are the pull's raw material, so a reader can check
+     * the arithmetic rather than trust the summary: `wire` is the host's own agent-status
+     * count, `active` is how many rows carry an open turn in their journal, and `orphan`
+     * is the subset of those with **no agent bound** — the crash signature
+     * ([durableRunningOf] measured two of them after the box restarted mid-build, which
+     * is why `active` is not read as liveness). `frameHeld` counts rows the book answers
+     * `true` for while the pull's `running` said `false`, which after that decision only
+     * a live `api-session/status` frame can do.
      */
-    private fun noteRunningPull(wire: Map<String, Boolean>, active: Set<String>) {
+    private fun noteRunningPull(
+        wire: Map<String, Boolean>,
+        active: Set<String>,
+        noAgent: Set<String>,
+    ) {
         val before = HashMap<String, Boolean>(_ui.value.sessions.size + 8)
         for (row in _ui.value.sessions) before[row.id] = row.running
         val ids = HashSet<String>(wire.size + 8)
         ids.addAll(wire.keys)
         ids.addAll(before.keys)
         var running = 0
-        var held = 0
-        var heldActive = 0
+        var frameHeld = 0
         val heldIds = ArrayList<String>(4)
         val changed = ArrayList<String>(4)
         for (id in ids) {
@@ -1897,11 +1901,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             if (!answer) continue
             running++
             if (wire[id] == true) continue
-            held++
-            if (id in active) heldActive++
+            frameHeld++
             heldIds += id
         }
-        val summary = "${wire.size}:$running:$held:$heldActive:${changed.size}"
+        val orphan = active.count { it in noAgent }
+        val summary = "${wire.size}:$running:$frameHeld:$orphan:${changed.size}"
         if (summary == lastRunningSummary) return
         lastRunningSummary = summary
         ScrollDiag.note(
@@ -1910,8 +1914,8 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             "running" to running,
             "wire" to wire.count { it.value },
             "active" to active.size,
-            "held" to held,
-            "heldActive" to heldActive,
+            "orphan" to orphan,
+            "frameHeld" to frameHeld,
             "changed" to changed.size,
             "ids" to heldIds.take(6).joinToString(","),
             "changedIds" to changed.take(6).joinToString(","),
@@ -3660,20 +3664,23 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val result = ArrayList<SessionItem>(items.length())
-        // The durable answer this pull proves, per id: the host's live-Agent sample,
-        // or an open turn in the session's own journal. Both live in this row — see
-        // [durableRunningOf]. Collected here because this is the only place the wire
-        // shape is known; `wire` and `active` are kept apart from the answer so the
-        // diag record can say which of the two carried it (`noteRunningPull`).
+        // The durable answer this pull proves, per id: the host's own agent-status
+        // sample — see [durableRunningOf] for why `subagentTiming.active` is *not* part
+        // of it. `wire`, `active` and `noAgent` are kept for the diag record only
+        // (`noteRunningPull`), so its arithmetic can be checked rather than trusted.
         val durable = HashMap<String, Boolean>(items.length())
         val wire = HashMap<String, Boolean>(items.length())
         val active = HashSet<String>(items.length() / 8)
+        val noAgent = HashSet<String>(items.length())
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
             val id = item.str("sessionId")
             if (id.isEmpty()) continue
             durable[id] = durableRunningOf(item)
             wire[id] = item.optBoolean("running")
+            // An explicit `false` only: a row that omits the field is not evidence of a
+            // missing agent, and the orphan count is a diagnosis, not a decision.
+            if (item.has("agentAvailable") && !item.optBoolean("agentAvailable")) noAgent += id
             if (item.obj("projections")?.obj("values")?.obj("subagentTiming")?.obj("active") != null) {
                 active += id
             }
@@ -3681,7 +3688,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // Applied before the rows are built, so `withRunning` below reads this cut and
         // not the previous one.
         runningBook.applyPull(pull, durable)
-        noteRunningPull(wire, active)
+        noteRunningPull(wire, active, noAgent)
 
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue

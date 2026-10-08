@@ -197,35 +197,39 @@ editing the live copy. There is no install step to forget.
     `directoryPicker/createDirectory` among them. `DshClient.rpcRaw` returns
     `result.value` untouched; `rpc` casts to `JSONObject` and is the wrong door for
     those.
-15. **`session/list`'s `running` is an *attachment* fact, not a liveness fact — the
-    running state of a child is in its `subagentTiming` projection.** The host builds a
-    row with `running: ctx.agents.get(id)?.status === 'running'` for a session it has
-    attached, and `summarizeCold` hard-codes `running: false, agentAvailable: false` for
-    every one it has not (`dsh-api-session-controller/lib/index.js`, `summaryFor` /
-    `summarizeCold`). Both carry `projections`, and for a descriptor-backed child
-    `subagentTiming.active` is present exactly while its own journal has a `turn/start`
-    with no `turn/end` — so a cold child that is still working reads `running: false,
-    active: {since: <the open turn/start's own time>, through: <last event time, kept
-    fresh>}`. Measured 2026-10-09 on the running host: of 773 rows carrying
-    `subagentTiming`, `running: true & active: null` and `running: false & active:
-    non-null` were both **0**; and a child watched across a real transition moved from
-    `running: true, active.since = 1791474924448` to `running: false, settledMs:
-    1691625, lastTurnCompleted: true` in the same moment its journal gained
-    `turn/end completed` at 1791476616073 (its unmatched `turn/start` was at exactly
-    1791474924448).
-16. **Only `session.v4` records get the full projection fold.** 773 session
-    directories hold `session.v4.jsonl.zstd` and exactly those 773 roster rows carried
-    `subagentTiming`; the 1,126 with a legacy `session.v3.jsonl.zstd` fold to `{title}`
-    alone. So "the roster can always prove a child is running" is true for current
-    records and not for legacy ones, where a live `api-session/status` frame is still the
-    only evidence. `RunningBook` reads both and needs neither to be complete.
-17. **`subagentCatalog` carries no activity, and `subagents/list` does not exist.**
-    The projection is identity only (`id`, `createdAt`, `mode`, `label`), so any fold
-    that reads a running state out of it is inventing one — an `activity == ""` default
-    once wiped the row of every child on every catalog rebuild. `subagents/list` 404s on
-    0.2.0.
+15. **`session/list`'s `running` is the host's *liveness* answer; `subagentTiming.active`
+    is not.** The host builds a row's `running` as
+    `ctx.agents.get(id)?.status === 'running'` for a session it has attached, and
+    `summarizeCold` hard-codes `running: false, agentAvailable: false` for every one it has
+    not (`dsh-api-session-controller/lib/index.js`, `summaryFor` / `summarizeCold`). So
+    `running` covers a child the app never saw start, and `agentAvailable` separates
+    attached-but-idle from cold. The `subagentTiming` projection that rides in the same row
+    means something else: it folds the child's *own journal*, and its `active` field is
+    present exactly while a `turn/start` has no matching `turn/end` — a fact about the log,
+    **not** about whether anything is running. A host restart mid-turn leaves `active` set
+    forever with no agent behind it, and that is not hypothetical: after the box crashed
+    under three concurrent Gradle builds and the host came back, the roster held two such
+    rows (`fd23b122-1474-4ea6-87a5-d065d522e3b5`, `dcd6240b-4eb5-4170-b6bd-bf971f3007cf`),
+    both `running: false, agentAvailable: false` with `active.through` frozen 64–65 minutes
+    earlier, while children that really were running in the same snapshot had `through`
+    under a minute old. **Reading `active` as liveness paints dead children as running** —
+    it was tried on this branch and reverted. The one thing that may hold a running claim a
+    pull denies is a live `api-session/status` frame newer than the pull's cut.
+16. **`subagentTiming.active` is worth reading for exactly one thing: diagnosing a crash.**
+    `active` present, `running: false`, `agentAvailable: false` and an old `through` is the
+    signature of a turn that was cut off by a restart. It is a durable fold, so it survives
+    the restart even though nothing is running.
+17. **Only `session.v4` records get the full projection fold.** 773 session directories hold
+    `session.v4.jsonl.zstd` and exactly those 773 roster rows carried `subagentTiming`; the
+    1,126 with a legacy `session.v3.jsonl.zstd` fold to `{title}` alone. Nothing in
+    `RunningBook` depends on it — `running` is present for every row — but a reader who
+    wants the timing projection must not expect it on an old record.
+18. **`subagentCatalog` carries no activity, and `subagents/list` does not exist.** The
+    projection is identity only (`id`, `createdAt`, `mode`, `label`), so any fold that reads
+    a running state out of it is inventing one — an `activity == ""` default once wiped the
+    row of every child on every catalog rebuild. `subagents/list` 404s on 0.2.0.
 
-15. **An mDNS answer is not all in the answer section.** Android answers a
+19. **An mDNS answer is not all in the answer section.** Android answers a
     `_adb-tls-connect._tcp` PTR query with the PTR under *answers* and the SRV,
     TXT and A records under **additional**. A parser that reads only `ancount`
     finds the instance, has no port for it, and drops it — which is why the old
@@ -234,7 +238,7 @@ editing the live copy. There is no install step to forget.
     interpreter with 256 threads. Parse all three sections, and stop listening as
     soon as an instance has both a port and an address: the phone replies in
     single-digit milliseconds, so listening out the timeout is pure latency.
-16. **`host:connect` reports failure as `OKAY`.** A refused port comes back as
+20. **`host:connect` reports failure as `OKAY`.** A refused port comes back as
     `OKAY "failed to connect to '…': Connection refused"` — the status code is
     fine and the verdict is in the message. And `reverse:` is **not** a host
     service: `host-serial:X:reverse:forward:…` is rejected with "unknown host

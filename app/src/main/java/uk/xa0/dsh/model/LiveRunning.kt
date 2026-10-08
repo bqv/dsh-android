@@ -15,32 +15,32 @@ data class LiveRunningFrame(val running: Boolean, val epoch: Long)
 /**
  * The single authority on which sessions are running.
  *
- * There are exactly two ways this client learns that a session's agent is working,
- * and they are the same log read two ways:
+ * There are exactly two ways this client learns that a session's agent is working, and
+ * they say different things:
  *
- *  - **A `session/list` pull**, which is a *cut* of the session journal. `running: true`
- *    there means the host has an attached Agent with status `running` right now
- *    (`api-session-controller`: `summaryFor` reads
- *    `ctx.agents.get(id)?.status === 'running'`), and `false` is what the same function
- *    answers for every session it serves **cold** — `summarizeCold` hard-codes
- *    `running: false, agentAvailable: false`, which is why a child's dot used to blink
- *    out the instant it was detached. The pull carries the durable half as well:
- *    `subagentTiming.active` is a fold of the child's *own* journal and is present
- *    exactly while a `turn/start` has no matching `turn/end` — for a cold child too. So
- *    the pull's durable answer is `running || active`.
+ *  - **A `session/list` pull**, which is a *cut* of the host's own state.
+ *    `running: true` means the host has an agent bound to that session with status
+ *    `running` (`api-session-controller`: `summaryFor` reads
+ *    `ctx.agents.get(id)?.status === 'running'`) — i.e. it is the liveness answer, and
+ *    it covers a child the app never saw start. `false` covers both "attached but idle"
+ *    (`agentAvailable: true`) and "served cold, no agent at all"
+ *    (`summarizeCold` hard-codes `running: false, agentAvailable: false`). The journal
+ *    projection `subagentTiming.active` rides along in the same row and is deliberately
+ *    **not** read as liveness — see [durableRunningOf] for the crash-orphan measurement
+ *    that forced that decision.
  *  - **A live `api-session/status` frame**, which the host emits on an `agent/status`
- *    *transition* only (`ctx.on('agent/status', …)`). A client that connects while a
- *    child is already running never sees the "started" frame at all; the frame is
- *    promptness, not truth.
+ *    *transition* only (`ctx.on('agent/status', …)`) — including the "started" a pull
+ *    taken a moment too early cannot yet carry. It is promptness *and* the repair for a
+ *    pull that raced the transition.
  *
- * The rule that makes the two agree is the cut, and it is a rule about ordering, not a
+ * The rule that orders the two is the cut, and it is a rule about ordering, not a
  * heuristic:
  *
  *  - A frame that arrived *before* the pull was requested describes a transition at or
- *    before the pull's cut, so the pull already contains it — it is dropped.
+ *    before the pull's cut, so the pull's answer already contains it — it is dropped.
  *  - A frame that arrived while the pull was in flight, or after it landed, describes a
- *    transition the cut may predate — so it outranks the pull's durable answer. It is
- *    dropped by the *next* pull instead, which is then at or after that transition.
+ *    transition the cut may predate — so it outranks the pull's answer. It is dropped by
+ *    the *next* pull instead, which is then at or after that transition.
  *
  * That bounds every frame's life to a single pull: an app that was backgrounded and
  * collected no frames cannot keep a stale "running" alive, and a frame cannot be
@@ -124,23 +124,31 @@ class RunningBook {
 /**
  * The durable running fact one `session/list` row carries.
  *
- * `running` is the host's live-Agent sample — true only while the session is attached —
- * and `subagentTiming.active` is the child's own journal saying a turn never reached
- * `turn/end`. Both are read, because they answer the same question from the two ends
- * the host can answer it: a child that is still working but no longer attached is
- * `running: false` **and** `active` present, and reading only the first is the bug this
- * exists to end.
+ * **`running` is the host's own agent sample, and it is the whole of the durable
+ * answer.** The host builds it as `ctx.agents.get(id)?.status === 'running'`
+ * (`api-session-controller`: `summaryFor`), which is liveness: an agent bound to the
+ * session whose phase is running. A session served cold — not attached in this process
+ * — hard-codes `running: false, agentAvailable: false` (`summarizeCold`), and an
+ * attached session with an idle agent reads `running: false, agentAvailable: true`.
  *
- * `active` is a *durable* fold, so it survives a cold read: it is present for a child
- * whose agent the host has never attached in this process, which is the case no live
- * frame can ever cover.
+ * **`subagentTiming.active` is deliberately *not* read here, and must not be.** It is a
+ * fold of the child's own journal meaning "a `turn/start` never reached `turn/end`" — a
+ * durable fact about the *log*, not a fact about whether anything is running. The
+ * difference is not theoretical: a host restart mid-turn leaves that turn open forever
+ * with no agent behind it. Measured on the running host after the box crashed during a
+ * build, `session/list` held exactly two such rows —
+ * `fd23b122-1474-4ea6-87a5-d065d522e3b5` and `dcd6240b-4eb5-4170-b6bd-bf971f3007cf`,
+ * both `running: false, agentAvailable: false`, both with `active` present and its
+ * `through` frozen 64–65 minutes earlier (the crash), while legitimately running
+ * children in the same snapshot had `through` under a minute old. Reading `active` as
+ * liveness paints those two dead children as running for as long as the record exists.
+ *
+ * A running claim the roster denies is therefore *not* rescued by this field. What
+ * rescues one is a live `api-session/status` frame newer than the roster cut — the host
+ * emits one on every `agent/status` transition, including the "started" a pull taken a
+ * moment too early cannot yet see — and ordering the two is [RunningBook]'s whole job.
  */
-fun durableRunningOf(row: JSONObject): Boolean {
-    if (row.optBoolean("running")) return true
-    // A JSON null folds to `optJSONObject`'s null, which is the absent case too: the
-    // projection's `view` omits the field entirely while no turn is open.
-    return row.obj("projections")?.obj("values")?.obj("subagentTiming")?.obj("active") != null
-}
+fun durableRunningOf(row: JSONObject): Boolean = row.optBoolean("running")
 
 /**
  * The running flag one roster row is allowed to carry: the book's answer, and nothing
