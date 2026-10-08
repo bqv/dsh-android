@@ -77,10 +77,13 @@ import uk.xa0.dsh.model.parseSessionStats
 import uk.xa0.dsh.model.parseHostSettings
 import uk.xa0.dsh.model.permissionCommandMode
 import uk.xa0.dsh.model.parseSubagentCatalogProjection
+import uk.xa0.dsh.model.MembershipHold
+import uk.xa0.dsh.model.removeSession
 import uk.xa0.dsh.model.str
 import uk.xa0.dsh.model.subagentInterruptArgs
 import uk.xa0.dsh.model.subagentPromptRequest
 import uk.xa0.dsh.model.subagentTargetOf
+import uk.xa0.dsh.model.upsertSession
 import uk.xa0.dsh.net.BalanceFailure
 import uk.xa0.dsh.net.DeepSeekAccount
 import uk.xa0.dsh.net.DshAuthException
@@ -1853,12 +1856,28 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Folds a fresh roster sample into the rows the UI holds.
      *
-     * A one-line fold into [RunningBook]'s answer, which is the point: there is no
-     * previous row to consult and no second opinion to reconcile, because the book is
-     * the only thing that decides.
+     * The sample is the world, so it replaces the rows — with one exception that is not a
+     * heuristic but the same ordering rule the running book uses: a row a membership frame
+     * added *during* the pull's flight is not in the pull's cut, and dropping it here is
+     * how a just-spawned child would appear and vanish. [MembershipHold] names those rows;
+     * a pull that was requested after them has already released them.
      */
-    private fun mergeRoster(list: List<SessionItem>): List<SessionItem> =
-        list.map { it.withRunning(runningBook) }
+    private fun mergeRoster(list: List<SessionItem>): List<SessionItem> {
+        val held = membershipHold.rows()
+        val rows = if (held.isEmpty()) {
+            list
+        } else {
+            val known = list.mapTo(HashSet()) { it.id }
+            list + held.filterNot { it.id in known }
+        }
+        return rows.map { it.withRunning(runningBook) }
+    }
+
+    /**
+     * The rows membership frames added that no pull has confirmed yet, stamped with the
+     * roster epoch. See [MembershipHold] for the rule and why it shares that counter.
+     */
+    private val membershipHold = MembershipHold()
 
     /** The last running summary written to the diag file, so an unchanged pull is silent. */
     private var lastRunningSummary: String? = null
@@ -1900,7 +1919,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             if (was != null && was != answer) changed += id
             if (!answer) continue
             running++
-            if (wire[id] == true) continue
+            // Only ids this pull actually *denied* count: a row the pull never mentioned
+            // (a membership hold, say) was not contradicted by it, and counting that as a
+            // frame hold would credit the wrong mechanism in the diag.
+            if (wire[id] != false) continue
             frameHeld++
             heldIds += id
         }
@@ -2028,6 +2050,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // the agent hung waiting on a client that would never reply. The centre
         // owns the single subscription and relays the one signal the UI needs.
         app.attention.onLiveStatus = { sessionId, running -> applyLiveStatus(sessionId, running) }
+        // Membership is a push, and the only one the host offers for the roster. It is
+        // applied immediately — the frame *is* the row — and the debounced pull is asked
+        // for as well, because the frame says nothing about any other row: ordering, the
+        // archived filter and the labels a catalog carries are still a pull's job.
+        app.attention.onSessionAdded = { row -> applySessionAdded(row) }
+        app.attention.onSessionRemoved = { sessionId -> applySessionRemoved(sessionId) }
         // A provider registering or disappearing changes the catalog, and the app has no
         // other way to hear about it: the list is fetched per connect. The host forwards
         // this event for exactly that purpose and the web refreshes on it, so a local
@@ -3688,56 +3716,19 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // Applied before the rows are built, so `withRunning` below reads this cut and
         // not the previous one.
         runningBook.applyPull(pull, durable)
+        // A pull cannot be evidence about a session created after its cut. The membership
+        // hold keeps those rows (see [MembershipHold], which `mergeRoster` consults) and
+        // hands back the running sample each must be re-asserted with — without this the
+        // wholesale replacement above would answer `false` for a child whose `added` frame
+        // this very pull raced.
+        for (member in membershipHold.applyPull(pull)) {
+            runningBook.observe(member.row.id, member.running)
+        }
         noteRunningPull(wire, active, noAgent)
 
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
-            val projections = item.obj("projections")?.obj("values")
-            // Always read through the Json extensions: org.json's raw optString
-            // turns an explicit JSON null into the string "null".
-            val blank = item.optBoolean("blank")
-            val stored = projections.str("title")
-            val id = item.str("sessionId")
-            val cwd = item.str("cwd").takeIf { it.isNotEmpty() }
-            val subagent = catalog[id]
-            val parentSessionId = item.str("parentSessionId").takeIf { it.isNotEmpty() }
-            // Where a catalog this client already holds names this child, its row
-            // wins the label and the mode: see [applyCatalogLabels] for why the
-            // read-time sample outranks the projection.
-            val held = parentSessionId?.let { subagentCatalogs[it]?.child(id) }
-            result += SessionItem(
-                id = id,
-                // Blank rows carry `title: null`; the web substitutes its
-                // localized "New Session" label for them. For the rest this is the
-                // web's own `displayTitleOf` (session-controller's
-                // `client/sessions/service.ts`): the durable title, else the project
-                // directory's basename, else the session id. Without the middle step
-                // every session the host never titled — anything created by a script,
-                // an automation or a fork — read as "Untitled session" in the drawer
-                // while the web named it after its directory.
-                //
-                // The rule itself lives in [sessionRowTitle] so it can be tested
-                // without a ViewModel; the order there is the point (a stored name
-                // outranks the blank placeholder).
-                title = sessionRowTitle(
-                    subagentLabel = subagent?.first,
-                    stored = stored,
-                    blank = blank,
-                    directoryName = basename(cwd),
-                    id = id,
-                ),
-                cwd = cwd,
-                updatedAt = item.optLong("updatedAt"),
-                // The raw wire sample is kept only as `fetchSessions`'s own record of
-                // what the host said; every row the UI is handed has already been
-                // folded through the book by [mergeRoster].
-                running = item.optBoolean("running"),
-                isSubagent = item.str("origin") == "subagent",
-                blank = blank,
-                parentSessionId = parentSessionId,
-                subagentLabel = subagent?.first?.takeIf { it.isNotBlank() },
-                subagentMode = subagent?.second?.takeIf { it.isNotBlank() },
-            ).withCatalog(held)
+            sessionItemOf(item, catalog)?.let { result += it }
         }
         // Keep the open session's folded projections fresh: goal, access mode,
         // plan and context pressure all ride them.
@@ -3753,6 +3744,138 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
         refreshCatalogsForRoster(result)
         return result.sortedByDescending { it.updatedAt }
+    }
+
+    /**
+     * One roster row, from either wire shape that carries one.
+     *
+     * `session/list`'s `items[]` and an `api-session/added` emit are the **same object**
+     * on the host — `summaryFor` builds both — and this is the one place either is read,
+     * so the push path cannot drift from the pull path in how it names a session, reads a
+     * parent or picks up a subagent label. [catalog] is the pull's own `subagentCatalog`
+     * sweep; a membership frame has none, and falls back to the catalogs this client
+     * already holds for that child's parent.
+     *
+     * Null for a row with no id: an addressable session is the minimum, and inventing one
+     * from an empty string is how a fabricated address reaches the wire.
+     */
+    private fun sessionItemOf(
+        item: JSONObject,
+        catalog: Map<String, Pair<String, String>> = emptyMap(),
+    ): SessionItem? {
+        val id = item.str("sessionId")
+        if (id.isEmpty()) return null
+        val projections = item.obj("projections")?.obj("values")
+        // Always read through the Json extensions: org.json's raw optString
+        // turns an explicit JSON null into the string "null".
+        val blank = item.optBoolean("blank")
+        val stored = projections.str("title")
+        val cwd = item.str("cwd").takeIf { it.isNotEmpty() }
+        val subagent = catalog[id]
+        val parentSessionId = item.str("parentSessionId").takeIf { it.isNotEmpty() }
+        // Where a catalog this client already holds names this child, its row
+        // wins the label and the mode: see [applyCatalogLabels] for why the
+        // read-time sample outranks the projection.
+        val held = parentSessionId?.let { subagentCatalogs[it]?.child(id) }
+        return SessionItem(
+            id = id,
+            // Blank rows carry `title: null`; the web substitutes its
+            // localized "New Session" label for them. For the rest this is the
+            // web's own `displayTitleOf` (session-controller's
+            // `client/sessions/service.ts`): the durable title, else the project
+            // directory's basename, else the session id. Without the middle step
+            // every session the host never titled — anything created by a script,
+            // an automation or a fork — read as "Untitled session" in the drawer
+            // while the web named it after its directory.
+            //
+            // The rule itself lives in [sessionRowTitle] so it can be tested
+            // without a ViewModel; the order there is the point (a stored name
+            // outranks the blank placeholder).
+            title = sessionRowTitle(
+                subagentLabel = subagent?.first,
+                stored = stored,
+                blank = blank,
+                directoryName = basename(cwd),
+                id = id,
+            ),
+            cwd = cwd,
+            updatedAt = item.optLong("updatedAt"),
+            // The raw wire sample is kept only as this builder's own record of what the
+            // host said; every row the UI is handed has been folded through the book
+            // (by [mergeRoster] for a pull, by [applySessionAdded] for a frame).
+            running = item.optBoolean("running"),
+            isSubagent = item.str("origin") == "subagent",
+            blank = blank,
+            parentSessionId = parentSessionId,
+            subagentLabel = subagent?.first?.takeIf { it.isNotBlank() },
+            subagentMode = subagent?.second?.takeIf { it.isNotBlank() },
+        ).withCatalog(held)
+    }
+
+    /**
+     * Applies one `api-session/added` emit: the session's whole list row, pushed.
+     *
+     * This is what closes the membership gap. Measured on the device before it: a child
+     * created 59 s before a probe was absent from the app's 1,891-row roster while the
+     * host listed 1,892, and the parent's lineage sheet read `running=1` against the
+     * host's 2 for that entire minute — because nothing but a whole-world pull could add
+     * a row. The host re-announces a session here on `session/created` and again when an
+     * agent is created or disposed, so the common case is a row the client already holds
+     * arriving with a fresh `agentAvailable`/`running`; [upsertSession] replaces it.
+     *
+     * The row's running sample goes in as a *snapshot* ([RunningBook.observe]) and not as
+     * a transition: this object is what a pull would have served, so keeping it as a
+     * transition would let a child that stopped before the next cut be held running for
+     * a cycle. A live `api-session/status` frame is a transition and still outranks it —
+     * including one that lands while the pull this schedules is in flight, which is the
+     * ordering hazard the epoch rule exists for.
+     *
+     * The pull is still scheduled, coalesced by [refreshSessionsSoon]'s debounce: the
+     * frame proves nothing about any other row, and ordering, the archived filter and
+     * catalog labels remain a pull's job. A burst of child creations costs one pull.
+     */
+    private fun applySessionAdded(row: JSONObject) {
+        val item = sessionItemOf(row) ?: return
+        runningBook.observe(item.id, durableRunningOf(row))
+        val running = runningBook.running(item.id)
+        membershipHold.remember(item, running, runningBook.epoch())
+        val sessions = _ui.value.sessions.upsertSession(item.withRunning(runningBook))
+        _ui.value = _ui.value.copy(sessions = sessions)
+        // A row that is on screen now can be counted by the chip and listed by the sheet
+        // before any pull; the note is what makes that visible in a diag after the fact.
+        ScrollDiag.note(
+            "membership",
+            "added" to item.id,
+            "running" to running,
+            "subagent" to item.isSubagent,
+            "rows" to sessions.size,
+        )
+        refreshSessionsSoon()
+    }
+
+    /**
+     * Applies one `api-session/removed` emit: the host disposed that session.
+     *
+     * Three things have to go, not one. The row, or the drawer keeps a session that
+     * cannot be opened. The book's claims via [RunningBook.forget], or an id the host
+     * reuses — the same parent restarting the same lane — inherits a flag nothing
+     * established. And [previousRunning], or the next pull reports the vanished id as
+     * "finished while you were not looking" and lights a done dot for a session that no
+     * longer exists.
+     */
+    private fun applySessionRemoved(sessionId: String) {
+        runningBook.forget(sessionId)
+        membershipHold.forget(sessionId)
+        previousRunning = previousRunning - sessionId
+        val sessions = _ui.value.sessions.removeSession(sessionId)
+        val changed = sessions.size != _ui.value.sessions.size ||
+            _ui.value.completedSessionIds.contains(sessionId)
+        if (!changed) return
+        _ui.value = _ui.value.copy(
+            sessions = sessions,
+            completedSessionIds = _ui.value.completedSessionIds - sessionId,
+        )
+        ScrollDiag.note("membership", "removed" to sessionId, "rows" to sessions.size)
     }
 
     /**

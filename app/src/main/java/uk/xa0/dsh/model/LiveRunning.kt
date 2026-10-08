@@ -77,9 +77,56 @@ class RunningBook {
      */
     fun beginPull(): Long = synchronized(lock) { ++requested }
 
+    /**
+     * The epoch a fact arriving right now belongs to — the newest pull *requested*.
+     *
+     * Published so a second ordering rule can share this one counter instead of keeping a
+     * clock of its own: [MembershipHold] stamps the rows a membership frame adds with this
+     * value, exactly as [frame] stamps a status transition, so "was this inside the pull
+     * that just landed?" has one answer in the app rather than two that could drift.
+     */
+    fun epoch(): Long = synchronized(lock) { requested }
+
     /** Records one live `api-session/status` frame. */
     fun frame(id: String, running: Boolean) {
         synchronized(lock) { frames[id] = LiveRunningFrame(running, requested) }
+    }
+
+    /**
+     * Records the running sample one *snapshot* frame carries for a single id.
+     *
+     * `api-session/added` is the same row object `session/list` serves (`summaryFor`), so
+     * it is a host sample like a pull's — and it is written where a pull writes, not
+     * where a frame writes, because that distinction is what keeps the two honest:
+     *
+     *  - A **transition** ([frame]) is a fact about one moment that the next cut may
+     *    predate, so it must outlive a cut it is not older than.
+     *  - A **snapshot** ([observe]) is a state that the next cut *already* contains,
+     *    because the pull that retires it is requested after this arrived. Keeping it as
+     *    a transition would let a child that stopped before the cut be held "running"
+     *    for a pull cycle — a fresh way to be wrong, in the direction this whole change
+     *    exists to prevent.
+     *
+     * A membership frame therefore never has to be argued about: [applyPull] replaces it
+     * like any other durable answer, and a `running: true` a live *status* frame
+     * established still outranks that replacement.
+     */
+    fun observe(id: String, running: Boolean) {
+        synchronized(lock) { durable[id] = running }
+    }
+
+    /**
+     * Forgets one id's every claim, for an `api-session/removed` frame.
+     *
+     * Without this a session the host has disposed keeps its last answer, and an id that
+     * is later reused — the same parent restarting the same lane — would inherit a
+     * running flag nothing had established.
+     */
+    fun forget(id: String) {
+        synchronized(lock) {
+            durable.remove(id)
+            frames.remove(id)
+        }
     }
 
     /**
@@ -107,16 +154,6 @@ class RunningBook {
         when {
             frame != null && frame.epoch >= cut -> frame.running
             else -> durable[id] ?: false
-        }
-    }
-
-    /** Forgets everything. Only for a reconnect that invalidates the whole roster. */
-    fun clear() {
-        synchronized(lock) {
-            requested = 0L
-            cut = 0L
-            durable.clear()
-            frames.clear()
         }
     }
 }
