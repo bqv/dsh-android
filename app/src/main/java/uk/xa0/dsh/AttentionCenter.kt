@@ -144,14 +144,32 @@ class AttentionCenter(private val context: Context) {
 
     /**
      * Forwarded `api-session/status` emits: the session id and whether it is
-     * running now. This is the only live running signal for a subagent — the
-     * host's session list reports `running: false` for children — so the view
-     * model must keep receiving it. It cannot own a second `$events`
-     * registration (the host fans a waterfall to both, and the extra `next`
-     * makes the first client's answer unsettleable), hence the hook.
+     * running now. This is the *prompt* live running signal — the host's session
+     * list carries the same fact plus one the event cannot, the running sample a
+     * client that was not listening missed — so the view model must keep receiving
+     * it. It cannot own a second `$events` registration (the host fans a waterfall
+     * to both, and the extra `next` makes the first client's answer unsettleable),
+     * hence the hook.
      */
     @Volatile
     var onLiveStatus: ((sessionId: String, running: Boolean) -> Unit)? = null
+
+    /**
+     * A forwarded `api-session/added` emit: the session's **whole list row**
+     * (`summaryFor`, the same object `session/list` serves, so it carries
+     * `sessionId`, `updatedAt`, `running`, `agentAvailable`, `blank`, `cwd`,
+     * `origin`, `parentSessionId` and `projections`).
+     *
+     * The host re-announces a session this way on `session/created`, and again when
+     * an agent is created or disposed, so a row here may be a session the client
+     * already holds. The view model decides that; this only relays.
+     */
+    @Volatile
+    var onSessionAdded: ((row: JSONObject) -> Unit)? = null
+
+    /** A forwarded `api-session/removed` emit: the disposed session's id. */
+    @Volatile
+    var onSessionRemoved: ((sessionId: String) -> Unit)? = null
 
     /**
      * Whether a session is a subagent, so the notification copy can name the
@@ -242,6 +260,20 @@ class AttentionCenter(private val context: Context) {
             // shows whatever was true at connect — a router that came up afterwards is
             // simply absent until the next reconnect.
             "llm/adapters-updated" -> onAdaptersUpdated?.invoke()
+
+            // Membership. Forwarded as `emit` (`API_REMOTE_FORWARDED_EVENTS`), and the
+            // only push-shaped roster change the host offers: without it a spawned
+            // session waits for the next whole-world pull, which on an idle parent can
+            // be minutes. The payload is the row itself, so it is relayed rather than
+            // summarized here — placement is the view model's business.
+            "api-session/added" -> {
+                value.arr("args")?.optJSONObject(0)?.let { row -> onSessionAdded?.invoke(row) }
+            }
+
+            "api-session/removed" -> {
+                val sessionId = value.arr("args")?.optString(0).orEmpty()
+                if (sessionId.isNotEmpty()) onSessionRemoved?.invoke(sessionId)
+            }
 
             "api-session/error" -> {
                 val args = value.arr("args")

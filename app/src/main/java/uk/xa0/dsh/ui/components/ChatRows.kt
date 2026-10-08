@@ -101,11 +101,14 @@ import org.json.JSONObject
 import uk.xa0.dsh.GoalState
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.DisplayRow
+import uk.xa0.dsh.model.JobObservation
 import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.MessageAttachment
 import uk.xa0.dsh.model.NoticeSeverity
 import uk.xa0.dsh.model.TodoItem
 import uk.xa0.dsh.model.ToolCallNode
+import uk.xa0.dsh.model.backgroundJobIdOf
+import uk.xa0.dsh.model.shellCommandOf
 import uk.xa0.dsh.ui.clickableNoRipple
 import uk.xa0.dsh.ui.shortenToolPath
 import uk.xa0.dsh.ui.markdown.MarkdownText
@@ -740,6 +743,14 @@ fun ToolCallRow(
      * client dependency.
      */
     loadImage: suspend (String) -> ImageBitmap? = { null },
+    /**
+     * Live output of whichever background job is expanded, or null. Only the row
+     * for a call that *started* a background job consumes it; defaulted so the
+     * nested-call renderer and previews need no wiring.
+     */
+    jobOutput: JobObservation? = null,
+    /** Opens — or closes — that observation for the job this call started. */
+    onObserveJob: (String?) -> Unit = {},
 ) {
     val colors = DshTheme.colors
     // The ask-question call owns a transcript row of its own: its args and result
@@ -839,14 +850,31 @@ fun ToolCallRow(
     var expanded by rememberSaveable(entry.callId) { mutableStateOf(false) }
     val summary = remember(entry.name, entry.arguments) { toolSummary(entry.name, entry.arguments) }
     val title = remember(entry.name) { toolTitle(entry.name) }
-
+    // The background job this call started, when it started one.
+    //
+    // A shell call sent to the background answers with the literal `started
+    // background job <id>`, so the row that launched the job is also the chat-log
+    // entry that can watch it — and it exists from the moment the job starts, which
+    // a completion notice does not. That is what makes the chat log a place to see
+    // *live* output rather than only a post-mortem.
+    val backgroundJob = remember(entry.callId, entry.result) { backgroundJobIdOf(entry.result) }
+    val observing = backgroundJob != null && jobOutput?.jobId == backgroundJob
+    // The panel is headed with the command, as the web heads it with `job.label`;
+    // a background call's arguments are where that command lives until the roster
+    // row arrives to name it properly.
+    val backgroundCommand = remember(entry.arguments) { shellCommandOf(entry.arguments) }
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier
                 .fillMaxWidth()
                 .height(24.dp)
                 .clip(RoundedCornerShape(DshRadius.sm))
-                .clickableNoRipple { expanded = !expanded },
+                .clickableNoRipple {
+                    expanded = !expanded
+                    // Opening the row is what opens the job's stream; shutting it
+                    // releases the stream, as collapsing does in the web's panel.
+                    if (backgroundJob != null) onObserveJob(if (expanded) backgroundJob else null)
+                },
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
@@ -912,6 +940,17 @@ fun ToolCallRow(
                 },
                 isError = entry.isError,
             )
+            // The job's own live output under the call that started it: the IN/OUT
+            // card above holds the *launch* (the command, and the one-line result
+            // naming the job), and this holds what the command is printing now.
+            if (observing) {
+                Spacer(Modifier.height(DshSpacing.xs))
+                JobOutputPanel(
+                    command = backgroundCommand ?: entry.arguments,
+                    view = jobOutput,
+                    running = jobOutput?.streaming == true,
+                )
+            }
             Spacer(Modifier.height(DshSpacing.xs))
         }
     }
@@ -1198,7 +1237,17 @@ private fun todoProgressLabel(items: List<TodoItem>): String {
  * keep the warning card treatment.
  */
 @Composable
-fun NoticeRow(entry: ChatEntry.Notice) {
+fun NoticeRow(
+    entry: ChatEntry.Notice,
+    /**
+     * The live output of whichever job is expanded anywhere in the UI, or null when
+     * none is. Passed in rather than fetched, because the observation is one stream
+     * shared by the jobs sheet and every chat-log entry.
+     */
+    jobOutput: JobObservation? = null,
+    /** Opens — or closes — that observation for [ChatEntry.Notice.jobId]. */
+    onObserveJob: (String?) -> Unit = {},
+) {
     val colors = DshTheme.colors
 
     if (entry.severity == NoticeSeverity.ERROR) {
@@ -1217,13 +1266,23 @@ fun NoticeRow(entry: ChatEntry.Notice) {
 
     var expanded by rememberSaveable(entry.seq) { mutableStateOf(false) }
     val isCompaction = entry.kind.startsWith("compaction")
+    // Whether *this* row owns the shared observation, rather than a local flag: the
+    // jobs sheet can claim a job's stream while this row is still on screen, and a
+    // local flag would leave the panel here painting another job's bytes.
+    val observing = entry.jobId != null && jobOutput?.jobId == entry.jobId
 
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(DshRadius.sm))
-                .clickableNoRipple(enabled = entry.detail != null) { expanded = !expanded },
+                .clickableNoRipple(enabled = entry.detail != null || entry.jobId != null) {
+                    expanded = !expanded
+                    // Opening asks for the job's stream, shutting releases it — keyed
+                    // on the new disclosure state rather than on `observing`, so a row
+                    // the sheet has taken the stream from still behaves as it reads.
+                    if (entry.jobId != null) onObserveJob(if (expanded) entry.jobId else null)
+                },
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
@@ -1241,7 +1300,7 @@ fun NoticeRow(entry: ChatEntry.Notice) {
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            if (entry.detail != null) {
+            if (entry.detail != null || entry.jobId != null) {
                 Spacer(Modifier.width(DshSpacing.sm))
                 Icon(
                     imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
@@ -1262,6 +1321,20 @@ fun NoticeRow(entry: ChatEntry.Notice) {
                     modifier = Modifier.padding(start = 21.dp),
                 )
             }
+        }
+        // Drawing follows the disclosure as well as the stream: a row the reader has
+        // shut must not keep a terminal open under it just because the sheet is
+        // holding the stream.
+        if (expanded && observing) {
+            Spacer(Modifier.height(DshSpacing.xs))
+            JobOutputPanel(
+                // The notice's own body names the command; the panel wants the command,
+                // not the notice's prose.
+                command = entry.detail ?: entry.text,
+                view = jobOutput,
+                running = false,
+                modifier = Modifier.padding(start = 21.dp),
+            )
         }
     }
 }

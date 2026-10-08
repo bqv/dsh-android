@@ -52,9 +52,14 @@ of where the app stands against them.
       (`ui/ChatScreen.kt`), so the query box filters title/cwd only and the
       "Searching session history…" line never appears. The ViewModel half has no caller
 - [x] Live session status dot. The `ongoing` chase plus the green done / amber warning
-      solids (`ui/components/StateDot.kt`); live `api-session/status` frames are
-      reconciled against each `session/list` pull, so a running claim the whole-world
-      list denies is dropped rather than left stuck (`DshViewModel.reconcileLiveRunning`)
+      solids (`ui/components/StateDot.kt`). One authority answers "is this session
+      running": `RunningBook` (`model/LiveRunning.kt`), fed by each `session/list` pull —
+      the host's own `running` agent-status sample — and by live `api-session/status`
+      frames, which are stamped with the pull they raced and are retired by the next one.
+      `SessionItem.running` is that answer and nothing else; no surface ORs a frame into it
+      any more, and no projection is read as activity. `subagentTiming.active` is an open
+      turn in the child's journal, *not* liveness — see `docs/HANDOFF.md` item 15 for the
+      crash orphans that prove it
 - [x] Row actions — Rename / Fork session / Copy session id / Archive, and Restore on
       the archived filter (`DshViewModel.renameSession`, `forkSession`, `archiveSession`,
       `unarchiveSession`)
@@ -81,6 +86,26 @@ of where the app stands against them.
       run, absent otherwise by design), agent-preset chip (hero only, because the host
       refuses to recompose an agent after a turn). Missing: terminal recovery, schedule
       catalog, open-in-app.
+- [x] **Background jobs.** The roster is the `job/list` Remote stream, one per session,
+      opened for whichever session is on screen — `job/follow` per expanded row for its
+      live output, `job/kill` for the two-press stop. This replaced a `jobs` block in the
+      `session/control` baseline that 0.2.0-rc.2 no longer sends, which is why every
+      session showed an empty jobs seat with nothing erroring. The seat is the web's
+      trigger: visible while the session can see **any** job, dotted only while one runs
+      or one settled unseen. The sheet carries the web's sections (Running / collapsible
+      Finished N with Clear), its durations, its terminal panel with the gap and
+      interruption notices, and its two-press kill; the chat log opens the same panel,
+      from the background shell call that started the job and from its `tool-jobs`
+      completion notice. Probes and frame shapes: `docs/JOBS.md`.
+      Divergences, deliberate: the seat's count is terser than `count.live.*` because the
+      phone's header is one row shared with the lineage chip and Files; a running row's
+      duration is read at composition rather than ticked once a second — the sheet already
+      recomposes on every output and roster frame, and a 1 Hz state write would hold a
+      frame callback open for the sheet's whole life, which is the idle drain
+      `LocalAnimatedDots` exists to prevent — so a *silent* running job's figure stands
+      still between frames; and the web has no
+      live job output in the chat log at all, so that half is this client's addition —
+      attached to the two entries that already name a job id.
 - [x] There is **no per-session overflow menu** — rename/fork/archive live on the sidebar row
 - [x] **A way up from a subagent.** The header's title is the tap: a leading arrow appears
       only when the roster can name the parent (`SubagentParent` is null otherwise, so a
@@ -161,6 +186,12 @@ of where the app stands against them.
 - [x] 22dp capsule, draft surface, placeholder, send → stop
 - [x] Model chip + picker sheet (grouped by provider), with the reasoning-effort chips on
       the selected route (`ui/Sheets.kt`)
+- [x] The chip states the truth rather than a guess: it names the session's
+      `modelSelection.next` (what the next turn will run), marks a switch no turn has run
+      yet (`next` differing from `lastUsed`) and a pick still out with the host, names a
+      route the catalog has dropped from the host's own `provider/model` and marks it
+      unavailable, and applies a pick made on the new-session screen to the session that
+      screen creates (`model/ModelSelection.kt`, `ui/ModelTriggerState.kt`)
 - [x] `/` command picker and the `+` add menu, both from one `commands/list` roster:
       client-owned File/Model/Permission rows, an input-taking command claimed into the
       draft, a bare one run through `commands/execute` (`ui/components/CommandMenu.kt`,

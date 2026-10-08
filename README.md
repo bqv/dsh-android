@@ -369,8 +369,23 @@ is left alone.
   that settled while the app was closed is not re-announced, because a session's
   first observation never marks it — the rule that keeps one session's job from
   lighting a dot on another.
-- `session/selectModel` moves the host's **global** default model, not just the
-  open session's, so a model picked here changes every session's, in every client.
+- The model chip names what the **next** turn will run, taken from the session's
+  `modelSelection.next`. A change the host has accepted but no turn has run yet
+  (`next` differing from `lastUsed`) is marked as pending; a pick still out with the
+  host says `applying…`; and a route the catalog no longer lists is named from the
+  host's own `provider/model` and marked unavailable. `session/selectModel` is never
+  retroactive, so the chip deliberately shows `next` rather than what last ran — a
+  chip showing `lastUsed` would advertise the previous model as the next one.
+- A model picked on the **new-session screen** is recorded and applied to the session
+  that screen creates; before then there is no session id to select for.
+- `session/selectModel` is **global as well as per session**. It sets the session's
+  `next` synchronously *and*, asynchronously — measured at 0.4–2 s on 0.2.0-rc.2 — the
+  host's global default (`session/modelCatalog.default`), which is what a session with
+  no selection of its own runs. That lag is a trap: a catalog re-read taken right after
+  the call still shows the old default, so a chip built from the default can advertise
+  a model the session is not going to run. The chip reads the session's own `next`
+  whenever it has one, and the new-session screen re-reads the catalog on entry because
+  any other session or client can move that default while it is open.
 - One host-side limitation the app cannot fix: a waterfall is fanned out to
   every registered `$events` client and settles only once each has answered, so
   a Skip or an approval is decisive only while this app is the sole event client
@@ -403,6 +418,10 @@ app/build.gradle.kts, settings.gradle.kts, gradle.properties, local.properties  
   every deliberate divergence and the reasoning behind it.
 - `docs/SCROLL-DIAG.md` — the latent scroll diagnostics: what they record, and
   how to read them back off a device.
+- `docs/JOBS.md` — the `job` Remote namespace as the running host actually
+  serves it (`job/list`, `job/follow`, `job/kill`), with the probes that establish
+  it. The shipped typert descriptors disagree with that host, and the roster is no
+  longer in `session/control`, which is how the jobs seat went blank.
 - `docs/research/` — the reverse-engineered reference: design system, wire
   protocol, transcript/UI node model, settings and panels, composer menus,
   notification plumbing, and the mobile-remote environment.

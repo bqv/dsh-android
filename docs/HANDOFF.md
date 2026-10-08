@@ -197,8 +197,39 @@ editing the live copy. There is no install step to forget.
     `directoryPicker/createDirectory` among them. `DshClient.rpcRaw` returns
     `result.value` untouched; `rpc` casts to `JSONObject` and is the wrong door for
     those.
+15. **`session/list`'s `running` is the host's *liveness* answer; `subagentTiming.active`
+    is not.** The host builds a row's `running` as
+    `ctx.agents.get(id)?.status === 'running'` for a session it has attached, and
+    `summarizeCold` hard-codes `running: false, agentAvailable: false` for every one it has
+    not (`dsh-api-session-controller/lib/index.js`, `summaryFor` / `summarizeCold`). So
+    `running` covers a child the app never saw start, and `agentAvailable` separates
+    attached-but-idle from cold. The `subagentTiming` projection that rides in the same row
+    means something else: it folds the child's *own journal*, and its `active` field is
+    present exactly while a `turn/start` has no matching `turn/end` — a fact about the log,
+    **not** about whether anything is running. A host restart mid-turn leaves `active` set
+    forever with no agent behind it, and that is not hypothetical: after the box crashed
+    under three concurrent Gradle builds and the host came back, the roster held two such
+    rows (`fd23b122-1474-4ea6-87a5-d065d522e3b5`, `dcd6240b-4eb5-4170-b6bd-bf971f3007cf`),
+    both `running: false, agentAvailable: false` with `active.through` frozen 64–65 minutes
+    earlier, while children that really were running in the same snapshot had `through`
+    under a minute old. **Reading `active` as liveness paints dead children as running** —
+    it was tried on this branch and reverted. The one thing that may hold a running claim a
+    pull denies is a live `api-session/status` frame newer than the pull's cut.
+16. **`subagentTiming.active` is worth reading for exactly one thing: diagnosing a crash.**
+    `active` present, `running: false`, `agentAvailable: false` and an old `through` is the
+    signature of a turn that was cut off by a restart. It is a durable fold, so it survives
+    the restart even though nothing is running.
+17. **Only `session.v4` records get the full projection fold.** 773 session directories hold
+    `session.v4.jsonl.zstd` and exactly those 773 roster rows carried `subagentTiming`; the
+    1,126 with a legacy `session.v3.jsonl.zstd` fold to `{title}` alone. Nothing in
+    `RunningBook` depends on it — `running` is present for every row — but a reader who
+    wants the timing projection must not expect it on an old record.
+18. **`subagentCatalog` carries no activity, and `subagents/list` does not exist.** The
+    projection is identity only (`id`, `createdAt`, `mode`, `label`), so any fold that reads
+    a running state out of it is inventing one — an `activity == ""` default once wiped the
+    row of every child on every catalog rebuild. `subagents/list` 404s on 0.2.0.
 
-15. **An mDNS answer is not all in the answer section.** Android answers a
+19. **An mDNS answer is not all in the answer section.** Android answers a
     `_adb-tls-connect._tcp` PTR query with the PTR under *answers* and the SRV,
     TXT and A records under **additional**. A parser that reads only `ancount`
     finds the instance, has no port for it, and drops it — which is why the old
@@ -207,12 +238,86 @@ editing the live copy. There is no install step to forget.
     interpreter with 256 threads. Parse all three sections, and stop listening as
     soon as an instance has both a port and an address: the phone replies in
     single-digit milliseconds, so listening out the timeout is pure latency.
-16. **`host:connect` reports failure as `OKAY`.** A refused port comes back as
+20. **`host:connect` reports failure as `OKAY`.** A refused port comes back as
     `OKAY "failed to connect to '…': Connection refused"` — the status code is
     fine and the verdict is in the message. And `reverse:` is **not** a host
     service: `host-serial:X:reverse:forward:…` is rejected with "unknown host
     service". The reverse has to go out as two requests on one socket —
     `host:transport:<serial>`, then `reverse:forward:<remote>;<local>`.
+21. **A spawned session does not reach the app without `api-session/added`.** The roster
+    is refreshed only by a whole-world `session/list` pull, and the host's membership
+    *pushes* (`api-session/added`, `api-session/removed`, both `mode: 'emit'` in
+    `dsh-api-remotes`' allowlist) were consumed by nothing, so a session that appeared
+    between two pulls had no row at all. Measured on the device: child `cd66afc5` was
+    created 59 s before a probe; the app's roster stayed at **1,891** rows while the host
+    listed **1,892**, and the parent's lineage sheet read `running=1` against the host's
+    `running=2` for that entire minute. On an idle parent — no follow events, so nothing
+    triggers a pull — the lag is unbounded. The `added` payload is the **whole**
+    `session/list` row (`summaryFor` builds both), so it is fed straight in
+    (`DshViewModel.applySessionAdded`) and a debounced pull is asked for as well, because
+    ordering, the archived filter and catalog labels remain a pull's job.
+22. **A `session/projections` read can be empty where `session/list` is not.** For
+    `session-a771fb9b-5ba8-4cb6-8339-e45de4cebbdd`, `session/projections {sessionId}`
+    answered `modelSelection.next = null, lastUsed = null, asOfSeq = null` in two
+    back-to-back reads (19:12:34 and 19:12:37) while `session/list` gave
+    `next = deepseek-official/deepseek-flash/off`, `lastUsed =
+    deepseek-official/deepseek-v4-flash-vision-exp/low` with `asOfSeq = 44`. Observed
+    behaviour; the record is `session.v4.jsonl.zstd` and carries seven `model/selection`
+    events, so the data is not missing from the log. **Inference, not established**: some
+    projections are registered runtime views rather than journal folds (the controller
+    declares several as `init: () => null` with `view: () => …`), so a cold read
+    legitimately answers null while the live summary has the value. Whatever the cause,
+    **cross-checking an app chip against `session/projections` is the wrong instrument** —
+    use the `session/list` row, or the `session/follow` snapshot, which is what the app
+    itself reads. One evening was lost to probes that used the other endpoint.
+
+## Host behaviour: model selection (probed on 0.2.0-rc.2)
+
+Measured, not inferred. These are host facts, so a change to the chip that contradicts
+them is a bug in the app. Everything here was established with `POST
+http://127.0.0.1:8081/api/<method>` (cookie recipe in `~/ref/NOTES.md`) against a
+throwaway session created for the purpose — **never against a live session**, because a
+local model selection can pull gigabytes of weights onto the user's GPU.
+
+- **Argument shapes disagree between methods on the same host.** `session/modelCatalog`
+  takes `{}`; `session/list` takes `{"_request":{}}`; `session/projections` and
+  `session/selectModel` both take `{"request":{…}}`. The error names the field, so probe.
+- **`session/projections` exists but is not in the shipped descriptors.** It is not in
+  `docs/research/protocol.md` either — but it answers `{"request":{"sessionId":…}}` with
+  the full `values` map, which is the cheapest way to read one session's folded
+  projections. The app does not call it; it relies on the projection stream instead.
+- **`modelSelection` is `{lastUsed, next}`, and the two are different facts.**
+  `next` is what the next turn will use and moves the instant `session/selectModel` is
+  accepted (`agents.selectForNextRequest`); `lastUsed` is what the last turn actually ran
+  and moves only when a turn runs. Observed disagreeing on a real session:
+  `lastUsed: deepseek-official/deepseek-v4-pro high`, `next: deepseek-official/deepseek-flash low`.
+  A blank session projects `{lastUsed: null, next: null}`.
+- **A refusal is hard, and mutates nothing.** An unlisted model, an unlisted provider, and
+  an effort the route does not advertise are all answered
+  `session/model-unavailable` ("Select an available model before sending a message." /
+  "…does not support reasoning effort \"medium\"") and leave both halves of the projection
+  untouched. There is **no** silent substitution of a different route. The only
+  "resolves differently" case found is the effort: omitting `reasoningEffort` is answered
+  with the route's `defaultEffort` filled in.
+- **`session/selectModel` moves the global default `session/modelCatalog.default` — and it
+  does so asynchronously.** Immediately after the call the catalog still reports the *old*
+  default; the new one appeared after ~0.4 s in one measurement and ~2 s in another. This
+  is the trap that matters: a chip built from `modelCatalog.default` has a lag baked into
+  it, so a re-read taken right after a selection advertises a model the session is not
+  going to run. It is also easy to "disprove" the global write by reading immediately —
+  two independent readers did exactly that and were wrong.
+- **The host pushes the change.** On the `session/control` stream it sends
+  `{"type":"projection","sessionId":…,"key":"modelSelection","value":{lastUsed,next},"seq":…}`
+  both when a selection is accepted **and again when `lastUsed` rolls forward after a
+  turn**. An app that reads `modelSelection` only from a follow snapshot therefore never
+  sees `lastUsed` move. Reached by opening `ws://127.0.0.1:8081/api/remote.mux` and sending
+  `{"type":"open","streamId":"s1","endpoint":"session/control","payload":{"args":{}}}`;
+  streams cannot be opened on the unary `POST /api/<method>` route at all
+  (`gateway/signature-invalid`: "stream Remote methods must be opened through the stream carrier").
+- **`session/selectModel` resumes the session**, and `session/prompt` on a session whose
+  selection moved but which has not run yet will run the new route and then report it as
+  `lastUsed` — which is what makes a pending switch a real, observable state rather than a
+  UI invention.
 
 ## Open items
 

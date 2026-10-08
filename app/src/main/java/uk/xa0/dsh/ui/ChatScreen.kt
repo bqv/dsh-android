@@ -548,11 +548,12 @@ fun ChatScreen(vm: DshViewModel) {
     // composer on one row; the picker sheet still shows the host's full names and
     // descriptions, which is where the exact wording matters.
     val permissionLabel = shortAccessLabel(ui.currentPermission, ui.permissionOptions)
-    val modelLabel = listOfNotNull(
-        shortModelName(ui.selectedModel?.name),
-        effortLabel(ui.selectedModel, ui.selectedEffort),
-    ).joinToString(" \u00b7 ")
-
+    // The model trigger names the route the host's `modelSelection.next` holds — the
+    // one the next turn will actually use. A pick the host has not answered, or a
+    // switch no turn has run yet, is marked as such rather than drawn as if it were
+    // in force; a route the catalog no longer lists still names itself, and says it
+    // cannot run. See `ModelTriggerState`.
+    val modelTrigger = modelTriggerState(ui.modelChoice, ui.selectedModel, ui.selectedEffort)
 
     val current = ui.sessions.firstOrNull { it.id == ui.currentSessionId }
     // The pending seat's directory, for the hero's workspace chip. The target's own
@@ -603,7 +604,7 @@ fun ChatScreen(vm: DshViewModel) {
     // The web's `selectReadOnlySubagent`: an addressed child claims the composer's
     // seat with a status frame instead of taking input — a one-shot record always,
     // a continuable child only once its parent is known to be offline. Availability
-    // is unknown until `subagents/list` lands, and unknown keeps the composer, so
+    // is unknown until the parent's catalog lands, and unknown keeps the composer, so
     // the seat never flickers into a frame it would have to take back.
     val composerState = subagentComposerState(
         target = current?.let { subagentTargetOf(it.id, it.parentSessionId, it.subagentMode) },
@@ -885,7 +886,7 @@ fun ChatScreen(vm: DshViewModel) {
                         value = draft,
                         onValueChange = { draft = it },
                         running = ui.running,
-                        modelLabel = modelLabel,
+                        modelTrigger = modelTrigger,
                         onModelClick = { showModels = true },
                         permissionLabel = permissionLabel,
                         onPermissionClick = { showPermission = true },
@@ -1073,11 +1074,20 @@ fun ChatScreen(vm: DshViewModel) {
                                             if (node != null) {
                                                 ToolCallTreeRow(node, vm::imageBitmap)
                                             } else {
-                                                ToolCallRow(entry, vm::imageBitmap)
+                                                ToolCallRow(
+                                                    entry,
+                                                    vm::imageBitmap,
+                                                    jobOutput = ui.jobOutput,
+                                                    onObserveJob = vm::observeJob,
+                                                )
                                             }
                                         }
                                         is ChatEntry.Todos -> TodoCard(entry.items)
-                                        is ChatEntry.Notice -> NoticeRow(entry)
+                                        is ChatEntry.Notice -> NoticeRow(
+                                            entry,
+                                            jobOutput = ui.jobOutput,
+                                            onObserveJob = vm::observeJob,
+                                        )
                                     }
 
                                     is DisplayRow.TurnProcess -> TurnProcessRow(row) {
@@ -1328,7 +1338,7 @@ fun ChatScreen(vm: DshViewModel) {
                         busyEnter = ui.busyEnter,
                         onStop = vm::stop,
                         running = ui.running,
-                        modelLabel = modelLabel,
+                        modelTrigger = modelTrigger,
                         onModelClick = { showModels = true },
                         permissionLabel = permissionLabel,
                         onPermissionClick = { showPermission = true },
@@ -1472,13 +1482,25 @@ fun ChatScreen(vm: DshViewModel) {
 
     if (showJobs) {
         ModalBottomSheet(
-            onDismissRequest = { showJobs = false },
+            // Closing the sheet stops the observation: the web closes its job
+            // popover's stream on unmount for the same reason, and a stream left open
+            // here would keep pulling output nobody is looking at.
+            onDismissRequest = {
+                showJobs = false
+                vm.observeJob(null)
+            },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = DshTheme.colors.bgBase,
         ) {
             JobsSheet(
                 jobs = ui.jobs,
-                onDismiss = { showJobs = false },
+                output = ui.jobOutput,
+                onObserve = vm::observeJob,
+                onKill = vm::killJob,
+                onDismiss = {
+                    showJobs = false
+                    vm.observeJob(null)
+                },
                 modifier = Modifier.padding(horizontal = DshSpacing.lg, vertical = DshSpacing.md),
             )
         }
@@ -1563,6 +1585,11 @@ fun ChatScreen(vm: DshViewModel) {
             providerOrder = ui.providerOrder,
             selected = ui.selectedModel,
             selectedEffort = ui.selectedEffort,
+            choice = ui.modelChoice,
+            // A hero pick is deferred, not applied; a session's is the host's. The
+            // sheet says which, so the check mark can never be read as "this is
+            // running" when it means "this is what you asked for".
+            sessionOpen = ui.currentSessionId != null,
             onSelect = { option, effort ->
                 vm.selectModel(option, effort)
                 showModels = false
@@ -2509,7 +2536,7 @@ private fun HeroBody(
     value: TextFieldValue,
     onValueChange: (TextFieldValue) -> Unit,
     running: Boolean,
-    modelLabel: String?,
+    modelTrigger: ModelTriggerState?,
     onModelClick: () -> Unit,
     permissionLabel: String?,
     onPermissionClick: () -> Unit,
@@ -2623,7 +2650,7 @@ private fun HeroBody(
                 onSend = onSend,
                 onStop = onStop,
                 running = running,
-                modelLabel = modelLabel,
+                modelTrigger = modelTrigger,
                 onModelClick = onModelClick,
                 permissionLabel = permissionLabel,
                 onPermissionClick = onPermissionClick,
@@ -2838,25 +2865,6 @@ private fun shortAccessLabel(current: String, options: List<uk.xa0.dsh.Permissio
         "danger-full-access" -> "Full access"
         else -> options.firstOrNull { it.value == current }?.name ?: current
     }
-}
-
-/**
- * Trims a leading family token so the model trigger fits beside the mode chip on a
- * phone: `DeepSeek-V41-Flash` renders as `V41-Flash`. The model sheet still lists
- * every model under its full name.
- */
-private fun shortModelName(name: String?): String? {
-    if (name == null) return null
-    // Elide the *version*, not the name: dropping the leading segment (as this
-    // first did) kept the version and threw away the model's identity.
-    val parts = name.split('-')
-    return if (parts.size >= 3) "${parts.first()}-${parts.last()}" else name
-}
-
-/** The active reasoning effort, shown beside the model as the web trigger does. */
-private fun effortLabel(model: uk.xa0.dsh.ModelOption?, effort: String?): String? {
-    if (effort.isNullOrEmpty()) return null
-    return model?.efforts?.firstOrNull { it.id == effort }?.name ?: effort
 }
 
 /** Last path segment, for the hero's workspace chip. */

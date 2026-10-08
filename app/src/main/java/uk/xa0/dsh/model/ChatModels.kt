@@ -127,6 +127,16 @@ sealed interface ChatEntry {
         val severity: NoticeSeverity = NoticeSeverity.INFO,
         /** Body shown only when the row is expanded; null when there is nothing more. */
         val detail: String? = null,
+        /**
+         * The background job this notice is about, when it is one.
+         *
+         * A `tool-jobs` notice names its job in its own prose
+         * (`background job bash-27 (bash: …) finished`), which is what
+         * `jobNoticeLabel` already reads the name out of — so the same parse gives the
+         * chat-log row the handle it needs to open that job's `job/follow` stream.
+         * Null for every other notice.
+         */
+        val jobId: String? = null,
     ) : ChatEntry
 }
 

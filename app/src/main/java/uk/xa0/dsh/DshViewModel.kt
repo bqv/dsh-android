@@ -32,14 +32,24 @@ import uk.xa0.dsh.model.AccountBalance
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.JobsMarker
+import uk.xa0.dsh.model.JobObservation
+import uk.xa0.dsh.model.JobOutput
+import uk.xa0.dsh.model.JobsWire
+import uk.xa0.dsh.model.JobTail
 import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.MessageAttachment
+import uk.xa0.dsh.model.ModelChoice
+import uk.xa0.dsh.model.ModelRef
+import uk.xa0.dsh.model.ModelSelectionState
 import uk.xa0.dsh.model.PendingSessionTarget
+import uk.xa0.dsh.model.parseHostModelSelection
+import uk.xa0.dsh.model.parseModelRef
 import uk.xa0.dsh.model.SessionIntentPlan
 import uk.xa0.dsh.model.subagentTreeIds
-import uk.xa0.dsh.model.staleLiveRunning
-import uk.xa0.dsh.model.runningAfter
+import uk.xa0.dsh.model.RunningBook
+import uk.xa0.dsh.model.durableRunningOf
 import uk.xa0.dsh.model.providerRank
+import uk.xa0.dsh.model.withRunning
 import uk.xa0.dsh.model.warrantsIdleAlert
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
@@ -54,8 +64,6 @@ import uk.xa0.dsh.model.SessionTarget
 import uk.xa0.dsh.model.SessionTargetCandidate
 import uk.xa0.dsh.model.SessionTargetPlan
 import uk.xa0.dsh.model.SessionTargets
-import uk.xa0.dsh.model.SUBAGENT_ACTIVITY_INACTIVE
-import uk.xa0.dsh.model.SUBAGENT_ACTIVITY_RUNNING
 import uk.xa0.dsh.model.SUBAGENT_ATTACHMENT_INVALID
 import uk.xa0.dsh.model.SUBAGENT_ATTACHMENT_REFUSAL
 import uk.xa0.dsh.model.SUBAGENT_FILE_UNSUPPORTED
@@ -77,12 +85,14 @@ import uk.xa0.dsh.model.parseSessionSearchResults
 import uk.xa0.dsh.model.parseSessionStats
 import uk.xa0.dsh.model.parseHostSettings
 import uk.xa0.dsh.model.permissionCommandMode
-import uk.xa0.dsh.model.parseSubagentCatalog
 import uk.xa0.dsh.model.parseSubagentCatalogProjection
+import uk.xa0.dsh.model.MembershipHold
+import uk.xa0.dsh.model.removeSession
 import uk.xa0.dsh.model.str
 import uk.xa0.dsh.model.subagentInterruptArgs
 import uk.xa0.dsh.model.subagentPromptRequest
 import uk.xa0.dsh.model.subagentTargetOf
+import uk.xa0.dsh.model.upsertSession
 import uk.xa0.dsh.net.BalanceFailure
 import uk.xa0.dsh.net.DeepSeekAccount
 import uk.xa0.dsh.net.DshAuthException
@@ -91,6 +101,7 @@ import uk.xa0.dsh.net.multipartBytes
 import uk.xa0.dsh.net.boundaryOf
 import uk.xa0.dsh.net.DshUnreachableException
 import uk.xa0.dsh.net.MuxState
+import uk.xa0.dsh.net.JobClient
 import uk.xa0.dsh.net.StreamEvent
 import uk.xa0.dsh.net.TerminalClient
 import uk.xa0.dsh.term.HostShellIssue
@@ -152,6 +163,14 @@ data class SessionItem(
     val title: String,
     val cwd: String?,
     val updatedAt: Long,
+    /**
+     * Whether this session's agent is working now.
+     *
+     * Derived, never sampled: it is `RunningBook.running(id)` and nothing else, folded
+     * in by `withRunning` at the two places a row is built or repainted. Nothing may
+     * OR a live frame into it at a display site — that is what let the drawer, the
+     * header chip and the lineage sheet each answer the same question differently.
+     */
     val running: Boolean,
     val isSubagent: Boolean,
     /** A provisional session with nothing in it yet; the host sends `title: null`. */
@@ -230,6 +249,21 @@ data class ModelOption(
     val defaultEffort: String? = null,
 )
 
+/**
+ * Whether [models] offers [ref]'s route **and** the effort it names.
+ *
+ * The host refuses an effort a route does not advertise with the same
+ * `session/model-unavailable` it uses for a missing model (probed), so an effort
+ * that is not in the list is not runnable either. A route with no efforts at all
+ * accepts a null effort only.
+ */
+fun modelRouteIsRunnable(models: List<ModelOption>, ref: ModelRef): Boolean {
+    val option = models.firstOrNull { it.provider == ref.provider && it.model == ref.model }
+        ?: return false
+    val effort = ref.reasoningEffort ?: return true
+    return option.efforts.any { it.id == effort }
+}
+
 /** One host-advertised permission preset (`permissionPresets/catalog`). */
 data class PermissionOption(
     val value: String,
@@ -279,20 +313,30 @@ data class GoalState(
 }
 
 /**
- * One background job the host is running (or ran) for a session.
+ * One background job the host is running (or ran) for a session — a `JobView` off
+ * the `job/list` stream.
  *
- * These arrive on the same control stream as the queue — the host publishes a
- * `jobs` frame per session on every change — so there is no RPC to call and no
- * polling: a job that starts, stops or fails is a push.
+ * The roster used to arrive on the same control stream as the queue, as a `jobs`
+ * block per session. The running 0.2.0-rc.2 host publishes no such block (probed:
+ * its control baseline carries `projections` and nothing else), which is why jobs
+ * had vanished from every session. They now come from `job/list` — one stream per
+ * session — and a job that starts, stops or fails is still a push, not a poll.
+ * See `model/Jobs.kt` for the wire rules and `docs/JOBS.md` for the probes.
  */
 data class JobItem(
     val id: String,
     val kind: String,
     val label: String,
+    /** Owning session; absent for an unowned job, which every caller can see. */
+    val owner: String? = null,
     val status: String,
-    val detail: String?,
+    /** The producer's live progress line, cleared at settlement. */
+    val progress: String? = null,
+    val detail: String? = null,
     val startedAt: Long,
-    val finishedAt: Long?,
+    val finishedAt: Long? = null,
+    /** The output ring's coordinates, which decide whether a row can be expanded. */
+    val output: JobOutput = JobOutput(),
 ) {
     val running: Boolean get() = status == "running" || status == "stopping"
 }
@@ -363,7 +407,7 @@ const val PENDING_DRAFT_KEY = "pending"
 private const val SEARCH_DEBOUNCE_MS = 250L
 
 /**
- * The pause before a `subagents/list` pull that a frame asked for.
+ * The pause before a `subagentCatalog` projection rebuild that a frame asked for.
  *
  * Deliberately the same trailing-edge shape and 500ms as `refreshSessionsSoon`:
  * membership frames arrive in bursts (a parent spawning its children one after
@@ -376,9 +420,12 @@ private const val CATALOG_DEBOUNCE_MS = 500L
 
 /**
  * How long after the last live frame the host's own bookkeeping is trusted over
- * a fold. Shared by [DshViewModel.reconcileLiveRunning] and the catalog fold: a
- * read sampled a beat before the host flushed a child's stop frame must not
- * blink the open session's Stop button back to Send mid-turn.
+ * a fold, for the *composer* only.
+ *
+ * A roster read sampled a beat before the host flushed the open session's own stop
+ * frame must not blink its Stop button back to Send mid-turn. Rows do not need this
+ * grace any more — [RunningBook] orders a frame against the pull's cut instead of
+ * guessing from a clock — so this guards `UiState.running` and nothing else.
  */
 private const val LIVE_QUIET_MS = 1500L
 
@@ -531,6 +578,13 @@ data class UiState(
      * land, which a bare String could not.
      */
     val draftRestore: DraftRestore? = null,
+    /**
+     * Whether the session on screen is working — what the composer's Stop button reads.
+     *
+     * A different fact from [SessionItem.running]'s row dot: this one also carries a
+     * send's optimistic echo, which no roster read can know about yet. Its roster half
+     * is still taken from the open row, so the two cannot contradict each other.
+     */
     val running: Boolean = false,
     /**
      * The journal has closed this session's own turn, whatever the agent registry
@@ -539,25 +593,33 @@ data class UiState(
      */
     val ownTurnClosed: Boolean = false,
     /**
-     * `parentAvailable` for the open addressed child, from `subagents/list`.
+     * `parentAvailable` for the open addressed child, from its parent's catalog.
      * Null for every ordinary session and until that read lands — the composer
      * gate treats unknown as available on purpose, so the composer can never
      * flicker into a read-only frame it would have to take back.
      */
     val subagentParentAvailable: Boolean? = null,
     /**
-     * The `subagents/list` catalogs this client holds, keyed by the parent they
-     * describe. Each is the host's own direct-child answer for that parent: the
-     * durable rows, their modes and labels, and the live Agent status the list
-     * summary is not a dependable source for — it serves any session the
-     * controller has not attached as cold, and that reads `running: false`.
+     * The subagent catalogs this client holds, keyed by the parent they describe.
+     * Each is the host's own direct-child projection for that parent: identity only —
+     * the durable rows, their modes and labels. It carries no activity, and no reader
+     * may infer any; a child's running state lives in `RunningBook` alone.
      */
     val subagentCatalogs: Map<String, SubagentCatalog> = emptyMap(),
     val models: List<ModelOption> = emptyList(),
     val providerOrder: List<String> = emptyList(),
-    val selectedModel: ModelOption? = null,
-    /** Active reasoning effort for the selected route, when it has any. */
-    val selectedEffort: String? = null,
+    /**
+     * The model trigger's inputs: the host's `modelSelection` projection, the
+     * catalog's global default, the pick recorded on the new-session screen, and the
+     * pick still out with the host.
+     *
+     * These are the *only* writable model state there is. The three properties the
+     * UI reads — [modelChoice], [selectedModel], [selectedEffort] — are derived from
+     * them below, so there is no field for a second writer to set and no way for the
+     * chip to disagree with the state it is supposed to describe. That is deliberate:
+     * this area has already had four separate bugs of exactly that shape.
+     */
+    val modelSelection: ModelSelectionState = ModelSelectionState(),
     val permissionOptions: List<PermissionOption> = emptyList(),
     /** Current session's access mode, from the `permissions` projection. */
     val currentPermission: String = "",
@@ -592,6 +654,12 @@ data class UiState(
     val queueBusy: String? = null,
     /** Background jobs the host reports for the open session. */
     val jobs: List<JobItem> = emptyList(),
+    /**
+     * Live output for whichever job is expanded — in the jobs sheet or in a
+     * chat-log entry. Null when nothing is expanded, so a panel never paints
+     * another row's bytes.
+     */
+    val jobOutput: JobObservation? = null,
     /**
      * A job finished in the **open** session since its list was last opened — the
      * jobs seat's green dot. Purely client-side, like the session rows'
@@ -669,6 +737,38 @@ data class UiState(
     val settingsWriteError: String? = null,
 ) {
     /**
+     * The route the model trigger advertises, and how the host came to it.
+     *
+     * Derived, never stored: whatever [modelSelection] says is what the chip says.
+     * That is what makes a second writer impossible rather than merely absent — there
+     * is no field to assign. An empty catalog means "not loaded", so nothing is
+     * condemned as unavailable on the strength of a failed `session/modelCatalog`.
+     */
+    val modelChoice: ModelChoice
+        get() = modelSelection.choice(
+            sessionOpen = currentSessionId != null,
+            isKnown = if (models.isEmpty()) null else { ref -> modelRouteIsRunnable(models, ref) },
+        )
+
+    /**
+     * The catalog entry for [modelChoice], when the host still lists the route.
+     * Null while the route is unknown or has gone away — the chip then falls back
+     * to naming the route from `modelChoice.ref` rather than to a stale entry.
+     */
+    val selectedModel: ModelOption?
+        get() = modelChoice.ref?.let { ref ->
+            models.firstOrNull { it.provider == ref.provider && it.model == ref.model }
+        }
+
+    /**
+     * The active reasoning effort: the route's own id, which is what the sheet's
+     * effort chips compare against, falling back to the catalog's default for it.
+     */
+    val selectedEffort: String?
+        get() = modelChoice.ref?.reasoningEffort?.takeIf { it.isNotEmpty() }
+            ?: selectedModel?.defaultEffort
+
+    /**
      * Whether this session has its **own** work in flight. The messaging gate for
      * the transcript's turn-status row.
      *
@@ -717,18 +817,6 @@ data class UiState(
  * Compose layer stays free of protocol knowledge.
  */
 @OptIn(FlowPreview::class)
-/** Live running sessions reported by the host, shared with [SessionItem.withLiveRunning]. */
-private val liveRunningIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-
-/**
- * Ids a live frame has explicitly reported as stopped.
- *
- * Kept apart from [liveRunningIds] because "a live frame said stopped" and "no frame has
- * mentioned it" are different facts, and only the first may end a subagent — the roster
- * stops mentioning a child the moment it is not attached, without anything having ended.
- */
-private val stoppedLiveIds: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-
 class DshViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application as DshApplication
@@ -835,8 +923,8 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private var historyJob: Job? = null
 
     /**
-     * The `subagents/list` reads behind both the composer's read-only gate and the
-     * per-child activity the roster cannot report. Kept apart from [historyJob]
+     * The parent-catalog rebuilds behind both the composer's read-only gate and the
+     * labels a lineage row is named with. Kept apart from [historyJob]
      * because opening a child must not cancel its own history pager (or vice
      * versa).
      *
@@ -851,19 +939,19 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     /** Keys of the debounced pulls, so closing a disclosure can drop one. */
     private val subagentCatalogDebounce = HashMap<String, Job>()
     /**
+     * The single authority on which sessions are running.
+     *
+     * Every row's `running` flag is this object's answer and nothing else — see
+     * [RunningBook] for why a roster cut and a live frame can be ordered against one
+     * another rather than guessed at, and for what each of them actually proves.
+     */
+    private val runningBook = RunningBook()
+    /**
      * Parents whose catalog a disclosure is currently showing, the app's
      * `openCatalogs` (`manager.ts:438`). Membership under one of these is the
      * change a reader would actually see, so only these are re-read on a frame.
      */
     private val subagentCatalogOpen = HashSet<String>()
-    /**
-     * Child activity seen on a live frame while a catalog read was in flight.
-     *
-     * The sample a response carries predates that frame, so folding it raw would
-     * let it un-run a child the user just watched start (or re-run one that
-     * stopped) — the web's `activityRows` (`:367-372`, `withCatalogMutations`).
-     */
-    private val subagentCatalogActivity = HashMap<String, Boolean>()
     /**
      * child id → durable parent id, from the last roster pull.
      *
@@ -909,6 +997,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     val terminal: StateFlow<TerminalUiState> = _terminal.asStateFlow()
 
     private val terminalClient by lazy { TerminalClient(client) }
+
+    /**
+     * The host's `job` namespace.
+     *
+     * The roster is a stream per session rather than the `session/control` block it
+     * used to be, so this is a client like [terminalClient] and not a call site in
+     * the control handler.
+     */
+    private val jobClient by lazy { JobClient(client) }
 
     /**
      * The live screen, mutated in place rather than published as state.
@@ -1848,19 +1945,96 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
     /**
-     * Folds a fresh roster sample into the rows the UI already holds.
+     * Folds a fresh roster sample into the rows the UI holds.
      *
-     * The previous row is what lets a subagent's running survive a sample that has
-     * simply stopped mentioning it — see [runningAfter]. Ordinary sessions keep the
-     * list's word.
+     * The sample is the world, so it replaces the rows — with one exception that is not a
+     * heuristic but the same ordering rule the running book uses: a row a membership frame
+     * added *during* the pull's flight is not in the pull's cut, and dropping it here is
+     * how a just-spawned child would appear and vanish. [MembershipHold] names those rows;
+     * a pull that was requested after them has already released them.
      */
     private fun mergeRoster(list: List<SessionItem>): List<SessionItem> {
-        val previous = _ui.value.sessions.associateBy { it.id }
-        return list.map { it.withLiveRunning(previous[it.id]) }
+        val held = membershipHold.rows()
+        val rows = if (held.isEmpty()) {
+            list
+        } else {
+            val known = list.mapTo(HashSet()) { it.id }
+            list + held.filterNot { it.id in known }
+        }
+        return rows.map { it.withRunning(runningBook) }
     }
 
-    /** Sessions the host says are running right now, from `api-session/status`. */
-    private val liveRunning: MutableSet<String> = liveRunningIds
+    /**
+     * The rows membership frames added that no pull has confirmed yet, stamped with the
+     * roster epoch. See [MembershipHold] for the rule and why it shares that counter.
+     */
+    private val membershipHold = MembershipHold()
+
+    /** The last running summary written to the diag file, so an unchanged pull is silent. */
+    private var lastRunningSummary: String? = null
+
+    /**
+     * Records what one pull did to running state, for a device to read back.
+     *
+     * The bug this replaces was only ever diagnosed from a diag file, and what it looked
+     * like was a *sequence*: a count that appeared and then vanished. So the counts, the
+     * ids behind them and every flag that moved are written here, once per change rather
+     * than once per pull.
+     *
+     * `wire`, `active` and `orphan` are the pull's raw material, so a reader can check
+     * the arithmetic rather than trust the summary: `wire` is the host's own agent-status
+     * count, `active` is how many rows carry an open turn in their journal, and `orphan`
+     * is the subset of those with **no agent bound** — the crash signature
+     * ([durableRunningOf] measured two of them after the box restarted mid-build, which
+     * is why `active` is not read as liveness). `frameHeld` counts rows the book answers
+     * `true` for while the pull's `running` said `false`, which after that decision only
+     * a live `api-session/status` frame can do.
+     */
+    private fun noteRunningPull(
+        wire: Map<String, Boolean>,
+        active: Set<String>,
+        noAgent: Set<String>,
+    ) {
+        val before = HashMap<String, Boolean>(_ui.value.sessions.size + 8)
+        for (row in _ui.value.sessions) before[row.id] = row.running
+        val ids = HashSet<String>(wire.size + 8)
+        ids.addAll(wire.keys)
+        ids.addAll(before.keys)
+        var running = 0
+        var frameHeld = 0
+        val heldIds = ArrayList<String>(4)
+        val changed = ArrayList<String>(4)
+        for (id in ids) {
+            val was = before[id]
+            val answer = runningBook.running(id)
+            if (was != null && was != answer) changed += id
+            if (!answer) continue
+            running++
+            // Only ids this pull actually *denied* count: a row the pull never mentioned
+            // (a membership hold, say) was not contradicted by it, and counting that as a
+            // frame hold would credit the wrong mechanism in the diag.
+            if (wire[id] != false) continue
+            frameHeld++
+            heldIds += id
+        }
+        val orphan = active.count { it in noAgent }
+        val summary = "${wire.size}:$running:$frameHeld:$orphan:${changed.size}"
+        if (summary == lastRunningSummary) return
+        lastRunningSummary = summary
+        ScrollDiag.note(
+            "roster",
+            "rows" to wire.size,
+            "running" to running,
+            "wire" to wire.count { it.value },
+            "active" to active.size,
+            "orphan" to orphan,
+            "frameHeld" to frameHeld,
+            "changed" to changed.size,
+            "ids" to heldIds.take(6).joinToString(","),
+            "changedIds" to changed.take(6).joinToString(","),
+        )
+    }
+
     /** Client-side fallback for the running clock when `turn/start` is off-window. */
     private var runningSince: Long? = null
     /** Latest pending queue per session, from the host-wide control stream. */
@@ -1872,15 +2046,23 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * its prompt fails, or it ages out.
      */
     private val pendingSubmissions = java.util.concurrent.ConcurrentHashMap<String, List<QueuedMessage>>()
-    /** Latest background jobs per session, from the same stream. */
+    /** Latest background jobs per session, from that session's `job/list` stream. */
     private val jobsBySession = java.util.concurrent.ConcurrentHashMap<String, List<JobItem>>()
+    /** The session whose `job/list` roster stream is open, and its collector. */
+    private var jobsWatchedSession: String? = null
+    private var jobsWatchJob: Job? = null
+    /** Accumulated live output per observed job, keyed by job id. */
+    private val jobObservations = java.util.concurrent.ConcurrentHashMap<String, JobObservation>()
+    /** The one job whose `job/follow` stream is open — the expanded row. */
+    private var observedJobId: String? = null
+    private var jobFollowJob: Job? = null
     /**
      * Sessions whose jobs settled since their list was last opened.
      *
      * Per session, not one app-wide flag: a job finishing in another session must
      * not light the seat of the session on screen. The open session's membership
-     * is what [UiState.jobsFinishedUnseen] publishes. Written only from the control
-     * stream and the UI, both on the main dispatcher; the update rules themselves
+     * is what [UiState.jobsFinishedUnseen] publishes. Written only from a roster
+     * frame and the UI, both on the main dispatcher; the update rules themselves
      * live in [JobsMarker].
      */
     private var finishedUnseenSessions: Set<String> = emptySet()
@@ -1967,14 +2149,23 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // the agent hung waiting on a client that would never reply. The centre
         // owns the single subscription and relays the one signal the UI needs.
         app.attention.onLiveStatus = { sessionId, running -> applyLiveStatus(sessionId, running) }
+        // Membership is a push, and the only one the host offers for the roster. It is
+        // applied immediately — the frame *is* the row — and the debounced pull is asked
+        // for as well, because the frame says nothing about any other row: ordering, the
+        // archived filter and the labels a catalog carries are still a pull's job.
+        app.attention.onSessionAdded = { row -> applySessionAdded(row) }
+        app.attention.onSessionRemoved = { sessionId -> applySessionRemoved(sessionId) }
         // A provider registering or disappearing changes the catalog, and the app has no
         // other way to hear about it: the list is fetched per connect. The host forwards
         // this event for exactly that purpose and the web refreshes on it, so a local
         // router that comes up is not invisible until the next reconnect.
         app.attention.onAdaptersUpdated = {
             viewModelScope.launch {
+                // `loadModels` re-derives the chip from the host's catalog default and
+                // the session's own projection, so re-reading the list is enough: a
+                // provider that has just appeared or gone is reflected without the
+                // chip having to be poked separately.
                 loadModels()
-                refreshSelectedModel()
             }
         }
         // The notification copy names the subject; only the client's session list
@@ -2522,10 +2713,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     .onSuccess { list ->
                         _ui.value = _ui.value.copy(sessions = mergeRoster(list))
                         warnOnMissingMembers(list)
-                        syncRunningFromList(list)
+                        publishRosterRunning()
                     }
-                // The roster cannot correct a subagent's activity, so the catalogs
-                // are what a resume repaints them from (`manager.ts:796-798`).
+                // Identity, not activity: a resume repaints the labels and modes the
+                // lineage rows are named with, which the follow snapshot re-delivers
+                // (`manager.ts:796-798`). Running state came from the pull above.
                 refreshWatchedCatalogs()
                 Log.d(TAG, "resume: streams re-subscribed")
             } finally {
@@ -2694,23 +2886,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                         queues[sessionId] = parseQueue(all.optJSONArray(sessionId))
                     }
                 }
-                // A baseline is an observation too: a job that settled across a
-                // reconnect should light its own seat. So the map is compared and
-                // then pruned, not cleared first — clearing would erase the
-                // outgoing list before [observeJobs] could compare against it.
-                val seeded = HashSet<String>()
-                val jobsBlock = payload.obj("jobs")
-                if (jobsBlock != null) {
-                    jobsBlock.keys().forEach { sessionId ->
-                        seeded.add(sessionId)
-                        observeJobs(sessionId, parseJobs(jobsBlock.optJSONArray(sessionId)))
-                    }
-                }
-                // A baseline is the whole world: any session missing from it has no
-                // jobs, so keeping the old entry would strand finished rows. That is
-                // a drop, not a settle — the session is gone from the host registry,
-                // so there is no seat left to mark.
-                jobsBySession.keys.retainAll(seeded)
+                // The running host's baseline carries `projections` and nothing
+                // else: no `queues`, and — the reason jobs had vanished from every
+                // session — no `jobs`. The queue block above is kept because an
+                // older host does send it; the job block is deliberately *not*
+                // replaced with a fallback, because a client that keeps waiting for
+                // a frame the host no longer sends waits forever. Jobs come from
+                // `job/list` now; see [watchJobs].
                 publishJobsForCurrent()
                 // Seed the open session's folded projections so a control delta
                 // that only carries one key still has its siblings in hand.
@@ -2720,7 +2902,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     if (block != null) {
                         liveProjections = block
                         applySessionProjections(block)
-                        refreshSelectedModel()
+                        applyModelSelection(block)
                         // The subagent catalog lives in these projections, and this is
                         // where they arrive. The rebuild used to happen only at
                         // `openSession`, which runs *before* the baseline — so it read an
@@ -2739,14 +2921,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 publishQueue()
             }
 
+            // A 0.2.0-rc.2 host never sends this. It was the job roster's old home,
+            // and the block is kept only so a host that still pushes one is read
+            // rather than dropped; [watchJobs] is what makes jobs appear.
             "jobs" -> {
                 val sessionId = value.str("sessionId")
                 if (sessionId.isEmpty()) return
-                // Recorded for every session, not only the open one: the host
-                // pushes one `jobs` frame per changed session, and that is the only
-                // way a job finishing elsewhere can light *its* seat rather than
-                // this one's.
-                recordJobs(sessionId, parseJobs(value.arr("jobs")))
+                recordJobsFrame(sessionId, JobsWire.jobsOf(value.arr("jobs")))
             }
 
             "projection" -> {
@@ -2762,6 +2943,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 merged.put(value.str("key"), value.opt("value"))
                 liveProjections = merged
                 applySessionProjections(merged)
+                // `modelSelection` is a projection like any other, so a delta that
+                // carries it — the host rolling `lastUsed` forward after a turn, or
+                // another client selecting — has to move the chip. It used to be read
+                // only from a full snapshot, which left the chip describing whatever
+                // the last snapshot said until the stream was reopened.
+                if (value.str("key") == "modelSelection") applyModelSelection(merged)
                 // After the merge, not before: the rebuild reads `liveProjections`,
                 // and running it first would read the value this frame replaces.
                 if (value.str("key") == "subagentCatalog") refreshSubagentCatalogSoon(sessionId)
@@ -2881,12 +3068,56 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------- jobs
 
     /**
+     * Keeps the open session's `job/list` roster stream current.
+     *
+     * One stream, for the session on screen — which is exactly what the web does:
+     * it mounts its job control with the open conversation and watches that
+     * session's roster. This is a change in reach from the old global `jobs`
+     * baseline, and it is not a choice: 0.2.0-rc.2 has no host-wide job push and no
+     * forwarded job event (the allowlist in `dsh-api-remotes` was checked, and a
+     * live `$events` capture across a job's whole life carried none), so a roster
+     * per session is the only channel there is.
+     *
+     * The consequence is worth stating plainly: the seat's finished-unseen dot is
+     * now only ever earned by the session you are looking at, because no other
+     * session's roster is open. The web has no cross-session job dot either, so
+     * this is parity rather than a regression — but it *is* less than the old
+     * global baseline gave, and it is why [JobsMarker]'s per-session comparison is
+     * kept rather than simplified away.
+     */
+    private fun watchJobs(sessionId: String?) {
+        if (jobsWatchedSession == sessionId && jobsWatchJob?.isActive == true) return
+        jobsWatchJob?.cancel()
+        jobsWatchJob = null
+        jobsWatchedSession = sessionId
+        if (sessionId == null) {
+            recordJobsFrame(sessionId = null, items = emptyList())
+            return
+        }
+        jobsWatchJob = viewModelScope.launch {
+            jobClient.list(sessionId).collect { event ->
+                when (event) {
+                    is StreamEvent.Item -> {
+                        // Whole-set replacement frames, so a reconnect's first frame
+                        // is already the truth and there is nothing to merge.
+                        if (event.value.str("type") != "rows") return@collect
+                        recordJobsFrame(sessionId, JobsWire.jobsOf(event.value.arr("jobs")))
+                    }
+
+                    is StreamEvent.Failure -> Log.w(TAG, "job/list failed: ${event.code} ${event.message}")
+                    StreamEvent.End -> Log.d(TAG, "job/list ended for $sessionId")
+                }
+            }
+        }
+    }
+
+    /**
      * Records one observation of a session's job list.
      *
      * The finished transition is judged here, against **this session's own**
      * previous list — [jobsBySession] still holds it when the new one is written
      * — never against the list currently published. Comparing against the
-     * published list is what made the first `jobs` frame after a switch read as a
+     * published list is what made the first roster frame after a switch read as a
      * finish: it was the *other* session's list on the left of the comparison.
      *
      * A session's first observation has no previous list, so it never settles
@@ -2899,18 +3130,28 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Records one `jobs` frame and republishes when it belongs to the open
-     * session. Frames for other sessions are kept too: their transition is what
-     * lights their own seat.
+     * Records one roster frame and republishes when it belongs to the open
+     * session. A null session is the pending hero: there is no roster to hold, so
+     * its entry is dropped rather than left behind to strand rows.
      */
-    private fun recordJobs(sessionId: String, items: List<JobItem>) {
-        observeJobs(sessionId, items)
-        if (sessionId == _ui.value.currentSessionId) publishJobsForCurrent()
+    private fun recordJobsFrame(sessionId: String?, items: List<JobItem>) {
+        if (sessionId == null) {
+            val current = _ui.value.currentSessionId
+            if (current != null) jobsBySession.remove(current)
+        } else {
+            observeJobs(sessionId, items)
+            // A job that leaves the roster cannot be observed any more; keeping its
+            // panel state would let a reopened sheet paint output for a row that is
+            // no longer there.
+            val live = items.mapTo(HashSet()) { it.id }
+            jobObservations.keys.retainAll(live)
+        }
+        publishJobsForCurrent()
     }
 
     /**
-     * Publishes the open session's list and whether *its* seat carries the
-     * finished marker.
+     * Publishes the open session's list, the observation for whichever of its jobs
+     * is expanded, and whether *its* seat carries the finished marker.
      *
      * No open session (the pending hero from deferred creation) publishes an
      * empty list and no dot, so a session switched away from cannot leave its
@@ -2920,24 +3161,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val current = _ui.value.currentSessionId
         val items = current?.let { jobsBySession[it] }.orEmpty()
         val unseen = JobsMarker.unseenFor(finishedUnseenSessions, current)
-        if (items == _ui.value.jobs && unseen == _ui.value.jobsFinishedUnseen) return
-        _ui.value = _ui.value.copy(jobs = items, jobsFinishedUnseen = unseen)
-    }
-
-    private fun parseJobs(array: JSONArray?): List<JobItem> {
-        if (array == null) return emptyList()
-        return (0 until array.length()).mapNotNull { index ->
-            val job = array.optJSONObject(index) ?: return@mapNotNull null
-            JobItem(
-                id = job.str("id"),
-                kind = job.str("kind"),
-                label = job.str("label").ifEmpty { job.str("kind") },
-                status = job.str("status"),
-                detail = job.str("detail").takeIf { it.isNotEmpty() },
-                startedAt = job.long("startedAt"),
-                finishedAt = if (job.has("finishedAt")) job.long("finishedAt") else null,
-            )
+        val observed = observedJobId?.let { jobObservations[it] }
+        if (items == _ui.value.jobs &&
+            unseen == _ui.value.jobsFinishedUnseen &&
+            observed == _ui.value.jobOutput
+        ) {
+            return
         }
+        _ui.value = _ui.value.copy(
+            jobs = items,
+            jobsFinishedUnseen = unseen,
+            jobOutput = observed,
+        )
     }
 
     /**
@@ -2950,6 +3185,118 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val current = _ui.value.currentSessionId ?: return
         finishedUnseenSessions = JobsMarker.seen(finishedUnseenSessions, current)
         if (_ui.value.jobsFinishedUnseen) publishJobsForCurrent()
+    }
+
+    // -------------------------------------------------- job output observation
+
+    /**
+     * Starts (or stops) the `job/follow` observation behind the expanded row.
+     *
+     * Observation follows visibility, as it does in the web: output only flows
+     * while someone is watching, and collapsing closes the stream. [jobId] is the
+     * single job currently expanded anywhere in the UI — the sheet and a chat-log
+     * entry are never open at once, because the sheet is modal, so one stream is
+     * enough and a second would only duplicate output.
+     *
+     * Re-expanding a job resumes from the previous generation's `next` offset, so
+     * a collapse-and-reopen does not re-read output already on screen.
+     */
+    fun observeJob(jobId: String?) {
+        if (jobId == observedJobId) return
+        observedJobId = jobId
+        jobFollowJob?.cancel()
+        jobFollowJob = null
+        if (jobId == null) {
+            publishJobsForCurrent()
+            return
+        }
+        // A fresh expansion with no prior state starts streaming rather than
+        // inheriting the failed/settled flags of some earlier generation.
+        val previous = jobObservations[jobId]
+        jobObservations[jobId] = previous?.copy(streaming = true, error = null)
+            ?: JobObservation(jobId = jobId)
+        publishJobsForCurrent()
+        val sessionId = _ui.value.currentSessionId
+        jobFollowJob = viewModelScope.launch {
+            jobClient.follow(sessionId, jobId, previous?.cursor).collect { event ->
+                when (event) {
+                    is StreamEvent.Item -> applyFollowFrame(jobId, event.value)
+                    is StreamEvent.Failure -> failJobObservation(jobId, "${event.code} ${event.message}".trim())
+                    StreamEvent.End -> endJobObservation(jobId)
+                }
+            }
+        }
+    }
+
+    /**
+     * One `job/follow` frame.
+     *
+     * `opened` is the generation anchor; `output` is a coalesced batch; `status` is
+     * the terminal projection, which rides the same stream as the output so
+     * settlement can never race a still-open channel.
+     */
+    private fun applyFollowFrame(jobId: String, value: JSONObject) {
+        val current = jobObservations[jobId] ?: JobObservation(jobId = jobId)
+        when (value.str("type")) {
+            "opened" -> {
+                val from = value.int("from")
+                val earliest = value.obj("job")?.obj("output")?.int("earliest") ?: 0
+                jobObservations[jobId] = JobTail.opened(current, jobId, from, earliest)
+                    .copy(cursor = from)
+            }
+
+            "output" -> {
+                val chunks = value.arr("chunks")
+                val texts = if (chunks == null) {
+                    emptyList()
+                } else {
+                    (0 until chunks.length()).mapNotNull { chunks.optJSONObject(it)?.str("text") }
+                }
+                val chunkGap = chunks != null && (0 until chunks.length())
+                    .any { chunks.optJSONObject(it)?.bool("gapBefore") == true }
+                jobObservations[jobId] = JobTail
+                    .append(current, texts, value.optBoolean("lossy", false), chunkGap)
+                    .copy(cursor = value.int("next"))
+            }
+
+            "status" -> jobObservations[jobId] = JobTail.settled(current)
+        }
+        if (observedJobId == jobId) publishJobsForCurrent()
+    }
+
+    /**
+     * The stream ended without a `status` frame.
+     *
+     * A clean end after `status` is the normal path — the host closes the stream
+     * once the ring is drained — so this must not paint an error over a job that
+     * simply finished. [JobTail.settled] already cleared `streaming`, and a stream
+     * that ends there is expected.
+     */
+    private fun endJobObservation(jobId: String) {
+        val current = jobObservations[jobId] ?: return
+        if (current.streaming) jobObservations[jobId] = JobTail.settled(current)
+        if (observedJobId == jobId) publishJobsForCurrent()
+    }
+
+    private fun failJobObservation(jobId: String, error: String) {
+        jobObservations[jobId] = JobTail.failed(jobObservations[jobId], jobId, error)
+        if (observedJobId == jobId) publishJobsForCurrent()
+    }
+
+    /**
+     * The human kill: `job/kill`, then let the roster stream report the outcome.
+     *
+     * Nothing is painted from this answer. The host admits the request
+     * (`requested`) or reports the row already gone (`already-finished`) and the
+     * `job/list` frame does the rest, which is what keeps a row from claiming to be
+     * cancelled while its process is still running.
+     */
+    fun killJob(jobId: String) {
+        val sessionId = _ui.value.currentSessionId ?: return
+        viewModelScope.launch {
+            runCatching { jobClient.kill(sessionId, jobId) }
+                .onFailure { Log.w(TAG, "job/kill $jobId failed: ${it.message}") }
+        }
     }
 
     // ------------------------------------------------------------- references
@@ -3192,9 +3539,26 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         )
         when (plan) {
             is SessionIntentPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
-            is SessionIntentPlan.Open -> openSession(plan.sessionId)
+            is SessionIntentPlan.Open -> openSessionCarryingModelPick(plan.sessionId)
             is SessionIntentPlan.Record -> enterPendingSession(plan.pending)
         }
+    }
+
+    /**
+     * Opens the session a "start a session here" path resolved to, carrying the
+     * new-session seat's model pick onto it.
+     *
+     * `Open` means the host already holds the blank this intent wants — so no create
+     * happens, and a pick recorded on the seat would otherwise be discarded in
+     * silence: the reader chose a model, then chose where to start, and got neither.
+     * Only the paths that come *from* the seat use this; opening a row from the
+     * drawer is navigation and drops the pick, which is why [openSession] itself
+     * still clears it.
+     */
+    private fun openSessionCarryingModelPick(sessionId: String) {
+        val pick = pendingModelPick()
+        openSession(sessionId)
+        if (pick != null) viewModelScope.launch { applyPendingModelPick(sessionId, pick) }
     }
 
     /**
@@ -3225,8 +3589,22 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // from the session being left would be refused by the host.
             attachments = emptyList(),
         )
+        // The hero's chip is the host's global default plus whatever pick the reader
+        // records here; the session being left has no say in it. The pick itself is
+        // deliberately kept — this seat exists to hold choices for a session that has
+        // not been created, and re-recording its target is not a reason to drop one.
+        updateModelSelection { it.onSessionLeft() }
+        // The host's global default is what this seat's session runs until a pick is
+        // recorded, and it moves when *any* session or client selects — asynchronously,
+        // measured at 0.4-2 s on 0.2.0-rc.2. The one catalog read from connect is
+        // therefore not enough on this seat: re-read it on the way in.
+        viewModelScope.launch { runCatching { loadModels() } }
         // No session is open, so the seat publishes an empty list and no dot. The
         // jobs the session being left had, and its marker, stay keyed to it.
+        // The roster stream goes with it: nothing is on screen to keep current, and
+        // an expanded panel's output must not outlive the row it belonged to.
+        watchJobs(null)
+        observeJob(null)
         publishJobsForCurrent()
         app.attention.visibleSessionId = null
         app.attention.visibleWith = emptySet()
@@ -3244,6 +3622,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      */
     private suspend fun materializePending(pending: PendingSessionTarget): String? {
         _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
+        // Read before anything is created: the pick belongs to the session this call
+        // is about to make, and `openSession` below consumes whatever is on the seat.
+        val modelPick = pendingModelPick()
         val plan = SessionTargets.materialize(pending, sessionTargetCandidates())
         val id = try {
             when (plan) {
@@ -3274,6 +3655,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         draftStore.rename(PENDING_DRAFT_KEY, id)
         _ui.value = _ui.value.copy(busy = false, pendingSession = null)
         openSession(id)
+        // After the open, so the session's own projections and the pick do not fight
+        // over the chip; the caller sends its prompt only once this returns, so the
+        // first turn cannot run before the selection is in force.
+        modelPick?.let { applyPendingModelPick(id, it) }
         return id
     }
 
@@ -3317,10 +3702,17 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun adoptSession(sessionId: String, workspaceId: String) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
+            val modelPick = pendingModelPick()
             runCatching { adoptSessionNow(sessionId, workspaceId) }
                 .onSuccess { id ->
                     _ui.value = _ui.value.copy(busy = false)
-                    if (id != null) openSession(id)
+                    if (id != null) {
+                        openSession(id)
+                        // The seat's pick belongs to the session the reader ends up
+                        // in, whether the host created one or adopted the blank the
+                        // Workspace already held.
+                        modelPick?.let { applyPendingModelPick(id, it) }
+                    }
                 }
                 .onFailure { error ->
                     // A `session/conflict` never reaches here: [adoptSessionNow]
@@ -3578,6 +3970,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun fetchSessions(): List<SessionItem> {
+        // Taken *before* the request goes out, so a live frame that lands while this
+        // read is in flight is stamped as possibly newer than the cut it answers — the
+        // roster read carries `running` and `subagentTiming` as of the host's own
+        // moment, which the answer may predate. See [RunningBook].
+        val pull = runningBook.beginPull()
         val value = client.rpc("session/list", JSONObject().put("_request", JSONObject()))
         val items = value.optJSONArray("items") ?: JSONArray()
         // A subagent's own stored title is its opening prompt ("You are ..."), which
@@ -3597,51 +3994,43 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val result = ArrayList<SessionItem>(items.length())
+        // The durable answer this pull proves, per id: the host's own agent-status
+        // sample — see [durableRunningOf] for why `subagentTiming.active` is *not* part
+        // of it. `wire`, `active` and `noAgent` are kept for the diag record only
+        // (`noteRunningPull`), so its arithmetic can be checked rather than trusted.
+        val durable = HashMap<String, Boolean>(items.length())
+        val wire = HashMap<String, Boolean>(items.length())
+        val active = HashSet<String>(items.length() / 8)
+        val noAgent = HashSet<String>(items.length())
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
-            val projections = item.obj("projections")?.obj("values")
-            // Always read through the Json extensions: org.json's raw optString
-            // turns an explicit JSON null into the string "null".
-            val blank = item.optBoolean("blank")
-            val stored = projections.str("title")
             val id = item.str("sessionId")
-            val cwd = item.str("cwd").takeIf { it.isNotEmpty() }
-            val subagent = catalog[id]
-            val parentSessionId = item.str("parentSessionId").takeIf { it.isNotEmpty() }
-            // Where a catalog this client already holds names this child, its row
-            // wins the label and the mode: see [applyCatalogLabels] for why the
-            // read-time sample outranks the projection.
-            val held = parentSessionId?.let { subagentCatalogs[it]?.child(id) }
-            result += SessionItem(
-                id = id,
-                // Blank rows carry `title: null`; the web substitutes its
-                // localized "New Session" label for them. For the rest this is the
-                // web's own `displayTitleOf` (session-controller's
-                // `client/sessions/service.ts`): the durable title, else the project
-                // directory's basename, else the session id. Without the middle step
-                // every session the host never titled — anything created by a script,
-                // an automation or a fork — read as "Untitled session" in the drawer
-                // while the web named it after its directory.
-                //
-                // The rule itself lives in [sessionRowTitle] so it can be tested
-                // without a ViewModel; the order there is the point (a stored name
-                // outranks the blank placeholder).
-                title = sessionRowTitle(
-                    subagentLabel = subagent?.first,
-                    stored = stored,
-                    blank = blank,
-                    directoryName = basename(cwd),
-                    id = id,
-                ),
-                cwd = cwd,
-                updatedAt = item.optLong("updatedAt"),
-                running = item.optBoolean("running"),
-                isSubagent = item.str("origin") == "subagent",
-                blank = blank,
-                parentSessionId = parentSessionId,
-                subagentLabel = subagent?.first?.takeIf { it.isNotBlank() },
-                subagentMode = subagent?.second?.takeIf { it.isNotBlank() },
-            ).withCatalog(held)
+            if (id.isEmpty()) continue
+            durable[id] = durableRunningOf(item)
+            wire[id] = item.optBoolean("running")
+            // An explicit `false` only: a row that omits the field is not evidence of a
+            // missing agent, and the orphan count is a diagnosis, not a decision.
+            if (item.has("agentAvailable") && !item.optBoolean("agentAvailable")) noAgent += id
+            if (item.obj("projections")?.obj("values")?.obj("subagentTiming")?.obj("active") != null) {
+                active += id
+            }
+        }
+        // Applied before the rows are built, so `withRunning` below reads this cut and
+        // not the previous one.
+        runningBook.applyPull(pull, durable)
+        // A pull cannot be evidence about a session created after its cut. The membership
+        // hold keeps those rows (see [MembershipHold], which `mergeRoster` consults) and
+        // hands back the running sample each must be re-asserted with — without this the
+        // wholesale replacement above would answer `false` for a child whose `added` frame
+        // this very pull raced.
+        for (member in membershipHold.applyPull(pull)) {
+            runningBook.observe(member.row.id, member.running)
+        }
+        noteRunningPull(wire, active, noAgent)
+
+        for (i in 0 until items.length()) {
+            val item = items.optJSONObject(i) ?: continue
+            sessionItemOf(item, catalog)?.let { result += it }
         }
         // Keep the open session's folded projections fresh: goal, access mode,
         // plan and context pressure all ride them.
@@ -3657,6 +4046,138 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
         refreshCatalogsForRoster(result)
         return result.sortedByDescending { it.updatedAt }
+    }
+
+    /**
+     * One roster row, from either wire shape that carries one.
+     *
+     * `session/list`'s `items[]` and an `api-session/added` emit are the **same object**
+     * on the host — `summaryFor` builds both — and this is the one place either is read,
+     * so the push path cannot drift from the pull path in how it names a session, reads a
+     * parent or picks up a subagent label. [catalog] is the pull's own `subagentCatalog`
+     * sweep; a membership frame has none, and falls back to the catalogs this client
+     * already holds for that child's parent.
+     *
+     * Null for a row with no id: an addressable session is the minimum, and inventing one
+     * from an empty string is how a fabricated address reaches the wire.
+     */
+    private fun sessionItemOf(
+        item: JSONObject,
+        catalog: Map<String, Pair<String, String>> = emptyMap(),
+    ): SessionItem? {
+        val id = item.str("sessionId")
+        if (id.isEmpty()) return null
+        val projections = item.obj("projections")?.obj("values")
+        // Always read through the Json extensions: org.json's raw optString
+        // turns an explicit JSON null into the string "null".
+        val blank = item.optBoolean("blank")
+        val stored = projections.str("title")
+        val cwd = item.str("cwd").takeIf { it.isNotEmpty() }
+        val subagent = catalog[id]
+        val parentSessionId = item.str("parentSessionId").takeIf { it.isNotEmpty() }
+        // Where a catalog this client already holds names this child, its row
+        // wins the label and the mode: see [applyCatalogLabels] for why the
+        // read-time sample outranks the projection.
+        val held = parentSessionId?.let { subagentCatalogs[it]?.child(id) }
+        return SessionItem(
+            id = id,
+            // Blank rows carry `title: null`; the web substitutes its
+            // localized "New Session" label for them. For the rest this is the
+            // web's own `displayTitleOf` (session-controller's
+            // `client/sessions/service.ts`): the durable title, else the project
+            // directory's basename, else the session id. Without the middle step
+            // every session the host never titled — anything created by a script,
+            // an automation or a fork — read as "Untitled session" in the drawer
+            // while the web named it after its directory.
+            //
+            // The rule itself lives in [sessionRowTitle] so it can be tested
+            // without a ViewModel; the order there is the point (a stored name
+            // outranks the blank placeholder).
+            title = sessionRowTitle(
+                subagentLabel = subagent?.first,
+                stored = stored,
+                blank = blank,
+                directoryName = basename(cwd),
+                id = id,
+            ),
+            cwd = cwd,
+            updatedAt = item.optLong("updatedAt"),
+            // The raw wire sample is kept only as this builder's own record of what the
+            // host said; every row the UI is handed has been folded through the book
+            // (by [mergeRoster] for a pull, by [applySessionAdded] for a frame).
+            running = item.optBoolean("running"),
+            isSubagent = item.str("origin") == "subagent",
+            blank = blank,
+            parentSessionId = parentSessionId,
+            subagentLabel = subagent?.first?.takeIf { it.isNotBlank() },
+            subagentMode = subagent?.second?.takeIf { it.isNotBlank() },
+        ).withCatalog(held)
+    }
+
+    /**
+     * Applies one `api-session/added` emit: the session's whole list row, pushed.
+     *
+     * This is what closes the membership gap. Measured on the device before it: a child
+     * created 59 s before a probe was absent from the app's 1,891-row roster while the
+     * host listed 1,892, and the parent's lineage sheet read `running=1` against the
+     * host's 2 for that entire minute — because nothing but a whole-world pull could add
+     * a row. The host re-announces a session here on `session/created` and again when an
+     * agent is created or disposed, so the common case is a row the client already holds
+     * arriving with a fresh `agentAvailable`/`running`; [upsertSession] replaces it.
+     *
+     * The row's running sample goes in as a *snapshot* ([RunningBook.observe]) and not as
+     * a transition: this object is what a pull would have served, so keeping it as a
+     * transition would let a child that stopped before the next cut be held running for
+     * a cycle. A live `api-session/status` frame is a transition and still outranks it —
+     * including one that lands while the pull this schedules is in flight, which is the
+     * ordering hazard the epoch rule exists for.
+     *
+     * The pull is still scheduled, coalesced by [refreshSessionsSoon]'s debounce: the
+     * frame proves nothing about any other row, and ordering, the archived filter and
+     * catalog labels remain a pull's job. A burst of child creations costs one pull.
+     */
+    private fun applySessionAdded(row: JSONObject) {
+        val item = sessionItemOf(row) ?: return
+        runningBook.observe(item.id, durableRunningOf(row))
+        val running = runningBook.running(item.id)
+        membershipHold.remember(item, running, runningBook.epoch())
+        val sessions = _ui.value.sessions.upsertSession(item.withRunning(runningBook))
+        _ui.value = _ui.value.copy(sessions = sessions)
+        // A row that is on screen now can be counted by the chip and listed by the sheet
+        // before any pull; the note is what makes that visible in a diag after the fact.
+        ScrollDiag.note(
+            "membership",
+            "added" to item.id,
+            "running" to running,
+            "subagent" to item.isSubagent,
+            "rows" to sessions.size,
+        )
+        refreshSessionsSoon()
+    }
+
+    /**
+     * Applies one `api-session/removed` emit: the host disposed that session.
+     *
+     * Three things have to go, not one. The row, or the drawer keeps a session that
+     * cannot be opened. The book's claims via [RunningBook.forget], or an id the host
+     * reuses — the same parent restarting the same lane — inherits a flag nothing
+     * established. And [previousRunning], or the next pull reports the vanished id as
+     * "finished while you were not looking" and lights a done dot for a session that no
+     * longer exists.
+     */
+    private fun applySessionRemoved(sessionId: String) {
+        runningBook.forget(sessionId)
+        membershipHold.forget(sessionId)
+        previousRunning = previousRunning - sessionId
+        val sessions = _ui.value.sessions.removeSession(sessionId)
+        val changed = sessions.size != _ui.value.sessions.size ||
+            _ui.value.completedSessionIds.contains(sessionId)
+        if (!changed) return
+        _ui.value = _ui.value.copy(
+            sessions = sessions,
+            completedSessionIds = _ui.value.completedSessionIds - sessionId,
+        )
+        ScrollDiag.note("membership", "removed" to sessionId, "rows" to sessions.size)
     }
 
     /**
@@ -3709,11 +4230,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * Re-reads every watched catalog, the app's half of `handleConnected`
      * (`manager.ts:789-799`).
      *
-     * A frozen process collected no frames, so the sample it holds is the only
-     * thing still claiming a child is running — and the roster pull that precedes
-     * this cannot correct a subagent ([reconcileLiveRunning] exempts them). This is
-     * the read that can, which is why a resume owes it rather than waiting for the
-     * child's next frame.
+     * This is about *identity*, not activity: the roster pull that precedes it is what
+     * carries running state now (see [RunningBook]), but the label and mode a disclosure
+     * names its rows with come from the projection the follow snapshot re-delivers, so a
+     * resume repaints them from here rather than waiting for a frame that may never come.
      */
     private fun refreshWatchedCatalogs() {
         for (parent in watchedCatalogParents()) refreshSubagentCatalog(parent)
@@ -3729,7 +4249,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     sessionsLoading = false,
                 )
                 warnOnMissingMembers(list)
-                syncRunningFromList(list)
+                publishRosterRunning()
             }.onFailure { error ->
                 _ui.value = _ui.value.copy(sessionsLoading = false)
                 if (error is DshAuthException) onAuthFailure("session/list", error)
@@ -3766,7 +4286,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     sessionsLoading = false,
                 )
                 warnOnMissingMembers(list)
-                syncRunningFromList(list)
+                publishRosterRunning()
             }.onFailure { error ->
                 _ui.value = _ui.value.copy(sessionsLoading = false)
                 // The pull is a direct user action, so a genuine failure says so
@@ -3871,7 +4391,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess { list ->
                 _ui.value = _ui.value.copy(sessions = mergeRoster(list))
                 warnOnMissingMembers(list)
-                syncRunningFromList(list)
+                publishRosterRunning()
             }
         }
     }
@@ -3890,83 +4410,70 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Applies one live `api-session/status` frame to the row it names.
+     * Applies one live `api-session/status` frame.
      *
-     * `session/list` is the authority for ordinary sessions, and for a subagent it
-     * is one only while the child is attached — an unattached child is served cold
-     * and reads `running: false` (`api-session-controller/list.ts:152`). So a
-     * child's activity arrives both from this event and from [applyCatalogActivity].
-     * Rows are patched in place; the list refresh keeps ownership of ordering and
-     * of the "finished while you were elsewhere" dots.
+     * The frame is handed to [runningBook], which owns the ordering rule that decides
+     * whether it outranks the roster cut already held — the frame itself is never
+     * applied to a row directly, because a second path that patches `running` is a
+     * second answer to the same question. This host emits the frame only on an
+     * `agent/status` *transition*, so it can never be the whole truth: a client that
+     * connects while a child is already running sees no "started" frame at all, and
+     * the child's own journal (via the roster's `subagentTiming`) is what covers that.
      */
     private fun applyLiveStatus(sessionId: String, running: Boolean) {
-        // The *only* live running signal for a child — the roster reports one as running
-        // only while it is attached — so whether it arrives at all is the first question
-        // worth answering, and it was the one thing nothing recorded. In the diag file
-        // rather than logcat: the test phone's ROM hides third-party app logs.
+        // In the diag file rather than logcat: the test phone's ROM hides third-party
+        // app logs, and "did the frame arrive at all" is the first question worth
+        // answering about a signal that is transition-only.
         ScrollDiag.note("livestatus", "id" to sessionId, "running" to running)
-        if (running) {
-            liveRunning.add(sessionId)
-            stoppedLiveIds.remove(sessionId)
-        } else {
-            // Remembered, because "a live frame said stopped" and "no frame has mentioned
-            // it" are different facts, and only the first may end a subagent.
-            liveRunning.remove(sessionId)
-            stoppedLiveIds.add(sessionId)
-        }
-        // A frame that beats a catalog read's settle is newer than the sample that
-        // read carries; recording it here is what stops the response from
-        // reverting it (`manager.ts:367-372`).
-        // Recorded for every frame now: this used to be gated on a `subagents/list`
-        // read being in flight, because only a response could be reverted by a stale
-        // sample. The catalog is rebuilt from a pushed projection, so there is no
-        // response to race and every frame is worth keeping until a rebuild consumes
-        // it in `withInFlightActivity`.
-        synchronized(subagentCatalogLock) { subagentCatalogActivity[sessionId] = running }
+        runningBook.frame(sessionId, running)
+        publishRunning(sessionId)
+    }
+
+    /**
+     * Republishes one row from the book, and nothing else.
+     *
+     * The single write path for `SessionItem.running` outside [mergeRoster]: the new
+     * value is read back from [runningBook] rather than taken from the event that
+     * prompted the repaint, so the row can only ever carry the authority's answer.
+     */
+    private fun publishRunning(sessionId: String) {
         val sessions = _ui.value.sessions
         val index = sessions.indexOfFirst { it.id == sessionId }
         if (index < 0) return
+        val running = runningBook.running(sessionId)
         if (sessions[index].running == running) return
+        // A row's flag changing is the whole subject of this fix, so it is recorded
+        // with its cause: which id, which answer, and whether it is a subagent.
+        ScrollDiag.note(
+            "running",
+            "id" to sessionId,
+            "running" to running,
+            "subagent" to sessions[index].isSubagent,
+            "via" to "frame",
+        )
         val updated = sessions.toMutableList()
         updated[index] = updated[index].copy(running = running)
         _ui.value = _ui.value.copy(sessions = updated)
     }
 
     /**
-     * Drops live "running" claims that a whole-world `session/list` pull denies.
+     * Publishes everything that follows from a roster pull: the "finished while you
+     * were not looking" dots, and the composer's own running flag.
      *
-     * The live set is only as good as the frames that reached this process, and a
-     * backgrounded app receives none: a session it saw start kept its ongoing dot
-     * for as long as the id stayed in the set, because the display is
-     * `list.running || live` and the list's "no" could not win. The pull is the
-     * authority, so it wins — with two exemptions. A subagent is never reported as
-     * running by `session/list` at all, and the open session is held back by the
-     * same quiet window that keeps a racing pull from blinking the composer's Stop
-     * button back to Send mid-turn.
+     * The rows have already been folded through the book by [mergeRoster], so this
+     * reads its answer off them rather than asking a second time — one authority, one
+     * question. [list] is not consulted for running at all; it is the raw sample, kept
+     * only so a caller can name what vanished.
+     *
+     * The composer's `running` is a *different* fact from a row's dot: it is this
+     * client's own turn on the session on screen, which a send sets optimistically and
+     * which the follow stream settles. Its value is still taken from the row here, so
+     * the two cannot contradict each other, and the quiet guard only delays believing a
+     * "no" that races the host's own bookkeeping.
      */
-    private fun reconcileLiveRunning(list: List<SessionItem>) {
-        val stale = staleLiveRunning(
-            live = liveRunning,
-            list = list,
-            current = _ui.value.currentSessionId,
-            quiet = System.currentTimeMillis() - lastEventAt > LIVE_QUIET_MS,
-        )
-        if (stale.isEmpty()) return
-        stale.forEach { liveRunning.remove(it) }
-        Log.d(TAG, "cleared stale live-running: $stale")
-    }
-
-    private fun syncRunningFromList(list: List<SessionItem>) {
-        // `session/list` outranks a live frame for an ordinary session: a `true`
-        // the list contradicts is a "stopped" that arrived while the app was not
-        // listening (a frozen process collects nothing), and trusting it forever
-        // left the row's ongoing dot stuck on for a session that had long finished.
-        reconcileLiveRunning(list)
-
-        // The effective set, not the raw one: the list reports every subagent as
-        // not running, so a child's own finish is only ever visible through the
-        // live frames folded in here.
-        val nowRunning = list.filter { it.withLiveRunning().running }.map { it.id }.toSet()
+    private fun publishRosterRunning() {
+        val sessions = _ui.value.sessions
+        val nowRunning = sessions.filter { it.running }.map { it.id }.toSet()
 
         // A green "done" dot means "finished running while you were not looking":
         // a session that stopped since the last refresh, which is not the open one.
@@ -3987,7 +4494,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 if (!warrantsIdleAlert(sessionId, app.attention.isSubagent(sessionId))) {
                     return@forEach
                 }
-                val title = _ui.value.sessions.firstOrNull { it.id == sessionId }?.title
+                val title = sessions.firstOrNull { it.id == sessionId }?.title
                 alert(
                     id = Attention.idleId(sessionId),
                     sessionId = sessionId,
@@ -3998,16 +4505,8 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
         previousRunning = nowRunning
 
-        // The caller mapped the fresh list through `withLiveRunning` *before* this
-        // ran, so a stale claim cleared above is still painted on its row. Fold the
-        // cleaned set in once more and republish only when it actually changes.
-        val corrected = _ui.value.sessions.map { it.withLiveRunning() }
-        if (corrected != _ui.value.sessions) {
-            _ui.value = _ui.value.copy(sessions = corrected)
-        }
-
         val current = _ui.value.currentSessionId ?: return
-        val item = list.firstOrNull { it.id == current } ?: return
+        val item = sessions.firstOrNull { it.id == current } ?: return
         // Only believe "not running" once the stream has been quiet briefly,
         // otherwise a list fetch that races the host's own bookkeeping would
         // flicker the stop button back to send mid-turn.
@@ -4070,7 +4569,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * One `subagents/list` read, single-flight per parent.
+     * One parent-catalog rebuild, single-flight per parent.
      *
      * A second ask while one is in flight is not a second call: the response the
      * caller is waiting on predates whatever asked again, so the ask is recorded
@@ -4079,13 +4578,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * carrier of a membership change observed mid-flight would be the next
      * unrelated frame.
      *
-     * A response is folded into three places, in this order: the live-running set
-     * (per-child `activity`, the one source that covers a child `session/list`
-     * serves cold), the roster's label/mode for the rows it names, and — when the
-     * parent still belongs to the session on screen — `parentAvailable`, which is
-     * the read-only gate's only input. A failure is deliberately left as unknown
-     * (it is not the reader's problem, and unknown keeps the composer), except for
-     * a dead cookie, which the banner has to say.
+     * A catalog is identity only — the label and the mode — so it is folded into two
+     * places: the roster's label/mode for the rows it names, and, when the parent still
+     * belongs to the session on screen, `parentAvailable`, the read-only gate's only
+     * input. It is deliberately **not** folded into running state: the projection has
+     * no activity field, and the `subagents/list` reply that once carried one is not a
+     * host method on 0.2.0. See [RunningBook] for where a child's activity comes from.
+     * A failure is deliberately left as unknown (it is not the reader's problem, and
+     * unknown keeps the composer), except for a dead cookie, which the banner has to say.
      */
     /**
      * Rebuilds one parent's child catalog from the `subagentCatalog` projection.
@@ -4103,14 +4603,22 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshSubagentCatalog(parentSessionId: String) {
         if (parentSessionId.isEmpty()) return
         if (parentSessionId != _ui.value.currentSessionId) return
-        val catalog = withInFlightActivity(
-            parseSubagentCatalogProjection(liveProjections?.optJSONArray("subagentCatalog")) { id ->
-                _ui.value.sessions.any { it.parentSessionId == id }
-            },
-        )
+        val catalog = parseSubagentCatalogProjection(
+            liveProjections?.optJSONArray("subagentCatalog"),
+        ) { id ->
+            _ui.value.sessions.any { it.parentSessionId == id }
+        }
         subagentCatalogs[parentSessionId] = catalog
         _ui.value = _ui.value.copy(subagentCatalogs = HashMap(subagentCatalogs))
-        applyCatalogActivity(catalog)
+        // Recorded because this rebuild is what used to erase running state: it folded
+        // the projection's absent `activity` in as "not running" and wiped every child's
+        // row. A device reading the diag can now see a rebuild land between two roster
+        // summaries and check that no child moved.
+        ScrollDiag.note(
+            "catalog",
+            "parent" to parentSessionId,
+            "children" to catalog.children.size,
+        )
         applyCatalogLabels(parentSessionId, catalog)
         publishParentAvailable(parentSessionId, catalog)
     }
@@ -4132,69 +4640,6 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 refreshSubagentCatalog(parentSessionId)
             }
         }
-    }
-
-    /**
-     * Folds child activity frames observed while a read was in flight over its
-     * response, and forgets the ones it consumed.
-     *
-     * Only the ids the response actually names are taken: an id that belongs to
-     * some other parent's catalog is that catalog's problem, and this read is not
-     * evidence either way about it.
-     */
-    private fun withInFlightActivity(catalog: SubagentCatalog): SubagentCatalog {
-        val overrides = synchronized(subagentCatalogLock) {
-            if (subagentCatalogActivity.isEmpty()) return catalog
-            val consumed = HashMap<String, Boolean>()
-            for (child in catalog.children) {
-                subagentCatalogActivity.remove(child.id)?.let { consumed[child.id] = it }
-            }
-            consumed
-        }
-        if (overrides.isEmpty()) return catalog
-        return catalog.copy(
-            entries = catalog.entries.map { entry ->
-                if (entry !is SubagentCatalogEntry.Child) return@map entry
-                val running = overrides[entry.id] ?: return@map entry
-                entry.copy(
-                    activity = if (running) SUBAGENT_ACTIVITY_RUNNING else SUBAGENT_ACTIVITY_INACTIVE,
-                )
-            },
-        )
-    }
-
-    /**
-     * Applies one catalog to the app's live-running view.
-     *
-     * This is the app's stand-in for the web's per-row catalog dot, which reads
-     * `entry.activity` verbatim (`SubagentHeaderLineage.tsx`) — so the catalog's
-     * answer wins in both directions, including over a stale `running: true` that
-     * no whole-roster pull can clear, because [reconcileLiveRunning] exempts
-     * subagents from the list's authority. `activity` and the list's `running` are
-     * the same Agent-registry sample (`subagent/control.ts:catalogView` and
-     * `api-session-controller/list.ts:114-152`), so they can only differ by the
-     * instant they were taken, and the catalog is the later read.
-     *
-     * The one exemption is the open session, which keeps the quiet-window guard
-     * [reconcileLiveRunning] documents: a read sampled a beat before the host
-     * flushed that session's own stop frame must not blink the composer's Stop
-     * back to Send mid-turn.
-     */
-    private fun applyCatalogActivity(catalog: SubagentCatalog) {
-        val current = _ui.value.currentSessionId
-        val quiet = System.currentTimeMillis() - lastEventAt > LIVE_QUIET_MS
-        val sessions = _ui.value.sessions
-        val patched = sessions.toMutableList()
-        var changed = false
-        for (child in catalog.children) {
-            if (!child.running && child.id == current && !quiet) continue
-            if (child.running) liveRunning.add(child.id) else liveRunning.remove(child.id)
-            val index = patched.indexOfFirst { it.id == child.id }
-            if (index < 0 || patched[index].running == child.running) continue
-            patched[index] = patched[index].copy(running = child.running)
-            changed = true
-        }
-        if (changed) _ui.value = _ui.value.copy(sessions = patched)
     }
 
     /**
@@ -4343,9 +4788,20 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // unknown until the read below lands.
             subagentParentAvailable = null,
         )
-        // Re-publish this session's jobs and its own finished marker. Without this
-        // the seat kept the previous session's list — and judged the first `jobs`
-        // frame after the switch against it — until that session happened to send.
+        // The chip belongs to the session on screen. A selection is not carried
+        // across a switch: what this session will run arrives with its own
+        // projections, and until they land the host's global default is the honest
+        // answer — the previous session's model never is. A pick recorded on the
+        // new-session screen is dropped too: it was about a session that is not
+        // this one. (The create/adopt paths take it before calling this.)
+        updateModelSelection { it.onSessionOpened() }
+        // Point the roster stream at this session and re-publish what is already
+        // known for it. The stream is what makes jobs appear at all — nothing else
+        // pushes them — and re-publishing keeps the seat from wearing the outgoing
+        // session's list (and from judging the new session's first frame against it)
+        // until the host's first `rows` frame lands.
+        observeJob(null)
+        watchJobs(sessionId)
         publishJobsForCurrent()
         _todos.value = emptyList()
         app.attention.visibleSessionId = sessionId
@@ -4419,7 +4875,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                                 value.obj("projections")?.obj("values")?.let { block ->
                                     liveProjections = block
                                     applySessionProjections(block)
-                                    refreshSelectedModel()
+                                    applyModelSelection(block)
                                     refreshSubagentCatalog(sessionId)
                                 }
                                 bumpTranscript()
@@ -4521,7 +4977,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             )
         ) {
             is SessionIntentPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
-            is SessionIntentPlan.Open -> openSession(plan.sessionId)
+            is SessionIntentPlan.Open -> openSessionCarryingModelPick(plan.sessionId)
             is SessionIntentPlan.Record -> enterPendingSession(plan.pending)
         }
     }
@@ -4553,10 +5009,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun createSessionNow(cwd: String?, preset: String?, workspaceId: String?) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
+            val modelPick = pendingModelPick()
             runCatching { createSessionRequest(cwd, preset, workspaceId) }
                 .onSuccess { id ->
                     _ui.value = _ui.value.copy(busy = false)
                     openSession(id)
+                    modelPick?.let { applyPendingModelPick(id, it) }
                 }
                 .onFailure { error ->
                     _ui.value = _ui.value.copy(busy = false)
@@ -5183,88 +5641,138 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             "model catalog: groups=${catalog.optJSONArray("groups")?.length() ?: -1} " +
                 "models=${options.size} providers=${order.joinToString()}",
         )
-        // The session's own choice outranks the catalog's `default`.
-        //
-        // `default` is the *global* agent default, not this session's selection — so a
-        // session switched to a local model still drew the chip from the default, and
-        // the display disagreed with the state: `lastUsed: deepseek-flash`,
-        // `next: dsh-local/gemma-4-26B` on the host, DeepSeek on the chip. The session's
-        // `modelSelection.next` projection is the state the next turn will actually use.
-        val sessionChoice = liveProjections?.obj("modelSelection")?.obj("next")
-        val default = sessionChoice ?: catalog.optJSONObject("default")
-        val selected = default?.let { selection ->
-            options.firstOrNull {
-                it.provider == selection.str("provider") && it.model == selection.str("model")
-            }
-        }
         // Same order as the desktop: stable, so everything outside the two DeepSeek
         // providers keeps the catalog's own sequence.
         val orderedOptions = options.sortedBy { providerRank(it.provider) }
         val orderedProviders = order.sortedBy { providerRank(it) }
-        _ui.value = _ui.value.copy(
-            models = orderedOptions,
-            providerOrder = orderedProviders,
-            selectedModel = selected,
-            selectedEffort = default?.str("reasoningEffort")?.takeIf { it.isNotEmpty() }
-                ?: selected?.defaultEffort,
-        )
+        // `catalog.default` is the host's **global** default agent model. It is not
+        // this session's selection and must never be drawn as one; it is only what a
+        // session with no selection of its own will actually run, which is exactly
+        // how `ModelSelectionState` uses it.
+        updateModelSelection { it.withCatalogDefault(parseModelRef(catalog.obj("default"))) }
+        _ui.value = _ui.value.copy(models = orderedOptions, providerOrder = orderedProviders)
     }
 
     /**
-     * Points the model chip at the session on screen.
+     * Adopts a `modelSelection` projection block from the host.
      *
-     * `loadModels` runs once, at connect, so reading the selection there alone left the
-     * chip on whatever the *first* session had and carrying it across every switch —
-     * the model "persisted across sessions" instead of being loaded from each one's own
-     * state. This runs wherever the open session's projections land.
+     * The host's word is the only authority on which route the session will run. This
+     * runs wherever the open session's projections land — the follow snapshot, the
+     * control baseline, and a single `projection` delta too, which is what carries
+     * `lastUsed` rolling forward after a turn without any refresh of this client's
+     * own.
      */
-    private fun refreshSelectedModel() {
-        val choice = liveProjections?.obj("modelSelection")?.obj("next") ?: return
-        val option = _ui.value.models.firstOrNull {
-            it.provider == choice.str("provider") && it.model == choice.str("model")
-        } ?: return
-        val effort = choice.str("reasoningEffort").takeIf { it.isNotEmpty() } ?: option.defaultEffort
-        if (_ui.value.selectedModel == option && _ui.value.selectedEffort == effort) return
-        _ui.value = _ui.value.copy(selectedModel = option, selectedEffort = effort)
+    private fun applyModelSelection(values: JSONObject?) {
+        updateModelSelection { it.withHostSelection(parseHostModelSelection(values.obj("modelSelection"))) }
+    }
+
+    /**
+     * The one way any code may move the model selector's state.
+     *
+     * There is no `modelChoice` field to assign: the chip is derived from this
+     * state, so a second writer cannot exist even by accident. The equality guard
+     * keeps `StateFlow` from emitting on a no-op transform.
+     */
+    private fun updateModelSelection(transform: (ModelSelectionState) -> ModelSelectionState) {
+        val current = _ui.value
+        val next = transform(current.modelSelection)
+        if (next == current.modelSelection) return
+        _ui.value = current.copy(modelSelection = next)
     }
 
     /**
      * Model and reasoning effort go through the same call — `session/selectModel`
      * takes an optional `reasoningEffort`; there is no separate setter.
+     *
+     * A pick on the **new-session screen** has no session to select for, and used to
+     * be dropped on the floor after optimistically repainting the chip: the session
+     * that was then created ran the host default while the chip advertised the pick.
+     * It is now *recorded* ([ModelSelectionState.pendingPick]) and applied to the
+     * session when that session is created — see [applyPendingModelPick]. On a
+     * session that exists the pick goes to the host immediately, and until its
+     * answer arrives the chip says so rather than claiming the switch has happened.
      */
     fun selectModel(option: ModelOption, effort: String? = null) {
+        val ref = ModelRef(option.provider, option.model, effort ?: option.defaultEffort)
         val sessionId = _ui.value.currentSessionId
-        val chosenEffort = effort ?: option.defaultEffort
-        _ui.value = _ui.value.copy(selectedModel = option, selectedEffort = chosenEffort)
-        if (sessionId == null) return
-        viewModelScope.launch {
-            runCatching {
-                val request = JSONObject()
-                    .put("sessionId", sessionId)
-                    .put("provider", option.provider)
-                    .put("model", option.model)
-                chosenEffort?.let { request.put("reasoningEffort", it) }
-                client.rpc("session/selectModel", JSONObject().put("request", request))
-            }.onSuccess { value ->
-                // The host is the authority on what it selected, and it does not
-                // always select what was asked for — a provider it will not route, a
-                // model it resolves differently. The chip used to be set from the
-                // *request* and never corrected, so picking a model the host declined
-                // left the display claiming it while the turns answered with another.
-                val chosen = value.obj("selected") ?: return@onSuccess
-                val provider = chosen.str("provider")
-                val model = chosen.str("model")
-                val resolved = _ui.value.models.firstOrNull {
-                    it.provider == provider && it.model == model
-                }
-                _ui.value = _ui.value.copy(
-                    selectedModel = resolved ?: option,
-                    selectedEffort = chosen.str("reasoningEffort").takeIf { it.isNotEmpty() }
-                        ?: chosenEffort,
-                )
-            }.onFailure { error -> showFailure(error, "session/selectModel") }
+        if (sessionId == null) {
+            updateModelSelection { it.withPendingPick(ref) }
+            return
         }
+        updateModelSelection { it.withInFlight(ref) }
+        viewModelScope.launch { selectModelNow(sessionId, ref) }
     }
+
+    /**
+     * The `session/selectModel` call itself, suspending so a caller that must not
+     * deliver a prompt before the pick is in force can await it.
+     *
+     * Failures are the host *refusing* — probed on 0.2.0-rc.2: an unavailable model,
+     * an unknown provider and an effort the route does not accept are all answered
+     * with `session/model-unavailable` and mutate nothing. The chip therefore drops
+     * the pick and falls back to what the host still holds; the old code left the
+     * refused model on screen, which is the "advertised model is not the one
+     * running" the user reported.
+     */
+    private suspend fun selectModelNow(sessionId: String, ref: ModelRef) {
+        val request = JSONObject()
+            .put("sessionId", sessionId)
+            .put("provider", ref.provider)
+            .put("model", ref.model)
+        // The key is only sent when the route names an effort, so the host's own
+        // default applies. (`put(key, null)` would strip it anyway; being explicit
+        // keeps the request's shape visible.)
+        ref.reasoningEffort?.let { request.put("reasoningEffort", it) }
+        runCatching {
+            client.rpc("session/selectModel", JSONObject().put("request", request))
+        }
+            .onSuccess { value ->
+                // The answer belongs to the session it was asked for. Adopting it after
+                // the reader has switched would paint the *new* session's chip with the
+                // old session's selection — the same lie, arriving by a different road.
+                if (sessionId != _ui.value.currentSessionId) return@onSuccess
+                // And it belongs to the pick that is still the current one: two taps in
+                // a row mean the newer answer decides, not whichever returns last.
+                if (_ui.value.modelSelection.inFlight != ref) return@onSuccess
+                // The host's answer is what it selected, which is not always the same
+                // *shape* as the request: an omitted `reasoningEffort` comes back
+                // filled in with the route's `defaultEffort` (probed). Taking the
+                // answer rather than the request is what keeps the chip and the host
+                // from drifting apart.
+                updateModelSelection { it.withAnswer(parseModelRef(value.obj("selected")) ?: ref) }
+            }
+            .onFailure { error ->
+                if (sessionId == _ui.value.currentSessionId &&
+                    _ui.value.modelSelection.inFlight == ref
+                ) {
+                    updateModelSelection { it.withRefusal() }
+                }
+                showFailure(error, "session/selectModel", "Model not changed: ")
+            }
+    }
+
+    /**
+     * Applies a pick recorded on the new-session screen to the session that has just
+     * been created, adopted or reused for it.
+     *
+     * [pick] is read by [pendingModelPick] *before* the open, because opening consumes
+     * the seat's pick. The call suspends on purpose: on the send path the prompt is
+     * delivered immediately after this, and a prompt that ran before the selection
+     * landed would run the host default — the exact disagreement this area is about.
+     */
+    private suspend fun applyPendingModelPick(sessionId: String, pick: ModelRef) {
+        updateModelSelection { it.withInFlight(pick) }
+        selectModelNow(sessionId, pick)
+    }
+
+    /**
+     * The new-session pick, if the reader has recorded one.
+     *
+     * Read — not taken — here: [openSession] is what consumes it, on the same path
+     * that puts a real session on screen. A create that fails therefore leaves the
+     * pick on the seat for the retry, and a pick can never be applied twice.
+     */
+    private fun pendingModelPick(): ModelRef? = _ui.value.modelSelection.pendingPick
 
     // ----------------------------------------------------------- projections
 
@@ -6100,31 +6608,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 /**
- * Overlays the live `api-session/status` signal onto one host list row.
- *
- * A subagent is reported accurately only while its session is attached; one the
- * controller serves cold reads `running: false`, and the child runs inside its
- * parent's agent, so the list summary is not where a child's activity can be read
- * from. The event stream and the parent's `subagents/list` catalog are the two
- * sources that can, and this reads the fold they share.
- */
-private fun SessionItem.withLiveRunning(previous: SessionItem? = null): SessionItem =
-    copy(
-        running = runningAfter(
-            sampleRunning = running,
-            isSubagent = isSubagent,
-            previousRunning = previous?.running == true,
-            live = id in liveRunningIds,
-            stopped = id in stoppedLiveIds,
-        ),
-    )
-
-/**
- * Overlays one `subagents/list` child row's label and mode onto a roster row.
+ * Overlays one `subagentCatalog` child row's label and mode onto a roster row.
  *
  * A subagent's own stored title is its opening prompt ("You are …"), so both
  * display fields come from the durable descriptor instead. The title follows the
  * label only for a subagent: the label is never a plain session's name.
+ *
+ * Identity only, deliberately: the catalog says nothing about activity, so nothing
+ * here may touch `running`.
  */
 private fun SessionItem.withCatalog(child: SubagentCatalogEntry.Child?): SessionItem {
     if (child == null) return this
