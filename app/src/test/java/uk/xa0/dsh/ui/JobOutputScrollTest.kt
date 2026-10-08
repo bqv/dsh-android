@@ -243,8 +243,8 @@ class JobOutputScrollTest {
 
         val bounds = rule.onNodeWithText(long).getUnclippedBoundsInRoot()
         assertTrue(
-            "a 400-character line should wrap to many rows, not stand as one ${bounds.height}",
-            bounds.height.value > 30f,
+            "a 400-character line should wrap to many rows, not stand as one ${bounds.bottom - bounds.top}",
+            (bounds.bottom - bounds.top).value > 30f,
         )
         assertTrue(
             "the line must stay inside the panel, right=${bounds.right}",
