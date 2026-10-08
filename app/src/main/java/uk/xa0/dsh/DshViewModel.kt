@@ -32,6 +32,10 @@ import uk.xa0.dsh.model.AccountBalance
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.JobsMarker
+import uk.xa0.dsh.model.JobObservation
+import uk.xa0.dsh.model.JobOutput
+import uk.xa0.dsh.model.JobsWire
+import uk.xa0.dsh.model.JobTail
 import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.MessageAttachment
 import uk.xa0.dsh.model.PendingSessionTarget
@@ -91,6 +95,7 @@ import uk.xa0.dsh.net.multipartBytes
 import uk.xa0.dsh.net.boundaryOf
 import uk.xa0.dsh.net.DshUnreachableException
 import uk.xa0.dsh.net.MuxState
+import uk.xa0.dsh.net.JobClient
 import uk.xa0.dsh.net.StreamEvent
 import uk.xa0.dsh.net.TerminalClient
 import uk.xa0.dsh.term.HostShellIssue
@@ -279,20 +284,30 @@ data class GoalState(
 }
 
 /**
- * One background job the host is running (or ran) for a session.
+ * One background job the host is running (or ran) for a session — a `JobView` off
+ * the `job/list` stream.
  *
- * These arrive on the same control stream as the queue — the host publishes a
- * `jobs` frame per session on every change — so there is no RPC to call and no
- * polling: a job that starts, stops or fails is a push.
+ * The roster used to arrive on the same control stream as the queue, as a `jobs`
+ * block per session. The running 0.2.0-rc.2 host publishes no such block (probed:
+ * its control baseline carries `projections` and nothing else), which is why jobs
+ * had vanished from every session. They now come from `job/list` — one stream per
+ * session — and a job that starts, stops or fails is still a push, not a poll.
+ * See `model/Jobs.kt` for the wire rules and `docs/JOBS.md` for the probes.
  */
 data class JobItem(
     val id: String,
     val kind: String,
     val label: String,
+    /** Owning session; absent for an unowned job, which every caller can see. */
+    val owner: String? = null,
     val status: String,
-    val detail: String?,
+    /** The producer's live progress line, cleared at settlement. */
+    val progress: String? = null,
+    val detail: String? = null,
     val startedAt: Long,
-    val finishedAt: Long?,
+    val finishedAt: Long? = null,
+    /** The output ring's coordinates, which decide whether a row can be expanded. */
+    val output: JobOutput = JobOutput(),
 ) {
     val running: Boolean get() = status == "running" || status == "stopping"
 }
@@ -592,6 +607,12 @@ data class UiState(
     val queueBusy: String? = null,
     /** Background jobs the host reports for the open session. */
     val jobs: List<JobItem> = emptyList(),
+    /**
+     * Live output for whichever job is expanded — in the jobs sheet or in a
+     * chat-log entry. Null when nothing is expanded, so a panel never paints
+     * another row's bytes.
+     */
+    val jobOutput: JobObservation? = null,
     /**
      * A job finished in the **open** session since its list was last opened — the
      * jobs seat's green dot. Purely client-side, like the session rows'
@@ -909,6 +930,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     val terminal: StateFlow<TerminalUiState> = _terminal.asStateFlow()
 
     private val terminalClient by lazy { TerminalClient(client) }
+
+    /**
+     * The host's `job` namespace.
+     *
+     * The roster is a stream per session rather than the `session/control` block it
+     * used to be, so this is a client like [terminalClient] and not a call site in
+     * the control handler.
+     */
+    private val jobClient by lazy { JobClient(client) }
 
     /**
      * The live screen, mutated in place rather than published as state.
@@ -1872,15 +1902,23 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * its prompt fails, or it ages out.
      */
     private val pendingSubmissions = java.util.concurrent.ConcurrentHashMap<String, List<QueuedMessage>>()
-    /** Latest background jobs per session, from the same stream. */
+    /** Latest background jobs per session, from that session's `job/list` stream. */
     private val jobsBySession = java.util.concurrent.ConcurrentHashMap<String, List<JobItem>>()
+    /** The session whose `job/list` roster stream is open, and its collector. */
+    private var jobsWatchedSession: String? = null
+    private var jobsWatchJob: Job? = null
+    /** Accumulated live output per observed job, keyed by job id. */
+    private val jobObservations = java.util.concurrent.ConcurrentHashMap<String, JobObservation>()
+    /** The one job whose `job/follow` stream is open — the expanded row. */
+    private var observedJobId: String? = null
+    private var jobFollowJob: Job? = null
     /**
      * Sessions whose jobs settled since their list was last opened.
      *
      * Per session, not one app-wide flag: a job finishing in another session must
      * not light the seat of the session on screen. The open session's membership
-     * is what [UiState.jobsFinishedUnseen] publishes. Written only from the control
-     * stream and the UI, both on the main dispatcher; the update rules themselves
+     * is what [UiState.jobsFinishedUnseen] publishes. Written only from a roster
+     * frame and the UI, both on the main dispatcher; the update rules themselves
      * live in [JobsMarker].
      */
     private var finishedUnseenSessions: Set<String> = emptySet()
@@ -2694,23 +2732,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                         queues[sessionId] = parseQueue(all.optJSONArray(sessionId))
                     }
                 }
-                // A baseline is an observation too: a job that settled across a
-                // reconnect should light its own seat. So the map is compared and
-                // then pruned, not cleared first — clearing would erase the
-                // outgoing list before [observeJobs] could compare against it.
-                val seeded = HashSet<String>()
-                val jobsBlock = payload.obj("jobs")
-                if (jobsBlock != null) {
-                    jobsBlock.keys().forEach { sessionId ->
-                        seeded.add(sessionId)
-                        observeJobs(sessionId, parseJobs(jobsBlock.optJSONArray(sessionId)))
-                    }
-                }
-                // A baseline is the whole world: any session missing from it has no
-                // jobs, so keeping the old entry would strand finished rows. That is
-                // a drop, not a settle — the session is gone from the host registry,
-                // so there is no seat left to mark.
-                jobsBySession.keys.retainAll(seeded)
+                // The running host's baseline carries `projections` and nothing
+                // else: no `queues`, and — the reason jobs had vanished from every
+                // session — no `jobs`. The queue block above is kept because an
+                // older host does send it; the job block is deliberately *not*
+                // replaced with a fallback, because a client that keeps waiting for
+                // a frame the host no longer sends waits forever. Jobs come from
+                // `job/list` now; see [watchJobs].
                 publishJobsForCurrent()
                 // Seed the open session's folded projections so a control delta
                 // that only carries one key still has its siblings in hand.
@@ -2739,14 +2767,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 publishQueue()
             }
 
+            // A 0.2.0-rc.2 host never sends this. It was the job roster's old home,
+            // and the block is kept only so a host that still pushes one is read
+            // rather than dropped; [watchJobs] is what makes jobs appear.
             "jobs" -> {
                 val sessionId = value.str("sessionId")
                 if (sessionId.isEmpty()) return
-                // Recorded for every session, not only the open one: the host
-                // pushes one `jobs` frame per changed session, and that is the only
-                // way a job finishing elsewhere can light *its* seat rather than
-                // this one's.
-                recordJobs(sessionId, parseJobs(value.arr("jobs")))
+                recordJobsFrame(sessionId, JobsWire.jobsOf(value.arr("jobs")))
             }
 
             "projection" -> {
@@ -2881,12 +2908,56 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------- jobs
 
     /**
+     * Keeps the open session's `job/list` roster stream current.
+     *
+     * One stream, for the session on screen — which is exactly what the web does:
+     * it mounts its job control with the open conversation and watches that
+     * session's roster. This is a change in reach from the old global `jobs`
+     * baseline, and it is not a choice: 0.2.0-rc.2 has no host-wide job push and no
+     * forwarded job event (the allowlist in `dsh-api-remotes` was checked, and a
+     * live `$events` capture across a job's whole life carried none), so a roster
+     * per session is the only channel there is.
+     *
+     * The consequence is worth stating plainly: the seat's finished-unseen dot is
+     * now only ever earned by the session you are looking at, because no other
+     * session's roster is open. The web has no cross-session job dot either, so
+     * this is parity rather than a regression — but it *is* less than the old
+     * global baseline gave, and it is why [JobsMarker]'s per-session comparison is
+     * kept rather than simplified away.
+     */
+    private fun watchJobs(sessionId: String?) {
+        if (jobsWatchedSession == sessionId && jobsWatchJob?.isActive == true) return
+        jobsWatchJob?.cancel()
+        jobsWatchJob = null
+        jobsWatchedSession = sessionId
+        if (sessionId == null) {
+            recordJobsFrame(sessionId = null, items = emptyList())
+            return
+        }
+        jobsWatchJob = viewModelScope.launch {
+            jobClient.list(sessionId).collect { event ->
+                when (event) {
+                    is StreamEvent.Item -> {
+                        // Whole-set replacement frames, so a reconnect's first frame
+                        // is already the truth and there is nothing to merge.
+                        if (event.value.str("type") != "rows") return@collect
+                        recordJobsFrame(sessionId, JobsWire.jobsOf(event.value.arr("jobs")))
+                    }
+
+                    is StreamEvent.Failure -> Log.w(TAG, "job/list failed: ${event.code} ${event.message}")
+                    StreamEvent.End -> Log.d(TAG, "job/list ended for $sessionId")
+                }
+            }
+        }
+    }
+
+    /**
      * Records one observation of a session's job list.
      *
      * The finished transition is judged here, against **this session's own**
      * previous list — [jobsBySession] still holds it when the new one is written
      * — never against the list currently published. Comparing against the
-     * published list is what made the first `jobs` frame after a switch read as a
+     * published list is what made the first roster frame after a switch read as a
      * finish: it was the *other* session's list on the left of the comparison.
      *
      * A session's first observation has no previous list, so it never settles
@@ -2899,18 +2970,28 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Records one `jobs` frame and republishes when it belongs to the open
-     * session. Frames for other sessions are kept too: their transition is what
-     * lights their own seat.
+     * Records one roster frame and republishes when it belongs to the open
+     * session. A null session is the pending hero: there is no roster to hold, so
+     * its entry is dropped rather than left behind to strand rows.
      */
-    private fun recordJobs(sessionId: String, items: List<JobItem>) {
-        observeJobs(sessionId, items)
-        if (sessionId == _ui.value.currentSessionId) publishJobsForCurrent()
+    private fun recordJobsFrame(sessionId: String?, items: List<JobItem>) {
+        if (sessionId == null) {
+            val current = _ui.value.currentSessionId
+            if (current != null) jobsBySession.remove(current)
+        } else {
+            observeJobs(sessionId, items)
+            // A job that leaves the roster cannot be observed any more; keeping its
+            // panel state would let a reopened sheet paint output for a row that is
+            // no longer there.
+            val live = items.mapTo(HashSet()) { it.id }
+            jobObservations.keys.retainAll(live)
+        }
+        publishJobsForCurrent()
     }
 
     /**
-     * Publishes the open session's list and whether *its* seat carries the
-     * finished marker.
+     * Publishes the open session's list, the observation for whichever of its jobs
+     * is expanded, and whether *its* seat carries the finished marker.
      *
      * No open session (the pending hero from deferred creation) publishes an
      * empty list and no dot, so a session switched away from cannot leave its
@@ -2920,24 +3001,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val current = _ui.value.currentSessionId
         val items = current?.let { jobsBySession[it] }.orEmpty()
         val unseen = JobsMarker.unseenFor(finishedUnseenSessions, current)
-        if (items == _ui.value.jobs && unseen == _ui.value.jobsFinishedUnseen) return
-        _ui.value = _ui.value.copy(jobs = items, jobsFinishedUnseen = unseen)
-    }
-
-    private fun parseJobs(array: JSONArray?): List<JobItem> {
-        if (array == null) return emptyList()
-        return (0 until array.length()).mapNotNull { index ->
-            val job = array.optJSONObject(index) ?: return@mapNotNull null
-            JobItem(
-                id = job.str("id"),
-                kind = job.str("kind"),
-                label = job.str("label").ifEmpty { job.str("kind") },
-                status = job.str("status"),
-                detail = job.str("detail").takeIf { it.isNotEmpty() },
-                startedAt = job.long("startedAt"),
-                finishedAt = if (job.has("finishedAt")) job.long("finishedAt") else null,
-            )
+        val observed = observedJobId?.let { jobObservations[it] }
+        if (items == _ui.value.jobs &&
+            unseen == _ui.value.jobsFinishedUnseen &&
+            observed == _ui.value.jobOutput
+        ) {
+            return
         }
+        _ui.value = _ui.value.copy(
+            jobs = items,
+            jobsFinishedUnseen = unseen,
+            jobOutput = observed,
+        )
     }
 
     /**
@@ -2950,6 +3025,118 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val current = _ui.value.currentSessionId ?: return
         finishedUnseenSessions = JobsMarker.seen(finishedUnseenSessions, current)
         if (_ui.value.jobsFinishedUnseen) publishJobsForCurrent()
+    }
+
+    // -------------------------------------------------- job output observation
+
+    /**
+     * Starts (or stops) the `job/follow` observation behind the expanded row.
+     *
+     * Observation follows visibility, as it does in the web: output only flows
+     * while someone is watching, and collapsing closes the stream. [jobId] is the
+     * single job currently expanded anywhere in the UI — the sheet and a chat-log
+     * entry are never open at once, because the sheet is modal, so one stream is
+     * enough and a second would only duplicate output.
+     *
+     * Re-expanding a job resumes from the previous generation's `next` offset, so
+     * a collapse-and-reopen does not re-read output already on screen.
+     */
+    fun observeJob(jobId: String?) {
+        if (jobId == observedJobId) return
+        observedJobId = jobId
+        jobFollowJob?.cancel()
+        jobFollowJob = null
+        if (jobId == null) {
+            publishJobsForCurrent()
+            return
+        }
+        // A fresh expansion with no prior state starts streaming rather than
+        // inheriting the failed/settled flags of some earlier generation.
+        val previous = jobObservations[jobId]
+        jobObservations[jobId] = previous?.copy(streaming = true, error = null)
+            ?: JobObservation(jobId = jobId)
+        publishJobsForCurrent()
+        val sessionId = _ui.value.currentSessionId
+        jobFollowJob = viewModelScope.launch {
+            jobClient.follow(sessionId, jobId, previous?.cursor).collect { event ->
+                when (event) {
+                    is StreamEvent.Item -> applyFollowFrame(jobId, event.value)
+                    is StreamEvent.Failure -> failJobObservation(jobId, "${event.code} ${event.message}".trim())
+                    StreamEvent.End -> endJobObservation(jobId)
+                }
+            }
+        }
+    }
+
+    /**
+     * One `job/follow` frame.
+     *
+     * `opened` is the generation anchor; `output` is a coalesced batch; `status` is
+     * the terminal projection, which rides the same stream as the output so
+     * settlement can never race a still-open channel.
+     */
+    private fun applyFollowFrame(jobId: String, value: JSONObject) {
+        val current = jobObservations[jobId] ?: JobObservation(jobId = jobId)
+        when (value.str("type")) {
+            "opened" -> {
+                val from = value.int("from")
+                val earliest = value.obj("job")?.obj("output")?.int("earliest") ?: 0
+                jobObservations[jobId] = JobTail.opened(current, jobId, from, earliest)
+                    .copy(cursor = from)
+            }
+
+            "output" -> {
+                val chunks = value.arr("chunks")
+                val texts = if (chunks == null) {
+                    emptyList()
+                } else {
+                    (0 until chunks.length()).mapNotNull { chunks.optJSONObject(it)?.str("text") }
+                }
+                val chunkGap = chunks != null && (0 until chunks.length())
+                    .any { chunks.optJSONObject(it)?.bool("gapBefore") == true }
+                jobObservations[jobId] = JobTail
+                    .append(current, texts, value.optBoolean("lossy", false), chunkGap)
+                    .copy(cursor = value.int("next"))
+            }
+
+            "status" -> jobObservations[jobId] = JobTail.settled(current)
+        }
+        if (observedJobId == jobId) publishJobsForCurrent()
+    }
+
+    /**
+     * The stream ended without a `status` frame.
+     *
+     * A clean end after `status` is the normal path — the host closes the stream
+     * once the ring is drained — so this must not paint an error over a job that
+     * simply finished. [JobTail.settled] already cleared `streaming`, and a stream
+     * that ends there is expected.
+     */
+    private fun endJobObservation(jobId: String) {
+        val current = jobObservations[jobId] ?: return
+        if (current.streaming) jobObservations[jobId] = JobTail.settled(current)
+        if (observedJobId == jobId) publishJobsForCurrent()
+    }
+
+    private fun failJobObservation(jobId: String, error: String) {
+        jobObservations[jobId] = JobTail.failed(jobObservations[jobId], jobId, error)
+        if (observedJobId == jobId) publishJobsForCurrent()
+    }
+
+    /**
+     * The human kill: `job/kill`, then let the roster stream report the outcome.
+     *
+     * Nothing is painted from this answer. The host admits the request
+     * (`requested`) or reports the row already gone (`already-finished`) and the
+     * `job/list` frame does the rest, which is what keeps a row from claiming to be
+     * cancelled while its process is still running.
+     */
+    fun killJob(jobId: String) {
+        val sessionId = _ui.value.currentSessionId ?: return
+        viewModelScope.launch {
+            runCatching { jobClient.kill(sessionId, jobId) }
+                .onFailure { Log.w(TAG, "job/kill $jobId failed: ${it.message}") }
+        }
     }
 
     // ------------------------------------------------------------- references
@@ -3227,6 +3414,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         )
         // No session is open, so the seat publishes an empty list and no dot. The
         // jobs the session being left had, and its marker, stay keyed to it.
+        // The roster stream goes with it: nothing is on screen to keep current, and
+        // an expanded panel's output must not outlive the row it belonged to.
+        watchJobs(null)
+        observeJob(null)
         publishJobsForCurrent()
         app.attention.visibleSessionId = null
         app.attention.visibleWith = emptySet()
@@ -4343,9 +4534,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // unknown until the read below lands.
             subagentParentAvailable = null,
         )
-        // Re-publish this session's jobs and its own finished marker. Without this
-        // the seat kept the previous session's list — and judged the first `jobs`
-        // frame after the switch against it — until that session happened to send.
+        // Point the roster stream at this session and re-publish what is already
+        // known for it. The stream is what makes jobs appear at all — nothing else
+        // pushes them — and re-publishing keeps the seat from wearing the outgoing
+        // session's list (and from judging the new session's first frame against it)
+        // until the host's first `rows` frame lands.
+        observeJob(null)
+        watchJobs(sessionId)
         publishJobsForCurrent()
         _todos.value = emptyList()
         app.attention.visibleSessionId = sessionId

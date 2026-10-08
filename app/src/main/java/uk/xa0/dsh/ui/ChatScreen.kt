@@ -1073,11 +1073,20 @@ fun ChatScreen(vm: DshViewModel) {
                                             if (node != null) {
                                                 ToolCallTreeRow(node, vm::imageBitmap)
                                             } else {
-                                                ToolCallRow(entry, vm::imageBitmap)
+                                                ToolCallRow(
+                                                    entry,
+                                                    vm::imageBitmap,
+                                                    jobOutput = ui.jobOutput,
+                                                    onObserveJob = vm::observeJob,
+                                                )
                                             }
                                         }
                                         is ChatEntry.Todos -> TodoCard(entry.items)
-                                        is ChatEntry.Notice -> NoticeRow(entry)
+                                        is ChatEntry.Notice -> NoticeRow(
+                                            entry,
+                                            jobOutput = ui.jobOutput,
+                                            onObserveJob = vm::observeJob,
+                                        )
                                     }
 
                                     is DisplayRow.TurnProcess -> TurnProcessRow(row) {
@@ -1472,13 +1481,25 @@ fun ChatScreen(vm: DshViewModel) {
 
     if (showJobs) {
         ModalBottomSheet(
-            onDismissRequest = { showJobs = false },
+            // Closing the sheet stops the observation: the web closes its job
+            // popover's stream on unmount for the same reason, and a stream left open
+            // here would keep pulling output nobody is looking at.
+            onDismissRequest = {
+                showJobs = false
+                vm.observeJob(null)
+            },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = DshTheme.colors.bgBase,
         ) {
             JobsSheet(
                 jobs = ui.jobs,
-                onDismiss = { showJobs = false },
+                output = ui.jobOutput,
+                onObserve = vm::observeJob,
+                onKill = vm::killJob,
+                onDismiss = {
+                    showJobs = false
+                    vm.observeJob(null)
+                },
                 modifier = Modifier.padding(horizontal = DshSpacing.lg, vertical = DshSpacing.md),
             )
         }
