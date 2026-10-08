@@ -244,6 +244,32 @@ editing the live copy. There is no install step to forget.
     service: `host-serial:X:reverse:forward:…` is rejected with "unknown host
     service". The reverse has to go out as two requests on one socket —
     `host:transport:<serial>`, then `reverse:forward:<remote>;<local>`.
+21. **A spawned session does not reach the app without `api-session/added`.** The roster
+    is refreshed only by a whole-world `session/list` pull, and the host's membership
+    *pushes* (`api-session/added`, `api-session/removed`, both `mode: 'emit'` in
+    `dsh-api-remotes`' allowlist) were consumed by nothing, so a session that appeared
+    between two pulls had no row at all. Measured on the device: child `cd66afc5` was
+    created 59 s before a probe; the app's roster stayed at **1,891** rows while the host
+    listed **1,892**, and the parent's lineage sheet read `running=1` against the host's
+    `running=2` for that entire minute. On an idle parent — no follow events, so nothing
+    triggers a pull — the lag is unbounded. The `added` payload is the **whole**
+    `session/list` row (`summaryFor` builds both), so it is fed straight in
+    (`DshViewModel.applySessionAdded`) and a debounced pull is asked for as well, because
+    ordering, the archived filter and catalog labels remain a pull's job.
+22. **A `session/projections` read can be empty where `session/list` is not.** For
+    `session-a771fb9b-5ba8-4cb6-8339-e45de4cebbdd`, `session/projections {sessionId}`
+    answered `modelSelection.next = null, lastUsed = null, asOfSeq = null` in two
+    back-to-back reads (19:12:34 and 19:12:37) while `session/list` gave
+    `next = deepseek-official/deepseek-flash/off`, `lastUsed =
+    deepseek-official/deepseek-v4-flash-vision-exp/low` with `asOfSeq = 44`. Observed
+    behaviour; the record is `session.v4.jsonl.zstd` and carries seven `model/selection`
+    events, so the data is not missing from the log. **Inference, not established**: some
+    projections are registered runtime views rather than journal folds (the controller
+    declares several as `init: () => null` with `view: () => …`), so a cold read
+    legitimately answers null while the live summary has the value. Whatever the cause,
+    **cross-checking an app chip against `session/projections` is the wrong instrument** —
+    use the `session/list` row, or the `session/follow` snapshot, which is what the app
+    itself reads. One evening was lost to probes that used the other endpoint.
 
 ## Host behaviour: model selection (probed on 0.2.0-rc.2)
 
