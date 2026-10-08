@@ -236,3 +236,40 @@ editing the live copy. There is no install step to forget.
 - **The emulator service is the only supported way to run it**; a desktop restart
   kills anything started by hand, so check `rc-service --user emulator status`
   before assuming a device is up.
+
+## trap: a missing instrument reads exactly like a finding
+
+Twice in one session I concluded "the app never receives X" from a diag file that had no
+X-reporter in it. The instrumentation had been edited in and then lost — a later `git
+status` showed `DshViewModel.kt` modified, so the file *looked* instrumented, and no record
+appeared, which read as evidence of absence.
+
+Before drawing a conclusion from a file that records instrumentation, grep the **source**
+for the reporter. `grep -c 'note("catalog"' app/src/main/java/uk/xa0/dsh/DshViewModel.kt`
+costs nothing and would have caught both.
+
+Related, same file: edits to `DshViewModel.kt` have silently reverted more than once —
+always confirm the change is present (`grep`) before building, and again after.
+
+## trap: never let subagents run builds
+
+On 2026-10-08 three subagents were each given a worktree and told to build. Their worktrees each
+carry their own `.build.lock` (it lives in the checkout), so the lock serialised nothing: three
+Gradle daemons plus a ~2.7 GB Kotlin daemon each ran at once, load hit 27, and the machine
+crashed and lost the session.
+
+Two lessons, and the second is the trap:
+
+1. **Builds are top-level and serial.** A subagent edits and reasons; the orchestrating session
+   runs the build, one at a time, and feeds the compiler/test output back.
+2. **A lock inside a checkout is not a global lock.** `build.sh`'s `.build.lock` is per-worktree,
+   which reads as safe when you have one worktree and is worthless when you have three. If you
+   parallelise across worktrees, the serialisation has to live somewhere shared.
+
+Check `free -g` and `/proc/loadavg` before starting a build, and never start one while another
+is running. One Gradle build on this 4-thread box is roughly 4 GB.
+
+Extended the same night: **tests count as builds.** A subagent may write tests but must not run
+them, for the same reason — three agents running `:app:testDebugUnitTest` is three Gradle runs
+plus three Kotlin daemons. The orchestrating session builds and tests, batched, top-level, and
+feeds the output back. A subagent's job is code, reasoning and host probing.
