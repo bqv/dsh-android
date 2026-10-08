@@ -55,8 +55,15 @@ explain it.
 
 Instrumented with `DiagLazyList`/`DiagScrollColumn` (position) and `diagDrag`
 (gestures): `chat`, `drawer`, `settings`, `files:tree`, `files:preview`,
-`files:image`, `files:svg`, `sheet:models`, `sheet:presets`, `trajectory`,
-`browser`.
+`files:image`, `files:svg`, `sheet:models`, `sheet:presets`, `sheet:jobs`,
+`job-output`, `trajectory`, `browser`.
+
+The last two are a pair, and deliberately so. `sheet:jobs` is the background-jobs
+sheet's roster and `job-output` is the output panel expanded inside one of its
+rows — two vertical scrollables, one inside the other, which is the shape a drag
+has to be arbitrated between. Whichever of them the log shows moving is the one
+that took the gesture, and a `drag` on the other with `child=1 moved=0` says
+something above it consumed the drag before the list ever saw it.
 
 ## Tests
 
