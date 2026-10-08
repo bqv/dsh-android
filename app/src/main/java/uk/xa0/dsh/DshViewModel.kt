@@ -5396,9 +5396,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // And it belongs to the pick that is still the current one: two taps in
                 // a row mean the newer answer decides, not whichever returns last.
                 if (_ui.value.modelSelection.inFlight != ref) return@onSuccess
-                // The host's answer is what it selected, which is not always what was
-                // asked for: the effort is resolved from the route's default when the
-                // request named none, and it may resolve the route itself differently.
+                // The host's answer is what it selected, which is not always the same
+                // *shape* as the request: an omitted `reasoningEffort` comes back
+                // filled in with the route's `defaultEffort` (probed). Taking the
+                // answer rather than the request is what keeps the chip and the host
+                // from drifting apart.
                 updateModelSelection { it.withAnswer(parseModelRef(value.obj("selected")) ?: ref) }
             }
             .onFailure { error ->

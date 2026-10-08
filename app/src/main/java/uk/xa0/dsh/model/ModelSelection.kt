@@ -247,10 +247,12 @@ data class ModelSelectionState(
      * Adopts the host's answer to `session/selectModel`.
      *
      * The answer is the host's own statement of what it selected, and it does not
-     * always repeat the request — the effort is resolved from the route's default
-     * when the request omitted one, and a host that will not route a provider answers
-     * with another route entirely. Writing it into `next` is what keeps the chip and
-     * the host's state from drifting apart between projection updates.
+     * always repeat the request: probed on 0.2.0-rc.2, an omitted `reasoningEffort`
+     * comes back filled in with the route's `defaultEffort`. (A route the host will
+     * not route is *refused* outright, with `session/model-unavailable` and no
+     * mutation — it is not silently substituted — so the substitution case is the
+     * effort.) Taking the answer as `next` is what keeps the chip and the host's own
+     * state from drifting apart between projection updates.
      */
     fun withAnswer(selected: ModelRef): ModelSelectionState = copy(
         host = HostModelSelection(lastUsed = host?.lastUsed, next = selected),

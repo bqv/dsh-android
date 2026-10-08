@@ -63,7 +63,7 @@ fun modelTriggerState(
  * last catalog entry it had matched, which is a name for a *different* model. The
  * host's identifier is ugly but it is the thing the session is actually holding.
  */
-internal fun modelLabel(choice: ModelChoice, option: ModelOption?, effort: String?): String? {
+fun modelLabel(choice: ModelChoice, option: ModelOption?, effort: String?): String? {
     val ref = choice.ref ?: return null
     val label = if (option != null) {
         listOfNotNull(shortModelName(option.name), effortLabel(option, effort)).joinToString(" · ")
@@ -140,7 +140,7 @@ fun modelSheetStatus(
  * phone: `DeepSeek-V41-Flash` renders as `DeepSeek-Flash`. The model sheet still
  * lists every model under its full name.
  */
-internal fun shortModelName(name: String?): String? {
+fun shortModelName(name: String?): String? {
     if (name == null) return null
     // Elide the *version*, not the name: dropping the leading segment (as this
     // first did) kept the version and threw away the model's identity.
@@ -149,7 +149,7 @@ internal fun shortModelName(name: String?): String? {
 }
 
 /** The active reasoning effort, shown beside the model as the web trigger does. */
-internal fun effortLabel(model: ModelOption?, effort: String?): String? {
+fun effortLabel(model: ModelOption?, effort: String?): String? {
     if (effort.isNullOrEmpty()) return null
     return model?.efforts?.firstOrNull { it.id == effort }?.name ?: effort
 }
