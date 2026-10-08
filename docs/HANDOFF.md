@@ -245,6 +245,54 @@ editing the live copy. There is no install step to forget.
     service". The reverse has to go out as two requests on one socket —
     `host:transport:<serial>`, then `reverse:forward:<remote>;<local>`.
 
+## Host behaviour: model selection (probed on 0.2.0-rc.2)
+
+Measured, not inferred. These are host facts, so a change to the chip that contradicts
+them is a bug in the app. Everything here was established with `POST
+http://127.0.0.1:8081/api/<method>` (cookie recipe in `~/ref/NOTES.md`) against a
+throwaway session created for the purpose — **never against a live session**, because a
+local model selection can pull gigabytes of weights onto the user's GPU.
+
+- **Argument shapes disagree between methods on the same host.** `session/modelCatalog`
+  takes `{}`; `session/list` takes `{"_request":{}}`; `session/projections` and
+  `session/selectModel` both take `{"request":{…}}`. The error names the field, so probe.
+- **`session/projections` exists but is not in the shipped descriptors.** It is not in
+  `docs/research/protocol.md` either — but it answers `{"request":{"sessionId":…}}` with
+  the full `values` map, which is the cheapest way to read one session's folded
+  projections. The app does not call it; it relies on the projection stream instead.
+- **`modelSelection` is `{lastUsed, next}`, and the two are different facts.**
+  `next` is what the next turn will use and moves the instant `session/selectModel` is
+  accepted (`agents.selectForNextRequest`); `lastUsed` is what the last turn actually ran
+  and moves only when a turn runs. Observed disagreeing on a real session:
+  `lastUsed: deepseek-official/deepseek-v4-pro high`, `next: deepseek-official/deepseek-flash low`.
+  A blank session projects `{lastUsed: null, next: null}`.
+- **A refusal is hard, and mutates nothing.** An unlisted model, an unlisted provider, and
+  an effort the route does not advertise are all answered
+  `session/model-unavailable` ("Select an available model before sending a message." /
+  "…does not support reasoning effort \"medium\"") and leave both halves of the projection
+  untouched. There is **no** silent substitution of a different route. The only
+  "resolves differently" case found is the effort: omitting `reasoningEffort` is answered
+  with the route's `defaultEffort` filled in.
+- **`session/selectModel` moves the global default `session/modelCatalog.default` — and it
+  does so asynchronously.** Immediately after the call the catalog still reports the *old*
+  default; the new one appeared after ~0.4 s in one measurement and ~2 s in another. This
+  is the trap that matters: a chip built from `modelCatalog.default` has a lag baked into
+  it, so a re-read taken right after a selection advertises a model the session is not
+  going to run. It is also easy to "disprove" the global write by reading immediately —
+  two independent readers did exactly that and were wrong.
+- **The host pushes the change.** On the `session/control` stream it sends
+  `{"type":"projection","sessionId":…,"key":"modelSelection","value":{lastUsed,next},"seq":…}`
+  both when a selection is accepted **and again when `lastUsed` rolls forward after a
+  turn**. An app that reads `modelSelection` only from a follow snapshot therefore never
+  sees `lastUsed` move. Reached by opening `ws://127.0.0.1:8081/api/remote.mux` and sending
+  `{"type":"open","streamId":"s1","endpoint":"session/control","payload":{"args":{}}}`;
+  streams cannot be opened on the unary `POST /api/<method>` route at all
+  (`gateway/signature-invalid`: "stream Remote methods must be opened through the stream carrier").
+- **`session/selectModel` resumes the session**, and `session/prompt` on a session whose
+  selection moved but which has not run yet will run the new route and then report it as
+  `lastUsed` — which is what makes a pending switch a real, observable state rather than a
+  UI invention.
+
 ## Open items
 
 - **Scrolling is being rebuilt from evidence, not from an account of it.** The

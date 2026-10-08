@@ -181,6 +181,12 @@ of where the app stands against them.
 - [x] 22dp capsule, draft surface, placeholder, send → stop
 - [x] Model chip + picker sheet (grouped by provider), with the reasoning-effort chips on
       the selected route (`ui/Sheets.kt`)
+- [x] The chip states the truth rather than a guess: it names the session's
+      `modelSelection.next` (what the next turn will run), marks a switch no turn has run
+      yet (`next` differing from `lastUsed`) and a pick still out with the host, names a
+      route the catalog has dropped from the host's own `provider/model` and marks it
+      unavailable, and applies a pick made on the new-session screen to the session that
+      screen creates (`model/ModelSelection.kt`, `ui/ModelTriggerState.kt`)
 - [x] `/` command picker and the `+` add menu, both from one `commands/list` roster:
       client-owned File/Model/Permission rows, an input-taking command claimed into the
       draft, a bare one run through `commands/execute` (`ui/components/CommandMenu.kt`,
