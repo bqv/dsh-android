@@ -403,6 +403,10 @@ app/build.gradle.kts, settings.gradle.kts, gradle.properties, local.properties  
   every deliberate divergence and the reasoning behind it.
 - `docs/SCROLL-DIAG.md` — the latent scroll diagnostics: what they record, and
   how to read them back off a device.
+- `docs/JOBS.md` — the `job` Remote namespace as the running host actually
+  serves it (`job/list`, `job/follow`, `job/kill`), with the probes that establish
+  it. The shipped typert descriptors disagree with that host, and the roster is no
+  longer in `session/control`, which is how the jobs seat went blank.
 - `docs/research/` — the reverse-engineered reference: design system, wire
   protocol, transcript/UI node model, settings and panels, composer menus,
   notification plumbing, and the mobile-remote environment.

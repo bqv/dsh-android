@@ -86,6 +86,21 @@ of where the app stands against them.
       run, absent otherwise by design), agent-preset chip (hero only, because the host
       refuses to recompose an agent after a turn). Missing: terminal recovery, schedule
       catalog, open-in-app.
+- [x] **Background jobs.** The roster is the `job/list` Remote stream, one per session,
+      opened for whichever session is on screen — `job/follow` per expanded row for its
+      live output, `job/kill` for the two-press stop. This replaced a `jobs` block in the
+      `session/control` baseline that 0.2.0-rc.2 no longer sends, which is why every
+      session showed an empty jobs seat with nothing erroring. The seat is the web's
+      trigger: visible while the session can see **any** job, dotted only while one runs
+      or one settled unseen. The sheet carries the web's sections (Running / collapsible
+      Finished N with Clear), its durations, its terminal panel with the gap and
+      interruption notices, and its two-press kill; the chat log opens the same panel,
+      from the background shell call that started the job and from its `tool-jobs`
+      completion notice. Probes and frame shapes: `docs/JOBS.md`.
+      Divergences, deliberate: the seat's count is terser than `count.live.*` because the
+      phone's header is one row shared with the lineage chip and Files; and the web has no
+      live job output in the chat log at all, so that half is this client's addition —
+      attached to the two entries that already name a job id.
 - [x] There is **no per-session overflow menu** — rename/fork/archive live on the sidebar row
 - [x] **A way up from a subagent.** The header's title is the tap: a leading arrow appears
       only when the roster can name the parent (`SubagentParent` is null otherwise, so a

@@ -396,6 +396,11 @@ class TranscriptReducer {
                         detail = text.takeIf { it.isNotBlank() && it != summary },
                         time = time,
                         severity = NoticeSeverity.INFO,
+                        // The same job name the label was built from, kept as a
+                        // handle: the row is where a finished job's retained output
+                        // is reachable from the chat log.
+                        jobId = source?.takeIf { it.str("plugin") == "tool-jobs" }
+                            ?.let { JOB_NAME.find(text)?.groupValues?.get(1) },
                     )
                 } else {
                     entries[seq] = ChatEntry.UserMessage(
