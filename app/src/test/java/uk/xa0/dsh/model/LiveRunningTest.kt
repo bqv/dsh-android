@@ -180,13 +180,39 @@ class LiveRunningTest {
         assertFalse(book.running("dead"))
     }
 
+    /**
+     * The only forgetting this design has, and the form "every claim is forgotten" now
+     * takes: [RunningBook.forget] drops **both** claim kinds for one id — the durable
+     * sample and the transition overlay — and leaves every other id standing.
+     *
+     * There is deliberately no wholesale `clear()`. A reset would have to clear this book
+     * and `MembershipHold` together, and the two are independent objects: a `clear()` on
+     * one and not the other is precisely the split authority this change exists to remove,
+     * so the API is not offered rather than offered with a rule attached. Nothing needs it:
+     * the epoch counter is monotonic by design, a later pull replaces the samples, and a
+     * stale transition is retired by the pull after next. Constructing a book is one line
+     * in a test or a new ViewModel in the app.
+     */
     @Test
-    fun `clear forgets every claim`() {
+    fun `forget drops one id's every claim and leaves the rest standing`() {
         val book = RunningBook()
-        book.applyPull(book.beginPull(), mapOf("a" to true))
-        book.frame("b", true)
-        book.clear()
-        assertFalse(book.running("a"))
-        assertFalse(book.running("b"))
+        book.applyPull(book.beginPull(), mapOf("bystander" to true))
+
+        // Both kinds of claim, added after the cut so neither is subsumed by it.
+        book.observe("target", true)
+        book.frame("target", true)
+        assertTrue(book.running("target"))
+
+        book.forget("target")
+
+        assertFalse(book.running("target"))
+        assertTrue(book.running("bystander"))
+        // An id with nothing claimed is a no-op, not a crash.
+        book.forget("never-seen")
+        assertTrue(book.running("bystander"))
+        // And a pull that never names it again cannot resurrect it.
+        book.applyPull(book.beginPull(), mapOf("bystander" to true))
+        assertFalse(book.running("target"))
+        assertTrue(book.running("bystander"))
     }
 }
