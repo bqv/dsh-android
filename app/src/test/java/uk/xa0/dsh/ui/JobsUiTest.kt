@@ -143,7 +143,8 @@ class JobsUiTest {
         rule.onNodeWithText("tick 2", substring = true).assertExists()
 
         // Collapsing releases the stream again. The expanded panel repeats the
-        // command, so the row is the first of the two nodes carrying it.
+        // command — the web heads its panel with `job.label` too — so the row is the
+        // first of the nodes carrying it.
         rule.onAllNodesWithText(command).onFirst().performClick()
         rule.waitForIdle()
         assertEquals(listOf("bash-1", null), observed)

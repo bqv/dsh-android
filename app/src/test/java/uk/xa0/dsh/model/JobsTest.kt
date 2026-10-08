@@ -285,11 +285,9 @@ class JobsTest {
         assertEquals("bbbbb", view.text)
         assertTrue(view.gapBefore)
 
-        // Cutting at the low half of the emoji: the boundary must move forward one
-        // unit, leaving the whole pair in the tail rather than half of it.
+        // Cutting at the low half of the emoji: the boundary moves forward one unit,
+        // so the character is dropped whole rather than left half-there.
         val pairTail = JobTail.append(opened, listOf(long), lossy = false, chunkGap = false, limit = 11)
-        // The boundary landed on the pair's low half; the nudge drops the whole
-        // character rather than leaving half of it at the head of the tail.
         assertEquals("bbbbbbbbbb", pairTail.text)
         assertFalse("a split surrogate must not survive", pairTail.text.first().isLowSurrogate())
     }
