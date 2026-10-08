@@ -58,6 +58,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -76,6 +78,7 @@ import java.util.Locale
 import uk.xa0.dsh.ContextBreakdown
 import uk.xa0.dsh.PendingAttachment
 import uk.xa0.dsh.data.BusyEnter
+import uk.xa0.dsh.ui.ModelTriggerState
 import uk.xa0.dsh.ui.clickableNoRipple
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
@@ -123,7 +126,7 @@ fun Composer(
     onSend: () -> Unit,
     onStop: () -> Unit,
     running: Boolean,
-    modelLabel: String?,
+    modelTrigger: ModelTriggerState?,
     onModelClick: () -> Unit,
     permissionLabel: String?,
     onPermissionClick: () -> Unit,
@@ -262,8 +265,8 @@ fun Composer(
                 // as the web's `.row` does with `justify-content: space-between`.
                 Spacer(Modifier.weight(1f))
 
-                if (modelLabel != null) {
-                    ModelTrigger(label = modelLabel, onClick = onModelClick)
+                if (modelTrigger != null) {
+                    ModelTrigger(state = modelTrigger, onClick = onModelClick)
                 }
 
                 Spacer(Modifier.width(DshSpacing.md))
@@ -505,30 +508,45 @@ private fun SendModeRow(
  * Model trigger. The web trigger shows the model name (the provider appears only
  * in a degenerate fallback). The label is width-capped so a long name ellipsizes
  * rather than pushing the trailing group off the card's margin.
+ *
+ * [ModelTriggerState.marker] sits *outside* that capped label on purpose: it is the
+ * word that says the route is not simply in force — a switch not yet run, a pick the
+ * host has not answered, a pick waiting on the session this screen will create, or a
+ * route that has gone away — and an ellipsized label must not be able to swallow it.
  */
 @Composable
-private fun ModelTrigger(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun ModelTrigger(state: ModelTriggerState, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val colors = DshTheme.colors
     Row(
         modifier
             .clip(RoundedCornerShape(DshRadius.pill))
             .clickableNoRipple(onClick = onClick)
-            .padding(horizontal = DshSpacing.sm, vertical = DshSpacing.xs),
+            .padding(horizontal = DshSpacing.sm, vertical = DshSpacing.xs)
+            .semantics { state.description?.let { contentDescription = it } },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = label,
+            text = state.label,
             style = DshType.bodyMedium.copy(fontWeight = FontWeight.Medium),
             color = colors.labelSecondary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 132.dp),
         )
+        if (state.marker != null) {
+            Spacer(Modifier.width(DshSpacing.xs))
+            Text(
+                text = state.marker,
+                style = DshType.micro,
+                color = if (state.alert) colors.error else colors.labelTertiary,
+                maxLines = 1,
+            )
+        }
         Spacer(Modifier.width(DshSpacing.xxs))
         Icon(
             Icons.Rounded.ExpandMore,
             contentDescription = null,
-            tint = colors.labelCaption,
+            tint = if (state.alert) colors.error else colors.labelCaption,
             modifier = Modifier.size(14.dp),
         )
     }

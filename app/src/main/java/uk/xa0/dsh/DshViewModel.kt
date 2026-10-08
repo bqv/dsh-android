@@ -34,7 +34,12 @@ import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.JobsMarker
 import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.MessageAttachment
+import uk.xa0.dsh.model.ModelChoice
+import uk.xa0.dsh.model.ModelRef
+import uk.xa0.dsh.model.ModelSelectionState
 import uk.xa0.dsh.model.PendingSessionTarget
+import uk.xa0.dsh.model.parseHostModelSelection
+import uk.xa0.dsh.model.parseModelRef
 import uk.xa0.dsh.model.SessionIntentPlan
 import uk.xa0.dsh.model.subagentTreeIds
 import uk.xa0.dsh.model.staleLiveRunning
@@ -229,6 +234,21 @@ data class ModelOption(
     val efforts: List<EffortOption> = emptyList(),
     val defaultEffort: String? = null,
 )
+
+/**
+ * Whether [models] offers [ref]'s route **and** the effort it names.
+ *
+ * The host refuses an effort a route does not advertise with the same
+ * `session/model-unavailable` it uses for a missing model (probed), so an effort
+ * that is not in the list is not runnable either. A route with no efforts at all
+ * accepts a null effort only.
+ */
+fun modelRouteIsRunnable(models: List<ModelOption>, ref: ModelRef): Boolean {
+    val option = models.firstOrNull { it.provider == ref.provider && it.model == ref.model }
+        ?: return false
+    val effort = ref.reasoningEffort ?: return true
+    return option.efforts.any { it.id == effort }
+}
 
 /** One host-advertised permission preset (`permissionPresets/catalog`). */
 data class PermissionOption(
@@ -555,9 +575,18 @@ data class UiState(
     val subagentCatalogs: Map<String, SubagentCatalog> = emptyMap(),
     val models: List<ModelOption> = emptyList(),
     val providerOrder: List<String> = emptyList(),
-    val selectedModel: ModelOption? = null,
-    /** Active reasoning effort for the selected route, when it has any. */
-    val selectedEffort: String? = null,
+    /**
+     * The model trigger's inputs: the host's `modelSelection` projection, the
+     * catalog's global default, the pick recorded on the new-session screen, and the
+     * pick still out with the host.
+     *
+     * These are the *only* writable model state there is. The three properties the
+     * UI reads — [modelChoice], [selectedModel], [selectedEffort] — are derived from
+     * them below, so there is no field for a second writer to set and no way for the
+     * chip to disagree with the state it is supposed to describe. That is deliberate:
+     * this area has already had four separate bugs of exactly that shape.
+     */
+    val modelSelection: ModelSelectionState = ModelSelectionState(),
     val permissionOptions: List<PermissionOption> = emptyList(),
     /** Current session's access mode, from the `permissions` projection. */
     val currentPermission: String = "",
@@ -668,6 +697,38 @@ data class UiState(
     /** The host's own wording for the last refused write. */
     val settingsWriteError: String? = null,
 ) {
+    /**
+     * The route the model trigger advertises, and how the host came to it.
+     *
+     * Derived, never stored: whatever [modelSelection] says is what the chip says.
+     * That is what makes a second writer impossible rather than merely absent — there
+     * is no field to assign. An empty catalog means "not loaded", so nothing is
+     * condemned as unavailable on the strength of a failed `session/modelCatalog`.
+     */
+    val modelChoice: ModelChoice
+        get() = modelSelection.choice(
+            sessionOpen = currentSessionId != null,
+            isKnown = if (models.isEmpty()) null else { ref -> modelRouteIsRunnable(models, ref) },
+        )
+
+    /**
+     * The catalog entry for [modelChoice], when the host still lists the route.
+     * Null while the route is unknown or has gone away — the chip then falls back
+     * to naming the route from `modelChoice.ref` rather than to a stale entry.
+     */
+    val selectedModel: ModelOption?
+        get() = modelChoice.ref?.let { ref ->
+            models.firstOrNull { it.provider == ref.provider && it.model == ref.model }
+        }
+
+    /**
+     * The active reasoning effort: the route's own id, which is what the sheet's
+     * effort chips compare against, falling back to the catalog's default for it.
+     */
+    val selectedEffort: String?
+        get() = modelChoice.ref?.reasoningEffort?.takeIf { it.isNotEmpty() }
+            ?: selectedModel?.defaultEffort
+
     /**
      * Whether this session has its **own** work in flight. The messaging gate for
      * the transcript's turn-status row.
@@ -1973,8 +2034,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // router that comes up is not invisible until the next reconnect.
         app.attention.onAdaptersUpdated = {
             viewModelScope.launch {
+                // `loadModels` re-derives the chip from the host's catalog default and
+                // the session's own projection, so re-reading the list is enough: a
+                // provider that has just appeared or gone is reflected without the
+                // chip having to be poked separately.
                 loadModels()
-                refreshSelectedModel()
             }
         }
         // The notification copy names the subject; only the client's session list
@@ -2720,7 +2784,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     if (block != null) {
                         liveProjections = block
                         applySessionProjections(block)
-                        refreshSelectedModel()
+                        applyModelSelection(block)
                         // The subagent catalog lives in these projections, and this is
                         // where they arrive. The rebuild used to happen only at
                         // `openSession`, which runs *before* the baseline — so it read an
@@ -2762,6 +2826,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 merged.put(value.str("key"), value.opt("value"))
                 liveProjections = merged
                 applySessionProjections(merged)
+                // `modelSelection` is a projection like any other, so a delta that
+                // carries it — the host rolling `lastUsed` forward after a turn, or
+                // another client selecting — has to move the chip. It used to be read
+                // only from a full snapshot, which left the chip describing whatever
+                // the last snapshot said until the stream was reopened.
+                if (value.str("key") == "modelSelection") applyModelSelection(merged)
                 // After the merge, not before: the rebuild reads `liveProjections`,
                 // and running it first would read the value this frame replaces.
                 if (value.str("key") == "subagentCatalog") refreshSubagentCatalogSoon(sessionId)
@@ -3192,9 +3262,26 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         )
         when (plan) {
             is SessionIntentPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
-            is SessionIntentPlan.Open -> openSession(plan.sessionId)
+            is SessionIntentPlan.Open -> openSessionCarryingModelPick(plan.sessionId)
             is SessionIntentPlan.Record -> enterPendingSession(plan.pending)
         }
+    }
+
+    /**
+     * Opens the session a "start a session here" path resolved to, carrying the
+     * new-session seat's model pick onto it.
+     *
+     * `Open` means the host already holds the blank this intent wants — so no create
+     * happens, and a pick recorded on the seat would otherwise be discarded in
+     * silence: the reader chose a model, then chose where to start, and got neither.
+     * Only the paths that come *from* the seat use this; opening a row from the
+     * drawer is navigation and drops the pick, which is why [openSession] itself
+     * still clears it.
+     */
+    private fun openSessionCarryingModelPick(sessionId: String) {
+        val pick = pendingModelPick()
+        openSession(sessionId)
+        if (pick != null) viewModelScope.launch { applyPendingModelPick(sessionId, pick) }
     }
 
     /**
@@ -3225,6 +3312,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // from the session being left would be refused by the host.
             attachments = emptyList(),
         )
+        // The hero's chip is the host's global default plus whatever pick the reader
+        // records here; the session being left has no say in it. The pick itself is
+        // deliberately kept — this seat exists to hold choices for a session that has
+        // not been created, and re-recording its target is not a reason to drop one.
+        updateModelSelection { it.onSessionLeft() }
+        // The host's global default is what this seat's session runs until a pick is
+        // recorded, and it moves when *any* session or client selects — asynchronously,
+        // measured at 0.4-2 s on 0.2.0-rc.2. The one catalog read from connect is
+        // therefore not enough on this seat: re-read it on the way in.
+        viewModelScope.launch { runCatching { loadModels() } }
         // No session is open, so the seat publishes an empty list and no dot. The
         // jobs the session being left had, and its marker, stay keyed to it.
         publishJobsForCurrent()
@@ -3244,6 +3341,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      */
     private suspend fun materializePending(pending: PendingSessionTarget): String? {
         _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
+        // Read before anything is created: the pick belongs to the session this call
+        // is about to make, and `openSession` below consumes whatever is on the seat.
+        val modelPick = pendingModelPick()
         val plan = SessionTargets.materialize(pending, sessionTargetCandidates())
         val id = try {
             when (plan) {
@@ -3274,6 +3374,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         draftStore.rename(PENDING_DRAFT_KEY, id)
         _ui.value = _ui.value.copy(busy = false, pendingSession = null)
         openSession(id)
+        // After the open, so the session's own projections and the pick do not fight
+        // over the chip; the caller sends its prompt only once this returns, so the
+        // first turn cannot run before the selection is in force.
+        modelPick?.let { applyPendingModelPick(id, it) }
         return id
     }
 
@@ -3317,10 +3421,17 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun adoptSession(sessionId: String, workspaceId: String) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
+            val modelPick = pendingModelPick()
             runCatching { adoptSessionNow(sessionId, workspaceId) }
                 .onSuccess { id ->
                     _ui.value = _ui.value.copy(busy = false)
-                    if (id != null) openSession(id)
+                    if (id != null) {
+                        openSession(id)
+                        // The seat's pick belongs to the session the reader ends up
+                        // in, whether the host created one or adopted the blank the
+                        // Workspace already held.
+                        modelPick?.let { applyPendingModelPick(id, it) }
+                    }
                 }
                 .onFailure { error ->
                     // A `session/conflict` never reaches here: [adoptSessionNow]
@@ -4343,6 +4454,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // unknown until the read below lands.
             subagentParentAvailable = null,
         )
+        // The chip belongs to the session on screen. A selection is not carried
+        // across a switch: what this session will run arrives with its own
+        // projections, and until they land the host's global default is the honest
+        // answer — the previous session's model never is. A pick recorded on the
+        // new-session screen is dropped too: it was about a session that is not
+        // this one. (The create/adopt paths take it before calling this.)
+        updateModelSelection { it.onSessionOpened() }
         // Re-publish this session's jobs and its own finished marker. Without this
         // the seat kept the previous session's list — and judged the first `jobs`
         // frame after the switch against it — until that session happened to send.
@@ -4419,7 +4537,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                                 value.obj("projections")?.obj("values")?.let { block ->
                                     liveProjections = block
                                     applySessionProjections(block)
-                                    refreshSelectedModel()
+                                    applyModelSelection(block)
                                     refreshSubagentCatalog(sessionId)
                                 }
                                 bumpTranscript()
@@ -4521,7 +4639,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             )
         ) {
             is SessionIntentPlan.Adopt -> adoptSession(plan.sessionId, plan.workspaceId)
-            is SessionIntentPlan.Open -> openSession(plan.sessionId)
+            is SessionIntentPlan.Open -> openSessionCarryingModelPick(plan.sessionId)
             is SessionIntentPlan.Record -> enterPendingSession(plan.pending)
         }
     }
@@ -4553,10 +4671,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun createSessionNow(cwd: String?, preset: String?, workspaceId: String?) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(busy = true, error = null, errorNeedsSignIn = false)
+            val modelPick = pendingModelPick()
             runCatching { createSessionRequest(cwd, preset, workspaceId) }
                 .onSuccess { id ->
                     _ui.value = _ui.value.copy(busy = false)
                     openSession(id)
+                    modelPick?.let { applyPendingModelPick(id, it) }
                 }
                 .onFailure { error ->
                     _ui.value = _ui.value.copy(busy = false)
@@ -5183,88 +5303,136 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             "model catalog: groups=${catalog.optJSONArray("groups")?.length() ?: -1} " +
                 "models=${options.size} providers=${order.joinToString()}",
         )
-        // The session's own choice outranks the catalog's `default`.
-        //
-        // `default` is the *global* agent default, not this session's selection — so a
-        // session switched to a local model still drew the chip from the default, and
-        // the display disagreed with the state: `lastUsed: deepseek-flash`,
-        // `next: dsh-local/gemma-4-26B` on the host, DeepSeek on the chip. The session's
-        // `modelSelection.next` projection is the state the next turn will actually use.
-        val sessionChoice = liveProjections?.obj("modelSelection")?.obj("next")
-        val default = sessionChoice ?: catalog.optJSONObject("default")
-        val selected = default?.let { selection ->
-            options.firstOrNull {
-                it.provider == selection.str("provider") && it.model == selection.str("model")
-            }
-        }
         // Same order as the desktop: stable, so everything outside the two DeepSeek
         // providers keeps the catalog's own sequence.
         val orderedOptions = options.sortedBy { providerRank(it.provider) }
         val orderedProviders = order.sortedBy { providerRank(it) }
-        _ui.value = _ui.value.copy(
-            models = orderedOptions,
-            providerOrder = orderedProviders,
-            selectedModel = selected,
-            selectedEffort = default?.str("reasoningEffort")?.takeIf { it.isNotEmpty() }
-                ?: selected?.defaultEffort,
-        )
+        // `catalog.default` is the host's **global** default agent model. It is not
+        // this session's selection and must never be drawn as one; it is only what a
+        // session with no selection of its own will actually run, which is exactly
+        // how `ModelSelectionState` uses it.
+        updateModelSelection { it.withCatalogDefault(parseModelRef(catalog.obj("default"))) }
+        _ui.value = _ui.value.copy(models = orderedOptions, providerOrder = orderedProviders)
     }
 
     /**
-     * Points the model chip at the session on screen.
+     * Adopts a `modelSelection` projection block from the host.
      *
-     * `loadModels` runs once, at connect, so reading the selection there alone left the
-     * chip on whatever the *first* session had and carrying it across every switch —
-     * the model "persisted across sessions" instead of being loaded from each one's own
-     * state. This runs wherever the open session's projections land.
+     * The host's word is the only authority on which route the session will run. This
+     * runs wherever the open session's projections land — the follow snapshot, the
+     * control baseline, and a single `projection` delta too, which is what carries
+     * `lastUsed` rolling forward after a turn without any refresh of this client's
+     * own.
      */
-    private fun refreshSelectedModel() {
-        val choice = liveProjections?.obj("modelSelection")?.obj("next") ?: return
-        val option = _ui.value.models.firstOrNull {
-            it.provider == choice.str("provider") && it.model == choice.str("model")
-        } ?: return
-        val effort = choice.str("reasoningEffort").takeIf { it.isNotEmpty() } ?: option.defaultEffort
-        if (_ui.value.selectedModel == option && _ui.value.selectedEffort == effort) return
-        _ui.value = _ui.value.copy(selectedModel = option, selectedEffort = effort)
+    private fun applyModelSelection(values: JSONObject?) {
+        updateModelSelection { it.withHostSelection(parseHostModelSelection(values.obj("modelSelection"))) }
+    }
+
+    /**
+     * The one way any code may move the model selector's state.
+     *
+     * There is no `modelChoice` field to assign: the chip is derived from this
+     * state, so a second writer cannot exist even by accident. The equality guard
+     * keeps `StateFlow` from emitting on a no-op transform.
+     */
+    private fun updateModelSelection(transform: (ModelSelectionState) -> ModelSelectionState) {
+        val current = _ui.value
+        val next = transform(current.modelSelection)
+        if (next == current.modelSelection) return
+        _ui.value = current.copy(modelSelection = next)
     }
 
     /**
      * Model and reasoning effort go through the same call — `session/selectModel`
      * takes an optional `reasoningEffort`; there is no separate setter.
+     *
+     * A pick on the **new-session screen** has no session to select for, and used to
+     * be dropped on the floor after optimistically repainting the chip: the session
+     * that was then created ran the host default while the chip advertised the pick.
+     * It is now *recorded* ([ModelSelectionState.pendingPick]) and applied to the
+     * session when that session is created — see [applyPendingModelPick]. On a
+     * session that exists the pick goes to the host immediately, and until its
+     * answer arrives the chip says so rather than claiming the switch has happened.
      */
     fun selectModel(option: ModelOption, effort: String? = null) {
+        val ref = ModelRef(option.provider, option.model, effort ?: option.defaultEffort)
         val sessionId = _ui.value.currentSessionId
-        val chosenEffort = effort ?: option.defaultEffort
-        _ui.value = _ui.value.copy(selectedModel = option, selectedEffort = chosenEffort)
-        if (sessionId == null) return
-        viewModelScope.launch {
-            runCatching {
-                val request = JSONObject()
-                    .put("sessionId", sessionId)
-                    .put("provider", option.provider)
-                    .put("model", option.model)
-                chosenEffort?.let { request.put("reasoningEffort", it) }
-                client.rpc("session/selectModel", JSONObject().put("request", request))
-            }.onSuccess { value ->
-                // The host is the authority on what it selected, and it does not
-                // always select what was asked for — a provider it will not route, a
-                // model it resolves differently. The chip used to be set from the
-                // *request* and never corrected, so picking a model the host declined
-                // left the display claiming it while the turns answered with another.
-                val chosen = value.obj("selected") ?: return@onSuccess
-                val provider = chosen.str("provider")
-                val model = chosen.str("model")
-                val resolved = _ui.value.models.firstOrNull {
-                    it.provider == provider && it.model == model
-                }
-                _ui.value = _ui.value.copy(
-                    selectedModel = resolved ?: option,
-                    selectedEffort = chosen.str("reasoningEffort").takeIf { it.isNotEmpty() }
-                        ?: chosenEffort,
-                )
-            }.onFailure { error -> showFailure(error, "session/selectModel") }
+        if (sessionId == null) {
+            updateModelSelection { it.withPendingPick(ref) }
+            return
         }
+        updateModelSelection { it.withInFlight(ref) }
+        viewModelScope.launch { selectModelNow(sessionId, ref) }
     }
+
+    /**
+     * The `session/selectModel` call itself, suspending so a caller that must not
+     * deliver a prompt before the pick is in force can await it.
+     *
+     * Failures are the host *refusing* — probed on 0.2.0-rc.2: an unavailable model,
+     * an unknown provider and an effort the route does not accept are all answered
+     * with `session/model-unavailable` and mutate nothing. The chip therefore drops
+     * the pick and falls back to what the host still holds; the old code left the
+     * refused model on screen, which is the "advertised model is not the one
+     * running" the user reported.
+     */
+    private suspend fun selectModelNow(sessionId: String, ref: ModelRef) {
+        val request = JSONObject()
+            .put("sessionId", sessionId)
+            .put("provider", ref.provider)
+            .put("model", ref.model)
+        // The key is only sent when the route names an effort, so the host's own
+        // default applies. (`put(key, null)` would strip it anyway; being explicit
+        // keeps the request's shape visible.)
+        ref.reasoningEffort?.let { request.put("reasoningEffort", it) }
+        runCatching {
+            client.rpc("session/selectModel", JSONObject().put("request", request))
+        }
+            .onSuccess { value ->
+                // The answer belongs to the session it was asked for. Adopting it after
+                // the reader has switched would paint the *new* session's chip with the
+                // old session's selection — the same lie, arriving by a different road.
+                if (sessionId != _ui.value.currentSessionId) return@onSuccess
+                // And it belongs to the pick that is still the current one: two taps in
+                // a row mean the newer answer decides, not whichever returns last.
+                if (_ui.value.modelSelection.inFlight != ref) return@onSuccess
+                // The host's answer is what it selected, which is not always what was
+                // asked for: the effort is resolved from the route's default when the
+                // request named none, and it may resolve the route itself differently.
+                updateModelSelection { it.withAnswer(parseModelRef(value.obj("selected")) ?: ref) }
+            }
+            .onFailure { error ->
+                if (sessionId == _ui.value.currentSessionId &&
+                    _ui.value.modelSelection.inFlight == ref
+                ) {
+                    updateModelSelection { it.withRefusal() }
+                }
+                showFailure(error, "session/selectModel", "Model not changed: ")
+            }
+    }
+
+    /**
+     * Applies a pick recorded on the new-session screen to the session that has just
+     * been created, adopted or reused for it.
+     *
+     * [pick] is read by [pendingModelPick] *before* the open, because opening consumes
+     * the seat's pick. The call suspends on purpose: on the send path the prompt is
+     * delivered immediately after this, and a prompt that ran before the selection
+     * landed would run the host default — the exact disagreement this area is about.
+     */
+    private suspend fun applyPendingModelPick(sessionId: String, pick: ModelRef) {
+        updateModelSelection { it.withInFlight(pick) }
+        selectModelNow(sessionId, pick)
+    }
+
+    /**
+     * The new-session pick, if the reader has recorded one.
+     *
+     * Read — not taken — here: [openSession] is what consumes it, on the same path
+     * that puts a real session on screen. A create that fails therefore leaves the
+     * pick on the seat for the retry, and a pick can never be applied twice.
+     */
+    private fun pendingModelPick(): ModelRef? = _ui.value.modelSelection.pendingPick
 
     // ----------------------------------------------------------- projections
 

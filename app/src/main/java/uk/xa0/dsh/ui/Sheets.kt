@@ -54,6 +54,7 @@ import uk.xa0.dsh.PermissionOption
 import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
 import uk.xa0.dsh.model.HostSettings
+import uk.xa0.dsh.model.ModelChoice
 import uk.xa0.dsh.ui.components.DshTextField
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
@@ -194,6 +195,10 @@ fun ModelSheet(
     providerOrder: List<String>,
     selected: ModelOption?,
     selectedEffort: String?,
+    /** The host's own choice for the session on screen, and the state it is in. */
+    choice: ModelChoice = ModelChoice(),
+    /** Whether a session is open, which changes what "this host's default" means. */
+    sessionOpen: Boolean = false,
     onSelect: (ModelOption, String?) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -204,6 +209,12 @@ fun ModelSheet(
         models.groupBy { it.providerName }
             .toList()
             .sortedBy { (name, _) -> providerOrder.indexOf(name).let { if (it < 0) Int.MAX_VALUE else it } }
+    }
+    // The one line that makes "what will run" and "what is only planned" different
+    // things on this screen. Null for an ordinary, in-force selection: the check mark
+    // on the row already says it.
+    val status = remember(choice, selected, selectedEffort, sessionOpen) {
+        modelSheetStatus(choice, selected, selectedEffort, sessionOpen)
     }
 
     ModalBottomSheet(
@@ -218,6 +229,15 @@ fun ModelSheet(
                 color = colors.labelPrimary,
                 modifier = Modifier.padding(horizontal = DshSpacing.xxl),
             )
+            if (status != null) {
+                Spacer(Modifier.height(DshSpacing.xs))
+                Text(
+                    text = status,
+                    style = DshType.bodySmall,
+                    color = if (choice.unavailable) colors.error else colors.labelTertiary,
+                    modifier = Modifier.padding(horizontal = DshSpacing.xxl),
+                )
+            }
             Spacer(Modifier.height(DshSpacing.lg))
 
             if (models.isEmpty()) {
