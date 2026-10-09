@@ -130,11 +130,13 @@ editing the live copy. There is no install step to forget.
    30dp`, say, for a long string — is therefore satisfied by one row of text and cannot
    fail, which is how a wrapping test in `JobOutputScrollTest` came to pass against the
    very implementation it existed to catch. **Assert a relationship between two measured
-   things, or a count — never an absolute height.** Two ways that works here: compare a
-   node against a sibling measured in the same composition (the stub's arbitrary line
-   height cancels out), or derive distances from something measured rather than writing
-   them down, as the job-output drag tests do with row height. Where even that cannot
-   reach, say so in the test rather than leaving it looking stronger than it is.
+   things, or a count — never an absolute height.** That works for geometry: compare one
+   box's bounds against another's, or derive a distance from something measured rather
+   than writing it down, as the job-output drag tests do with row height. It does *not*
+   rescue a text-break claim, because the first half of this trap means there is no
+   second line to compare against — for those, the honest move is to assert the part the
+   harness can still see and say in the test what it cannot. Where a claim cannot be made
+   at all, say that too, rather than leaving the test looking stronger than it is.
 1. **Locks live in the checkout, never `/tmp`.** Each DSH bash call gets a private
    tmpfs, so a `/tmp` flock is not a mutex at all; two holders never meet. Every
    lock is `$ROOT/.build.lock`, `.install.lock`, `.device-<serial>.lock`.
