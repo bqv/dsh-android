@@ -124,6 +124,17 @@ editing the live copy. There is no install step to forget.
    been deleted for being unable to see their own subject: one comparing composition cost
    by wall clock (the first run pays the JIT warm-up) and one asserting a "Show more"
    offer appears on a clipped paragraph.
+1. **And a line box's height is arbitrary, so an absolute height proves nothing either.**
+   The same stub metrics make a *single* line measure ~35dp whatever `lineHeight` says
+   (density 1.0 there, so px == dp). A threshold that looks like evidence — `height >
+   30dp`, say, for a long string — is therefore satisfied by one row of text and cannot
+   fail, which is how a wrapping test in `JobOutputScrollTest` came to pass against the
+   very implementation it existed to catch. **Assert a relationship between two measured
+   things, or a count — never an absolute height.** Two ways that works here: compare a
+   node against a sibling measured in the same composition (the stub's arbitrary line
+   height cancels out), or derive distances from something measured rather than writing
+   them down, as the job-output drag tests do with row height. Where even that cannot
+   reach, say so in the test rather than leaving it looking stronger than it is.
 1. **Locks live in the checkout, never `/tmp`.** Each DSH bash call gets a private
    tmpfs, so a `/tmp` flock is not a mutex at all; two holders never meet. Every
    lock is `$ROOT/.build.lock`, `.install.lock`, `.device-<serial>.lock`.
