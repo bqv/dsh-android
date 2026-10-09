@@ -265,7 +265,11 @@ of where the app stands against them.
       panel drew before, so a 320dp phone shows 64 columns instead of 53 and a 411dp
       one 82 instead of 68. Two fingers on the grid step it, the bar's `A−`/`A+` do the
       same thing visibly, and the choice is persisted in the config store
-      (`data/ConfigStore.kt: terminalFontSp`, applied in `ui/TerminalScreen.kt`)
+      (`data/ConfigStore.kt: terminalFontSp`, applied in `ui/TerminalScreen.kt`). The
+      grid's gesture handler also refuses a *drag* to the tap target — a one-finger move
+      past touch slop no longer brings the soft keyboard up, which `clickable` alone did
+      not distinguish (see `docs/HANDOFF.md`, "Compose's `clickable` has no movement
+      test")
 - [x] Preview panel: the `text` preview that a deliverable or a file row opens into
 - [+] **Share to DSH** (app addition, not in the web client). The app registers for
       `ACTION_SEND` and `ACTION_SEND_MULTIPLE` with `*/*`, so an image from the gallery

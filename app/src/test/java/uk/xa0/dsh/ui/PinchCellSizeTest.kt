@@ -29,6 +29,12 @@ import uk.xa0.dsh.scroll.HarnessApplication
  * pinch that also pops the soft keyboard open is worse than no pinch, and no amount
  * of reading the source settles which handler won.
  *
+ * The same question has a second half, and this test file is where it was found: a
+ * *one-finger drag* on the grid was landing as a tap, because `clickable` cancels a
+ * tap only on going out of bounds or on consumption and never on movement. The drag
+ * and no-movement cases below bracket the slop rule that fixes it — they do not
+ * assume the platform's slop value, which no test can read.
+ *
  * The scene is shaped like the panel: a parent box that owns the gesture and a child
  * that owns the tap, which is the arrangement the pass order depends on. Positions
  * are raw pixels inside the node, so the spans are the arithmetic of
@@ -116,7 +122,7 @@ class PinchCellSizeTest {
         }
 
         rule.runOnIdle {
-            // The whole point of consuming nothing until a second finger is down:
+            // The whole point of consuming nothing while the gesture might be a tap:
             // the tap that puts the soft keyboard back has to survive this.
             assertEquals(1, scene.taps)
             assertEquals(0, scene.steps)
@@ -124,16 +130,41 @@ class PinchCellSizeTest {
     }
 
     @Test
-    fun `a one-finger drag is left alone`() {
+    fun `a move that never passes touch slop is still a tap`() {
         val scene = scene()
 
         rule.onNodeWithTag("grid").performTouchInput {
             down(0, Offset(100f, 100f))
+            // A finger report with no movement in it. This is the case that says the
+            // claim is driven by how far the finger went and not by the mere arrival
+            // of a move event — and it does not depend on the platform's slop, which
+            // is why the distance here is zero rather than a small guess.
+            moveTo(0, Offset(100f, 100f))
+            up(0)
+        }
+
+        rule.runOnIdle {
+            assertEquals(1, scene.taps)
+            assertEquals(0, scene.steps)
+        }
+    }
+
+    @Test
+    fun `a one-finger drag does not land as a tap`() {
+        val scene = scene()
+
+        rule.onNodeWithTag("grid").performTouchInput {
+            down(0, Offset(100f, 100f))
+            // 80px, far past any slop a phone or the harness reports.
             moveTo(0, Offset(180f, 100f))
             up(0)
         }
 
         rule.runOnIdle {
+            // `clickable` has no movement test of its own — it cancels a tap only when
+            // the pointer leaves the node or something consumes the change — so
+            // without the slop rule in `pinchCellSize` this drag would have brought
+            // the soft keyboard up.
             assertEquals("one finger does not size anything", 0, scene.steps)
             assertEquals("and a drag is not a tap", 0, scene.taps)
         }

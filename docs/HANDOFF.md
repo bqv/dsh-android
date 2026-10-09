@@ -133,6 +133,18 @@ editing the live copy. There is no install step to forget.
    been deleted for being unable to see their own subject: one comparing composition cost
    by wall clock (the first run pays the JIT warm-up) and one asserting a "Show more"
    offer appears on a clipped paragraph.
+1. **Compose's `clickable` has no movement test, so a drag inside a button is a click.**
+   Read from the 1.6.8 bytecode of `TapGestureDetectorKt.waitForUpOrCancellation` — the
+   function every tap waits in — which compares exactly three things: `changedToUp`
+   (the tap), `isConsumed` (cancelled) and `isOutOfBounds` (cancelled). There is no
+   touch-slop comparison anywhere in the tap path, so a finger dragged across a node and
+   released *inside* it fires `onClick`. It is not a harness artefact: the same code runs
+   on the phone. Cost: `PinchCellSizeTest`'s "a one-finger drag is left alone" failed
+   against the shipped `clickableNoRipple` overlay on the terminal grid, and the assertion
+   was right — a drag must not bring the soft keyboard up. Any surface that has to tell a
+   drag from a tap must do it itself; the terminal grid's own handler consumes a
+   one-finger gesture once it passes `viewConfiguration.touchSlop` (`ui/Modifiers.kt`,
+   `pinchCellSize`).
 1. **Locks live in the checkout, never `/tmp`.** Each DSH bash call gets a private
    tmpfs, so a `/tmp` flock is not a mutex at all; two holders never meet. Every
    lock is `$ROOT/.build.lock`, `.install.lock`, `.device-<serial>.lock`.

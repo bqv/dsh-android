@@ -12,6 +12,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import kotlin.math.ln
@@ -156,7 +157,7 @@ class PinchDetents(
 }
 
 /**
- * Two fingers changing a size, reported as whole steps.
+ * Two fingers changing a size — and, on the way there, deciding what is *not* a tap.
  *
  * ## Why it lives here
  *
@@ -167,24 +168,36 @@ class PinchDetents(
  *
  * ## What it claims, and what it leaves alone
  *
- * A one-finger gesture is left exactly as it was: the down, the moves and the up are
- * all observed in the Initial pass and none of them is consumed, so a tap on the grid
- * still reaches the panel's own tap target and still puts the soft keyboard back.
- * They have to be observed here rather than not at all, because the second finger of
- * a pinch arrives *after* the first down, and by the time it lands the tap detector
- * is already waiting for an up that a pinch never sends.
+ * A tap is left exactly as it was: every event is observed in the Initial pass and
+ * **nothing is consumed** while the gesture might still be the tap target's, so a tap
+ * on the grid still reaches it and still puts the soft keyboard back. They have to be
+ * observed here rather than not at all, because the second finger of a pinch arrives
+ * *after* the first down, and by the time it lands the tap detector is already waiting
+ * for an up that a pinch never sends.
  *
- * Once a second finger is down the whole gesture is consumed, from that event to its
- * last up. That is what tells the tap detector the gesture was not a tap — a
- * two-finger spread whose fingers both lift would otherwise land as one — and it is
- * why nothing is consumed before then: consuming the first down would break the tap
- * for everybody.
+ * A gesture is claimed — consumed, from that event to its last up — once it is
+ * certainly not a tap, and there are exactly two ways to be sure:
+ *
+ *  * **Two fingers are down.** That is what tells the tap detector a spread whose
+ *    fingers both lift was not a tap — which, without this, it would be.
+ *  * **One finger has moved further than `viewConfiguration.touchSlop`.**
+ *    This is not decoration: `clickable` cancels a tap when the pointer leaves the
+ *    node's bounds or when something else consumes the change, and it has **no
+ *    movement test at all** — measured from Compose 1.6.8, whose
+ *    `waitForUpOrCancellation` compares only `changedToUp`, `isConsumed` and
+ *    `isOutOfBounds`. So a finger dragged across the grid and released *inside* it is
+ *    a click, and the tap's job here is to bring the keyboard back, which nobody wants
+ *    a drag to do. The surface that knows what the whole gesture is has to say so, and
+ *    this is that surface.
+ *
+ * Nothing is consumed before either of those is true, because consuming the first down
+ * would break the tap for everybody.
  *
  * Deliberately *not* on the terminal's key row. That row scrolls horizontally, and a
- * second gesture on a node that already owns one is the trade this repository
- * refused for the transcript's shell block: it "costs a gesture that has to be told
- * apart from the list's". The grid is a fixed surface that owns no gesture but the
- * tap, so a two-finger gesture on it costs nothing that was not already ambiguous.
+ * second gesture on a node that already owns one is the trade this repository refused
+ * for the transcript's shell block: it "costs a gesture that has to be told apart from
+ * the list's". The grid is a fixed surface that owns no gesture but the tap, so a
+ * two-finger gesture on it costs nothing that was not already ambiguous.
  */
 fun Modifier.pinchCellSize(onStep: (Int) -> Unit): Modifier = composed {
     // The callback captures the cell size at composition time, and the handler is not
@@ -193,34 +206,41 @@ fun Modifier.pinchCellSize(onStep: (Int) -> Unit): Modifier = composed {
     val step by rememberUpdatedState(onStep)
     val detents = remember { PinchDetents() }
     Modifier.pointerInput(detents) {
+        // The platform's own slop, in px for this screen — the same threshold a
+        // scrollable uses to decide a finger meant to move rather than to press.
+        val slop = viewConfiguration.touchSlop
         awaitEachGesture {
             detents.reset()
-            // True once this gesture is a pinch: from then on it is ours, including
-            // the events after one of the fingers lifts.
+            // Where the single finger went down, until it is known to be a drag.
+            var downAt: Offset? = null
+            // True once this gesture is certainly not a tap: from then on it is ours,
+            // including the events after one of its fingers lifts.
             var claimed = false
-            // Whether the last event had two fingers down. The transitions matter:
-            // a pinch is a *span*, so a finger put back down is a new zero rather
-            // than an enormous change to the old one.
+            // Whether the last event had two fingers down. The transitions matter: a
+            // pinch is a *span*, so a finger put back down is a new zero rather than an
+            // enormous change to the old one.
             var pinching = false
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val pressed = event.changes.filter { it.pressed }
                 if (pressed.isEmpty()) return@awaitEachGesture
-                if (pressed.size >= 2 && !pinching) detents.reset()
-                pinching = pressed.size >= 2
-                when {
-                    pinching -> {
-                        claimed = true
-                        // Tell the tap detector this was not a tap, and keep telling
-                        // it: a two-finger spread whose fingers both lift would
-                        // otherwise land as one.
-                        event.changes.forEach { it.consume() }
-                        val steps = detents.steps((pressed[0].position - pressed[1].position).getDistance())
-                        if (steps != 0) step(steps)
-                    }
-                    // One finger left after a pinch: still not a tap.
-                    claimed -> event.changes.forEach { it.consume() }
+                if (pressed.size >= 2) {
+                    if (!pinching) detents.reset()
+                    pinching = true
+                    claimed = true
+                    event.changes.forEach { it.consume() }
+                    val steps = detents.steps((pressed[0].position - pressed[1].position).getDistance())
+                    if (steps != 0) step(steps)
+                    continue
                 }
+                pinching = false
+                val start = downAt
+                if (start == null) {
+                    downAt = pressed[0].position
+                } else if (!claimed && (pressed[0].position - start).getDistance() > slop) {
+                    claimed = true
+                }
+                if (claimed) event.changes.forEach { it.consume() }
             }
         }
     }
