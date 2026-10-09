@@ -430,6 +430,47 @@ fun ChatScreen(vm: DshViewModel) {
         }
         hadShell = seats > 0
     }
+
+    // The Server tab's gate, and the strip it decides.
+    //
+    // `ui.localServerTarget` is derived from the host's own model selection — the
+    // same value the composer's trigger draws — so the tab exists exactly while the
+    // route this session will run is served by something on the host's loopback. A
+    // cloud model selected in force, a switch to one that is only pending, and a
+    // selection the host's document does not describe all remove it.
+    //
+    // `shownView` is the selection the *screen* honours: while the gate is shut the
+    // Server seat reads as the conversation, so the one composition between the
+    // model changing and the effect below resetting `view` cannot leave the body
+    // hanging on a tab that is no longer drawn.
+    val localServerTarget = ui.localServerTarget
+    val views = if (localServerTarget != null) ALL_VIEWS else BASE_VIEWS
+    val shownView = if (view == ChatView.LOCAL_SERVER && localServerTarget == null) ChatView.CHAT else view
+
+    // Leaving the Server tab behind when its model is gone, for the same reason the
+    // last closed shell returns to the conversation: a seat that is no longer drawn
+    // must not still be selected.
+    LaunchedEffect(localServerTarget) {
+        if (localServerTarget == null && view == ChatView.LOCAL_SERVER) {
+            android.util.Log.d("DshView", "local route left; returning to the conversation")
+            view = ChatView.CHAT
+        }
+    }
+
+    // Opening the tab is what asks the question, and re-opening it asks again: a
+    // reachability answer is only worth reading with the time it was taken, so the
+    // check is re-run rather than shown from a previous visit. The session is a key
+    // too: two sessions can select the same local route, and moving between them is
+    // a new "is my server up now", not a reason to show the other one's answer.
+    LaunchedEffect(
+        ui.currentSessionId,
+        shownView,
+        localServerTarget?.provider?.id,
+        localServerTarget?.modelId,
+    ) {
+        if (shownView == ChatView.LOCAL_SERVER && localServerTarget != null) vm.checkLocalServer()
+    }
+
     // The right panel's `files` surface. A phone has no room for a column beside
     // the transcript, so it takes the whole body with its own back bar.
     var showFiles by rememberSaveable(ui.currentSessionId) { mutableStateOf(false) }
@@ -477,10 +518,14 @@ fun ChatScreen(vm: DshViewModel) {
     // hostage. The sheets (jobs, lineage, settings, about) are modal and already
     // dismiss themselves. Composed here rather than at the root because this is where
     // the state lives, and the root gate is asked only after the screen declines.
-    BackHandler(enabled = showFiles || view != ChatView.CHAT || subagentParent != null) {
+    //
+    // `shownView`, not `view`: while the Server tab's gate is shut the screen is
+    // already showing the conversation, and consuming a press to "return" to a view
+    // it is on would swallow the back gesture for nothing.
+    BackHandler(enabled = showFiles || shownView != ChatView.CHAT || subagentParent != null) {
         when {
             showFiles -> showFiles = false
-            view != ChatView.CHAT -> view = ChatView.CHAT
+            shownView != ChatView.CHAT -> view = ChatView.CHAT
             else -> subagentParent?.let { vm.openSession(it.sessionId) }
         }
     }
@@ -763,8 +808,9 @@ fun ChatScreen(vm: DshViewModel) {
                 // The web renders `.tabs` only when more than one view is
                 // registered, so the hero screen — which has nothing to inspect
                 // yet — carries no strip at all.
-                view = view,
+                view = shownView,
                 onView = { view = it },
+                views = views,
                 showTabs = !isHero,
                 filesOpen = showFiles,
                 // The Files panel resolves every path against a session
@@ -817,7 +863,7 @@ fun ChatScreen(vm: DshViewModel) {
                     onClose = { showFiles = false },
                     modifier = Modifier.weight(1f),
                 )
-            } else if (view == ChatView.TERMINAL) {
+            } else if (shownView == ChatView.TERMINAL) {
                 // A real PTY for this session, from the host's `terminal` Remote
                 // namespace. The screen creates or adopts the session's terminal, so
                 // it is only reachable for an open session — the strip that selects
@@ -834,7 +880,7 @@ fun ChatScreen(vm: DshViewModel) {
                     sessionId = ui.currentSessionId,
                     modifier = Modifier.weight(1f),
                 )
-            } else if (view == ChatView.TRAJECTORY) {
+            } else if (shownView == ChatView.TRAJECTORY) {
                 val trajectory = remember(entries, endedTurns) {
                     buildTrajectory(entries, endedTurns, vm.toolParents())
                 }
@@ -849,6 +895,20 @@ fun ChatScreen(vm: DshViewModel) {
                     // would be a second copy of it.
                     showHeader = false,
                 )
+            } else if (shownView == ChatView.LOCAL_SERVER) {
+                // The fourth tab. `localServerTarget` is non-null by construction
+                // here: `shownView` is only LOCAL_SERVER while the gate is open.
+                // The model trigger's own labels are reused so the tab cannot name
+                // the effort differently from the chip beside the composer.
+                localServerTarget?.let { target ->
+                    LocalServerTab(
+                        target = target,
+                        probe = ui.localServerProbe,
+                        effort = effortLabel(ui.selectedModel, ui.selectedEffort),
+                        onCheck = vm::checkLocalServer,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             } else if (awaitingTranscript) {
                 // A non-blank session with nothing loaded yet: the host has not
                 // answered this session's follow stream. Naming the connection
@@ -1796,6 +1856,11 @@ private fun ChatHeader(
     onJobs: () -> Unit = {},
     view: ChatView = ChatView.CHAT,
     onView: (ChatView) -> Unit = {},
+    /**
+     * The tabs to draw, in order. Passed in rather than read off the enum because
+     * the Server tab is conditional on the session's selected model.
+     */
+    views: List<ChatView> = ChatView.entries,
     showTabs: Boolean = false,
     filesOpen: Boolean = false,
     /**
@@ -1931,7 +1996,7 @@ private fun ChatHeader(
             Spacer(Modifier.width(HEADER_SEAT_GAP))
         }
         if (showTabs) {
-            ViewTabs(selected = view, onSelect = onView)
+            ViewTabs(selected = view, views = views, onSelect = onView)
         }
         Box(
             Modifier
@@ -1958,7 +2023,24 @@ private enum class ChatView(val label: String) {
     // and this session's own confined terminal — so the accurate word is the
     // general one, and the seat chips inside say which is which.
     TERMINAL("Shell"),
+    // The fourth tab, and the only conditional one. It describes the llama.cpp
+    // server behind the session's selected model, so it is offered only while that
+    // model belongs to a provider whose declared endpoint is this host's own
+    // loopback — and it goes away the moment a cloud model is selected. See
+    // `model/LocalModelServer.kt` for the gate and for the probe evidence behind
+    // what the tab does — and does not — claim.
+    //
+    // "Server", not "Local model" and certainly not "Health": the tab is the
+    // server's identity card plus one reachability check, and a name that promised
+    // a health readout would promise something this client cannot obtain.
+    LOCAL_SERVER("Server"),
 }
+
+/** The tabs every session is offered: everything except the conditional one. */
+private val BASE_VIEWS: List<ChatView> = ChatView.entries.filter { it != ChatView.LOCAL_SERVER }
+
+/** Every tab, for a session whose selected route is local. */
+private val ALL_VIEWS: List<ChatView> = ChatView.entries.toList()
 
 /**
  * `.tabs` from the conversation header.
@@ -1970,15 +2052,20 @@ private enum class ChatView(val label: String) {
  * tightened — the only deliberate divergence, and it costs nothing to read.
  */
 @Composable
-private fun ViewTabs(selected: ChatView, onSelect: (ChatView) -> Unit) {
+private fun ViewTabs(selected: ChatView, views: List<ChatView>, onSelect: (ChatView) -> Unit) {
     val colors = DshTheme.colors
+    // Four labels — Chat / Trajectory / Shell / Server — do not fit a narrow phone
+    // at 36px gaps, and "Trajectory" is the width that decides it. The gap is
+    // tightened only when the fourth tab is actually drawn, so the ordinary
+    // three-tab strip is untouched.
+    val gap = if (views.size > 3) DshSpacing.xl else DshSpacing.xxl
     Row(
         Modifier
             .fillMaxWidth()
             .padding(start = DshSpacing.md, end = DshSpacing.md, top = DshSpacing.md),
-        horizontalArrangement = Arrangement.spacedBy(DshSpacing.xxl),
+        horizontalArrangement = Arrangement.spacedBy(gap),
     ) {
-        ChatView.entries.forEach { entry ->
+        views.forEach { entry ->
             val active = entry == selected
             // `IntrinsicSize.Max` is what keeps the underline as wide as the label:
             // a plain `fillMaxWidth()` inside the Row measures against the *row*,

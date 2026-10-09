@@ -59,6 +59,14 @@ import uk.xa0.dsh.model.SettingsApply
 import uk.xa0.dsh.model.SettingsWritePlan
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.HostSettings
+import uk.xa0.dsh.model.LocalProbeRecord
+import uk.xa0.dsh.model.LocalProvider
+import uk.xa0.dsh.model.LocalServerProbeResult
+import uk.xa0.dsh.model.LocalServerTarget
+import uk.xa0.dsh.model.discoverModelsArgs
+import uk.xa0.dsh.model.localServerFailureText
+import uk.xa0.dsh.model.localServerTargetOf
+import uk.xa0.dsh.model.parseLocalProviders
 import uk.xa0.dsh.model.SessionStats
 import uk.xa0.dsh.model.SessionTarget
 import uk.xa0.dsh.model.SessionTargetCandidate
@@ -735,6 +743,24 @@ data class UiState(
     val settingsSaving: String? = null,
     /** The host's own wording for the last refused write. */
     val settingsWriteError: String? = null,
+    /**
+     * The provider profiles the host's settings document declares, keyed by
+     * provider route. Read from the same `settings/describe` reply as
+     * [hostSettings], and empty until one lands or when it carried none.
+     *
+     * Only routes with a declared endpoint are kept, and nothing here says which
+     * of them is *local* — that is the endpoint's own fact, decided per route by
+     * `localServerTargetOf`. See `model/LocalModelServer.kt`.
+     */
+    val localServers: Map<String, LocalProvider> = emptyMap(),
+    /**
+     * The last local-server check, bound to the route it was made for.
+     *
+     * Null until one runs. It is a single record rather than a map because only
+     * one route can be the session's selection at a time, and the binding is what
+     * stops a check made for the previous route being drawn beside the current one.
+     */
+    val localProbe: LocalProbeRecord? = null,
 ) {
     /**
      * The route the model trigger advertises, and how the host came to it.
@@ -767,6 +793,34 @@ data class UiState(
     val selectedEffort: String?
         get() = modelChoice.ref?.reasoningEffort?.takeIf { it.isNotEmpty() }
             ?: selectedModel?.defaultEffort
+
+    /**
+     * The server behind the route this session will run, when that route is local.
+     *
+     * The fourth tab's whole gate: null means no tab. Derived from [modelChoice] —
+     * the very value the composer's model trigger draws — so the tab and the chip
+     * can never name different models. That makes the tab vanish the instant a
+     * cloud model is selected, including while the switch is only pending: the
+     * route the session is *leaving* does not keep it alive.
+     */
+    val localServerTarget: LocalServerTarget?
+        get() = localServerTargetOf(modelChoice, localServers)
+
+    /**
+     * The last check's answer, but only when it was made for the route on screen
+     * now. A record for any other route reads as "not checked yet", so a stale
+     * reachability answer can never be shown against the wrong server.
+     */
+    val localServerProbe: LocalServerProbeResult
+        get() {
+            val target = localServerTarget ?: return LocalServerProbeResult.Idle
+            val record = localProbe ?: return LocalServerProbeResult.Idle
+            return if (record.provider == target.provider.id && record.model == target.modelId) {
+                record.result
+            } else {
+                LocalServerProbeResult.Idle
+            }
+        }
 
     /**
      * Whether this session has its **own** work in flight. The messaging gate for
@@ -810,6 +864,22 @@ data class UiState(
             MuxState.OPEN, MuxState.IDLE -> null
         }
 }
+
+/**
+ * One `settings/describe` read, carrying both things the app takes from it.
+ *
+ * The local provider profiles ride the same reply as the General panel's five
+ * rows — `settings/describe` answers the whole document — so they are parsed from
+ * one read rather than a second call. [failure] is the wording of a read that
+ * produced no document at all; a document that simply declared no providers is a
+ * success with an empty map, which is a different fact and must not be confused
+ * with it.
+ */
+private data class HostDescribe(
+    val settings: HostSettings?,
+    val localServers: Map<String, LocalProvider>,
+    val failure: String?,
+)
 
 /**
  * Owns the session the user is looking at and translates DSH's journal into UI
@@ -861,8 +931,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
     private var followJob: Job? = null
 
-    /** The one in-flight `settings/describe`; the Settings sheet is its only reader. */
+    /** The one in-flight `settings/describe`; the General panel and the tab both read it. */
     private var settingsJob: Job? = null
+
+    /** The one in-flight local-server reachability check. */
+    private var localProbeJob: Job? = null
     private var controlJob: Job? = null
     private var workspacesJob: Job? = null
     private var muxWired = false
@@ -2269,29 +2342,134 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         if (settingsJob?.isActive == true) return
         settingsJob = viewModelScope.launch {
             _ui.value = _ui.value.copy(hostSettingsLoading = true, hostSettingsError = null)
-            val (parsed, failure) = describeHostSettings()
+            val described = describeHostSettings()
             _ui.value = _ui.value.copy(
-                hostSettings = parsed ?: _ui.value.hostSettings,
+                hostSettings = described.settings ?: _ui.value.hostSettings,
+                // A read that failed keeps the profiles already held, exactly as it
+                // keeps the document; a read that succeeded replaces them even when
+                // it declared none, so a provider the host has dropped cannot keep
+                // the local-server tab alive on a stale profile.
+                localServers = if (described.settings != null) {
+                    described.localServers
+                } else {
+                    _ui.value.localServers
+                },
                 hostSettingsLoading = false,
-                hostSettingsError = failure,
+                hostSettingsError = described.failure,
             )
         }
     }
 
-    /** One `settings/describe`, as the answer plus the wording of its failure. */
-    private suspend fun describeHostSettings(): Pair<HostSettings?, String?> =
+    /** One `settings/describe`, as the document, the provider profiles and the wording of a failure. */
+    private suspend fun describeHostSettings(): HostDescribe =
         runCatching { client.rpc("settings/describe", JSONObject()) }.fold(
             onSuccess = { reply ->
                 val parsed = parseHostSettings(reply)
-                parsed to if (parsed == null) "The host's settings reply was not a settings document" else null
+                HostDescribe(
+                    settings = parsed,
+                    localServers = parseLocalProviders(reply),
+                    failure = if (parsed == null) "The host's settings reply was not a settings document" else null,
+                )
             },
             onFailure = { error ->
-                null to when (error) {
-                    is DshAuthException -> "Not signed in"
-                    else -> error.message ?: "Could not read the host's settings"
-                }
+                HostDescribe(
+                    settings = null,
+                    localServers = emptyMap(),
+                    failure = when (error) {
+                        is DshAuthException -> "Not signed in"
+                        else -> error.message ?: "Could not read the host's settings"
+                    },
+                )
             },
         )
+
+    // -------------------------------------------------------- local model server
+
+    /**
+     * Ask the host to reach the local endpoint behind the session's route.
+     *
+     * This is the only live fact about a local model server this client can obtain,
+     * and it is the host doing the measuring: `llm/discoverModels` opens the
+     * declared `baseURL` and reads its model list with a single `GET
+     * <baseURL>/models`. Probed on 0.2.0-rc.2, a dead port answers
+     * `llm/model-discovery-rejected` / `could not reach <url>` and the live router
+     * answers the ids it advertises — so both a "yes" and a "no" here are
+     * measurements, not guesses, provided the provider is not named in the request.
+     * `discoverModelsArgs` carries the probed reason why (naming it lets the host
+     * answer from its own catalogue without touching the network), and the request
+     * is a bare GET, so this can never load a model.
+     *
+     * `rpcRaw`, not `rpc`: the answer is a bare array of `{id, name}`, which `rpc`
+     * would read as an object and hand back empty.
+     *
+     * Nothing here starts, stops or reconfigures anything. The one plugin that could
+     * (`localLlm/getState`, `dsh-local-llm-controller`) runs its *own* llama-server
+     * and reports its own process — on this host it reads `stopped` while the
+     * routers are in fact serving — so its status is not this server's status and
+     * is deliberately not shown.
+     */
+    fun checkLocalServer() {
+        if (localProbeJob?.isActive == true) return
+        val target = _ui.value.localServerTarget ?: return
+        localProbeJob = viewModelScope.launch {
+            _ui.value = _ui.value.copy(
+                localProbe = LocalProbeRecord(
+                    provider = target.provider.id,
+                    model = target.modelId,
+                    result = LocalServerProbeResult.Checking,
+                ),
+            )
+            val outcome = runCatching {
+                client.rpcRaw("llm/discoverModels", discoverModelsArgs(target))
+            }.fold(
+                onSuccess = { value ->
+                    LocalServerProbeResult.Reachable(
+                        modelIds = advertisedModelIds(value),
+                        atMillis = System.currentTimeMillis(),
+                    )
+                },
+                onFailure = { error ->
+                    val code: String
+                    val message: String
+                    when (error) {
+                        is DshRpcException -> {
+                            code = error.code
+                            message = error.message
+                        }
+
+                        is DshAuthException -> {
+                            code = ""
+                            message = "Not signed in"
+                        }
+
+                        else -> {
+                            code = ""
+                            message = error.message ?: "Could not reach the host"
+                        }
+                    }
+                    LocalServerProbeResult.Unreachable(
+                        message = localServerFailureText(code, message),
+                        atMillis = System.currentTimeMillis(),
+                    )
+                },
+            )
+            _ui.value = _ui.value.copy(
+                localProbe = LocalProbeRecord(
+                    provider = target.provider.id,
+                    model = target.modelId,
+                    result = outcome,
+                ),
+            )
+        }
+    }
+
+    /** The model ids one `llm/discoverModels` answer advertises, in the endpoint's own order. */
+    private fun advertisedModelIds(value: Any?): List<String> {
+        val array = value as? JSONArray ?: return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            array.optJSONObject(index)?.str("id")?.takeIf { it.isNotEmpty() }
+        }
+    }
 
     /**
      * Write one General row through `settings/update`.
@@ -2327,7 +2505,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 val error = outcome.exceptionOrNull()
                 message = error?.message ?: message
                 if (error is DshRpcException && error.code == "settings/conflict") {
-                    val (fresh, _) = describeHostSettings()
+                    val fresh = describeHostSettings().settings
                     when (val step = plan.conflict(fresh ?: HostSettings(), message)) {
                         is SettingsApply.Retry -> request = step.request
                         is SettingsApply.Failed -> message = step.message
