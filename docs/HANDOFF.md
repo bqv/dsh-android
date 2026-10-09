@@ -115,6 +115,15 @@ editing the live copy. There is no install step to forget.
    by a "fix" that a single request would have refuted. One `POST` to
    `http://127.0.0.1:8081/api/<endpoint>` with the candidate arguments settles any of
    these in a second (cookie recipe in `~/ref/NOTES.md`), and the error names the field.
+   Measured that way on 0.2.0-rc.2: `terminal/resize` takes `agentId`, `id`,
+   `attachmentId`, `cols` and `rows` — a body carrying `columns` is answered
+   `missing "cols"; unexpected "columns"` — so `net/TerminalClient.kt` is right where
+   the shipped descriptor's `sessionId` spelling is not. `agentId` is then resolved *as
+   a session id* (a bogus one answers `session/not-found` naming `sessionId`). And an
+   agent-scoped call made from a **subagent's own session** is refused with
+   `session/agent-busy` ("owned by subagent routing"), so these cannot be probed from a
+   child session at all — only from a top-level one. (`terminal/list` does work from a
+   child: it is the one call here that takes `sessionId`.)
 1. **The JVM harness cannot measure text.** Robolectric lays text out with stub
    metrics — probed in `TextOverflowProbeTest`, 24,892 characters measure as a single
    260px line, about 0.6px per glyph — so nothing wraps and `hasVisualOverflow` is false

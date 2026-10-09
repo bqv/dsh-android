@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import uk.xa0.dsh.term.TerminalCellSize
 import uk.xa0.dsh.term.decodeHostShellSessions
 import uk.xa0.dsh.term.encodeHostShellSessions
 
@@ -88,6 +89,22 @@ data class DshConfig(
      * number.
      */
     val deepseekApiKey: String = "",
+    /**
+     * The Shell tab's terminal cell size, in sp.
+     *
+     * Client-local, for the same reason [busyEnter] and the drawer's modes are: the
+     * web's own "Font size" setting is the *conversation's* and says so ("Only
+     * affects conversation content"), and its terminal is xterm.js at a hard-coded
+     * 13px with no control at all. There is no host field to write and none to
+     * mirror, so this is the app's own preference — persisted because a size the
+     * reader chose and lost on every restart is the bug the drawer's Order mode was
+     * reported for.
+     *
+     * The value is a cell size rather than a scale factor: [TerminalCellSize] derives
+     * the line box from it, and the font size *is* the cell's width, so a percentage
+     * would only be a second spelling of the same number.
+     */
+    val terminalFontSp: Float = TerminalCellSize.DEFAULT_FONT_SP,
 ) {
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
@@ -151,6 +168,12 @@ class ConfigStore(context: Context) {
             ?: emptySet(),
         hostShellSessions = decodeHostShellSessions(prefs.getString(KEY_HOST_SHELLS, null)),
         deepseekApiKey = prefs.getString(KEY_DEEPSEEK_KEY, "").orEmpty(),
+        // Clamped on the way out, so a value written by another version — or edited
+        // under `run-as` by a bug report — cannot hand the panel a cell size its own
+        // bounds do not allow.
+        terminalFontSp = TerminalCellSize.of(
+            prefs.getFloat(KEY_TERMINAL_FONT_SP, TerminalCellSize.DEFAULT_FONT_SP),
+        ).fontSp,
     )
 
     fun save(config: DshConfig) {
@@ -173,6 +196,7 @@ class ConfigStore(context: Context) {
             // String, so nothing the caller still holds can reach the stored value.
             .putString(KEY_HOST_SHELLS, encodeHostShellSessions(config.hostShellSessions))
             .putString(KEY_DEEPSEEK_KEY, config.deepseekApiKey)
+            .putFloat(KEY_TERMINAL_FONT_SP, config.terminalFontSp)
             .apply()
     }
 
@@ -194,5 +218,6 @@ class ConfigStore(context: Context) {
         const val KEY_DRAWER_COLLAPSED = "drawer_collapsed_sections"
         const val KEY_HOST_SHELLS = "host_shell_sessions"
         const val KEY_DEEPSEEK_KEY = "deepseek_api_key"
+        const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
     }
 }

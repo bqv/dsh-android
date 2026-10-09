@@ -111,6 +111,7 @@ import uk.xa0.dsh.term.HostShellStep
 import uk.xa0.dsh.term.HOST_SHELL_PRESET
 import uk.xa0.dsh.term.SeatOption
 import uk.xa0.dsh.term.TerminalAttachmentSession
+import uk.xa0.dsh.term.TerminalCellSize
 import uk.xa0.dsh.term.TerminalEmulator
 import uk.xa0.dsh.term.TerminalEnvironmentInfo
 import uk.xa0.dsh.term.TerminalFrameAction
@@ -697,6 +698,11 @@ data class UiState(
     val hostShellSessions: Map<String, String> = emptyMap(),
     /** The new-session default the app passes to `session/create` (a stored setting). */
     val agentPreset: String = "",
+    /**
+     * The Shell tab's cell size, in sp; persisted, because it is a view the reader
+     * chose. See [setTerminalFontSp].
+     */
+    val terminalFontSp: Float = TerminalCellSize.DEFAULT_FONT_SP,
     /** Roster the host offers for a blank session (`agentPresets/list`). */
     val agentPresetOptions: List<AgentPresetOption> = emptyList(),
     /**
@@ -2093,6 +2099,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _ui.value = _ui.value.copy(
             themeMode = config.themeMode,
             agentPreset = config.agentPreset,
+            terminalFontSp = config.terminalFontSp,
             busyEnter = config.busyEnter,
             drawerGroupByWorkspace = config.drawerGroupByWorkspace,
             drawerOrderByUpdated = config.drawerOrderByUpdated,
@@ -2386,6 +2393,26 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     fun setDrawerCollapsedSections(sections: Set<String>) {
         configStore.save(configStore.load().copy(drawerCollapsedSections = sections))
         _ui.value = _ui.value.copy(drawerCollapsedSections = sections)
+    }
+
+    /**
+     * The Shell tab's cell size, in sp.
+     *
+     * Nothing else has to be told: the panel re-measures from this on the next
+     * composition, its columns and rows change, and the effect that reports the grid
+     * to the host runs off exactly those two numbers — which is the same path a
+     * rotation and the soft keyboard already take. So the drawn grid and the PTY
+     * cannot disagree about the size; there is one derivation, and this is its input.
+     *
+     * Clamped here as well as in the config store, so no caller — a gesture, a button,
+     * a future settings row — can put a size into the UI state that the cell model
+     * would refuse.
+     */
+    fun setTerminalFontSp(fontSp: Float) {
+        val size = TerminalCellSize.of(fontSp)
+        if (size.fontSp == _ui.value.terminalFontSp) return
+        configStore.save(configStore.load().copy(terminalFontSp = size.fontSp))
+        _ui.value = _ui.value.copy(terminalFontSp = size.fontSp)
     }
 
     fun signOut() {
