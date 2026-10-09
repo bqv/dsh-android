@@ -8,15 +8,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -34,16 +36,69 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * for: "you can see the last ~15 lines and cannot reach the rest" is either true or
  * false of the composition, and so is "it stopped following when I scrolled up".
  *
- * The geometry is fixed — a 300dp-wide, 600dp-tall scene, the panel's own 224dp cap
- * — so "at the tail" and "reached the top" are arithmetic rather than properties of
- * whatever the test happens to run on. The drag shape is [TailFollow]'s own harness
- * (`scroll/TailFollowTest.kt`), for the same reason: the follow is that component's
- * behaviour, and testing it through a different gesture would be testing something
- * else.
+ * ## The trap these tests are written around
  *
- * The list is found by `hasScrollAction` rather than by a test tag in the component:
- * the scene holds one scrollable, so the query is unambiguous, and production code
- * keeps no hook that exists only for a test.
+ * **Robolectric stubs text metrics, in two ways that both make a plausible-looking
+ * assertion vacuous.**
+ *
+ *  1. *Nothing wraps.* `TextOverflowProbeTest` measured it: 24,892 characters lay out
+ *     as a single 260px line, about 0.6px per glyph, so there is no such thing as a
+ *     second line here to count. `HANDOFF.md` draws the consequence — "a test whose
+ *     subject is where text breaks cannot be written in this repository".
+ *  2. *A line box's height is arbitrary.* A single line measures ~35dp whatever
+ *     `lineHeight` says, so `height > 30dp` is satisfied by one row of text. The first
+ *     version of the wrapping test here asserted exactly that, for a 400-character
+ *     line, and would have passed against a `Text` that never wrapped — a green line
+ *     that could not go red.
+ *
+ * The rule this file follows, and which is worth applying anywhere in this suite:
+ * **assert a relationship between two measured things, or a count — never an absolute
+ * height.** It appears here as the drag distances, which are derived from a measured
+ * row rather than written down, so a row that measures differently on another harness
+ * does not quietly stop the drag short of the end. Where even that cannot reach — the
+ * wrapping claim itself — the test says so instead of pretending (see
+ * `nothing in the panel pans sideways`).
+ *
+ * ## Would each test fail without its fix?
+ *
+ * Asked of every assertion here, because a green line that cannot go red is
+ * documentation rather than a test:
+ *
+ *  * `a long output opens at its newest line` — without the tail follow the list
+ *    starts at index 0, so the first line is composed and the last is not. Fails.
+ *  * `the output scrolls back to its first line` — fails any version whose list a drag
+ *    cannot move: a clipped rendering with no scroller, or one where the drag falls
+ *    short. It is the headline requirement and it is not specific to the gutter.
+ *  * `a drag in the text gutter scrolls the panel` — the specific one. It fails the
+ *    construction this replaced, where the 30dp text inset was `padding` on the list
+ *    and therefore outside the scrollable node: a drag there reached the panel and the
+ *    sheet behind it but never the list, so nothing moved.
+ *  * `a drag releases the follow…` — fails an implementation that follows but does
+ *    not release. It would *pass* one with no follow at all, which is why the next
+ *    test exists as well.
+ *  * `returning to the tail resumes the follow` — fails an implementation with no
+ *    follow at all, and one that never re-arms.
+ *  * `the scroll position survives a recomposition` — parks at a known index by
+ *    `performScrollToIndex` and asserts that same line afterwards, so a state
+ *    recreated per composition (which would land back at index 0, or on the tail)
+ *    fails by name.
+ *  * `nothing in the panel pans sideways` — fails if a horizontal scroller is ever
+ *    added. It does **not** test that lines wrap, and cannot: see the trap above. It
+ *    is the half of that requirement the harness can still hold.
+ *  * `an empty output offers no scroll surface` — fails a version that renders the
+ *    list unconditionally.
+ *
+ * ## What none of these can show
+ *
+ * That a long line wraps rather than clipping — a text-break claim, and by the trap
+ * above a device's to answer.
+ *
+ * The follow under a real finger with bytes actually streaming in: that a drag
+ * arriving mid-stream releases it, and that the newest line stays pinned as it
+ * arrives. A harness can change the text between idles, which is the same rule but
+ * not the same timing. That, and which of the sheet's two nested lists takes a drag
+ * on a device, are the device's to say — the latter through the latent diagnostics
+ * wired for exactly that pair (`docs/SCROLL-DIAG.md`).
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = HarnessApplication::class)
@@ -52,7 +107,7 @@ class JobOutputScrollTest {
     @get:Rule
     val rule = createComposeRule()
 
-    private val panelWidth = 300
+    private val rowCount = 300
 
     /** Everything a test can change from outside the composition. */
     private class Scene {
@@ -63,7 +118,7 @@ class JobOutputScrollTest {
     @Composable
     private fun Panel(scene: Scene) {
         DshTheme {
-            Box(Modifier.size(width = panelWidth.dp, height = 600.dp)) {
+            Box(Modifier.size(width = 400.dp, height = 600.dp)) {
                 JobOutputPanel(
                     command = "translate the 12 chunks",
                     view = JobObservation(jobId = "bash-1", text = scene.text, streaming = true),
@@ -88,16 +143,29 @@ class JobOutputScrollTest {
     private fun panelList() = rule.onNode(hasScrollAction())
 
     /**
-     * One long drag, downwards: the reader pulling history back into view.
+     * The measured height of one output row, taken while the tail line is on screen.
      *
-     * In steps rather than one jump, because a single `moveBy` of the whole distance
-     * is a fling, and a fling would arrive at the top for a reason other than the
-     * drag having scrolled there.
+     * Measured rather than assumed: the harness stubs text metrics, so a row is
+     * whatever it is, and every distance below is derived from this number instead of
+     * a constant that would silently stop meaning anything.
      */
-    private fun dragDown(totalDp: Float) {
+    private fun rowHeight(): Float =
+        rule.onNodeWithText("line ${rowCount - 1}").getUnclippedBoundsInRoot().height.value
+
+    /**
+     * One deliberate drag across the whole output, in steps.
+     *
+     * In steps rather than one `moveBy`, because a single jump of the whole distance
+     * is a fling, and a fling arrives at the end for a reason other than the drag
+     * having scrolled there. The distance is [rowHeight] times a row count past the
+     * end, so it crosses the output whatever a row happens to measure.
+     */
+    private fun dragAcrossOutput(rowHeight: Float, down: Boolean) {
+        val total = rowHeight * (rowCount + 30)
+        val per = if (down) total / 30f else -total / 30f
         panelList().performTouchInput {
             down(center)
-            repeat(20) { moveBy(Offset(0f, totalDp / 20f), delayMillis = 40) }
+            repeat(30) { moveBy(Offset(0f, per), delayMillis = 30) }
             up()
         }
         rule.waitForIdle()
@@ -114,18 +182,19 @@ class JobOutputScrollTest {
      */
     @Test
     fun `a long output opens at its newest line`() {
-        scene(output(300))
-        rule.onNodeWithText("line 299").assertExists()
+        scene(output(rowCount))
+        rule.onNodeWithText("line ${rowCount - 1}").assertExists()
         rule.onAllNodesWithText("line 0").assertCountEquals(0)
     }
 
     /** The whole output is reachable, not just the window it opens on. */
     @Test
     fun `the output scrolls back to its first line`() {
-        scene(output(300))
+        scene(output(rowCount))
         rule.onAllNodesWithText("line 0").assertCountEquals(0)
+        val row = rowHeight()
 
-        dragDown(totalDp = 6000f)
+        dragAcrossOutput(row, down = true)
 
         rule.onNodeWithText("line 0").assertExists()
     }
@@ -143,11 +212,13 @@ class JobOutputScrollTest {
      */
     @Test
     fun `a drag in the text gutter scrolls the panel`() {
-        scene(output(300))
+        scene(output(rowCount))
+        val row = rowHeight()
+        val total = row * (rowCount + 30)
 
         panelList().performTouchInput {
             down(Offset(4f, center.y))
-            repeat(20) { moveBy(Offset(0f, 300f), delayMillis = 40) }
+            repeat(30) { moveBy(Offset(0f, total / 30f), delayMillis = 30) }
             up()
         }
         rule.waitForIdle()
@@ -166,90 +237,105 @@ class JobOutputScrollTest {
      */
     @Test
     fun `a drag releases the follow, so later output does not pull the reader back`() {
-        val scene = scene(output(300))
-        dragDown(totalDp = 6000f)
+        val scene = scene(output(rowCount))
+        val row = rowHeight()
+        dragAcrossOutput(row, down = true)
         rule.onNodeWithText("line 0").assertExists()
 
-        scene.text = output(400)
+        scene.text = output(rowCount + 100)
         rule.waitForIdle()
 
         rule.onNodeWithText("line 0").assertExists()
-        rule.onAllNodesWithText("line 399").assertCountEquals(0)
+        rule.onAllNodesWithText("line ${rowCount + 99}").assertCountEquals(0)
     }
 
     /**
      * And returning to the bottom hands the follow back, which is the other half of
      * the same rule: a reader who scrolls back down is asking to watch again.
+     *
+     * Unlike the test above, this one also fails an implementation with no follow at
+     * all — nothing else would bring the newest line on screen after the output grows.
      */
     @Test
     fun `returning to the tail resumes the follow`() {
-        val scene = scene(output(300))
-        dragDown(totalDp = 6000f)
+        val scene = scene(output(rowCount))
+        val row = rowHeight()
+        dragAcrossOutput(row, down = true)
         rule.onNodeWithText("line 0").assertExists()
 
-        // Back down to the newest line, then more output arrives.
-        panelList().performTouchInput {
-            down(center)
-            repeat(20) { moveBy(Offset(0f, -500f), delayMillis = 40) }
-            up()
-        }
-        rule.waitForIdle()
-        rule.onNodeWithText("line 299").assertExists()
+        dragAcrossOutput(row, down = false)
+        rule.onNodeWithText("line ${rowCount - 1}").assertExists()
 
-        scene.text = output(400)
+        scene.text = output(rowCount + 100)
         rule.waitForIdle()
 
-        rule.onNodeWithText("line 399").assertExists()
+        rule.onNodeWithText("line ${rowCount + 99}").assertExists()
     }
 
     /**
      * The reader's position survives a recomposition that is not about the output —
      * a status change, a roster frame, the copy button resetting.
      *
-     * A `LazyListState` that were recreated per composition would send the reader back
-     * to wherever the follow last put them on every unrelated frame, which during a
-     * turn is every frame.
+     * A `LazyListState` recreated per composition would send the reader back to
+     * wherever a fresh state sits — index 0, or the tail if the follow re-armed — on
+     * every unrelated frame, which during a turn is every frame.
+     *
+     * Parked by index rather than by dragging so the position is a name: line 150 is
+     * asserted before and after, and neither end of the list is on screen at either
+     * moment. A reset to either end fails by name.
      */
     @Test
     fun `the scroll position survives a recomposition`() {
-        val scene = scene(output(300))
-        dragDown(totalDp = 6000f)
-        rule.onNodeWithText("line 0").assertExists()
+        val scene = scene(output(rowCount))
+        panelList().performScrollToIndex(150)
+        rule.waitForIdle()
+
+        rule.onNodeWithText("line 150").assertExists()
+        rule.onAllNodesWithText("line 0").assertCountEquals(0)
+        rule.onAllNodesWithText("line ${rowCount - 1}").assertCountEquals(0)
 
         scene.running = false
         rule.waitForIdle()
 
-        rule.onNodeWithText("line 0").assertExists()
+        rule.onNodeWithText("line 150").assertExists()
+        rule.onAllNodesWithText("line 0").assertCountEquals(0)
+        rule.onAllNodesWithText("line ${rowCount - 1}").assertCountEquals(0)
     }
 
     /**
-     * Long lines wrap; nothing pans sideways.
+     * Nothing in the panel pans sideways.
      *
-     * The web wraps — `--dsl-terminal-line-whitespace: pre-wrap` on the jobs panel,
-     * and its README says the panel "wraps commands and output lines in full" — and
-     * this app reached the same conclusion for the transcript's shell block
-     * (`14732a4`): a horizontal scroller nested in a vertically scrolling surface
-     * "costs a gesture that has to be told apart from the list's".
+     * Metric-free, and that is why it is the half of the wrapping requirement that
+     * survives here: a horizontal scroller is the only thing that puts a
+     * `HorizontalScrollAxisRange` into the semantics tree, so its absence is exactly
+     * the claim, and adding one later fails this by name.
      *
-     * Height is the discriminator and width is not: a `Text` that did not wrap would
-     * still be *clamped* to the panel's width, so its right edge would look correct
-     * while the tail of every line was cut off. A wrapped 400-character line is many
-     * rows tall; a clipped one is exactly one.
+     * **The other half — that a long line *wraps* rather than being clipped — cannot be
+     * asserted in this repository at all, and is deliberately not attempted.**
+     * `TextOverflowProbeTest` established that this harness lays text out with stub
+     * metrics: 24,892 characters measure as a single 260px line and *nothing wraps*, so
+     * a wrapped line and a clipped one are measurably identical. An earlier version of
+     * this test asserted `height > 30dp` for a 400-character line and was therefore
+     * vacuous — a single line box already measures ~35dp here, so it passed against the
+     * very implementation it existed to catch.
+     *
+     * The rule that replaces it is recorded in `HANDOFF.md` under the harness's
+     * text-metrics trap: **assert a relationship between two measured things, or a
+     * count — never an absolute height.** Wrapping is a text-break claim, and that trap
+     * is explicit that such a claim can only be seen on a device.
+     *
+     * What the production code does is wrap — `Text`'s default, matching the web's
+     * `--dsl-terminal-line-whitespace: pre-wrap` and this app's own decision for the
+     * transcript's shell block (`14732a4`, which rejected a horizontal scroller nested
+     * inside a vertical one). That is a statement about the code, not a tested one.
      */
     @Test
-    fun `a long line wraps instead of panning sideways`() {
-        val long = "x".repeat(400)
-        scene(long)
+    fun `nothing in the panel pans sideways`() {
+        scene("x".repeat(4000))
 
-        val bounds = rule.onNodeWithText(long).getUnclippedBoundsInRoot()
-        assertTrue(
-            "a 400-character line should wrap to many rows, not stand as one ${bounds.bottom - bounds.top}",
-            (bounds.bottom - bounds.top).value > 30f,
-        )
-        assertTrue(
-            "the line must stay inside the panel, right=${bounds.right}",
-            bounds.right.value <= panelWidth + 1f,
-        )
+        rule.onAllNodes(
+            SemanticsMatcher.keyIsDefined(SemanticsProperties.HorizontalScrollAxisRange),
+        ).assertCountEquals(0)
     }
 
     /**

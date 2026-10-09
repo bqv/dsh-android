@@ -133,18 +133,19 @@ editing the live copy. There is no install step to forget.
    been deleted for being unable to see their own subject: one comparing composition cost
    by wall clock (the first run pays the JIT warm-up) and one asserting a "Show more"
    offer appears on a clipped paragraph.
-   The **height** is stubbed too, and it is not the height the tokens promise. The harness
-   density is 1.0, so px and dp are the same number, and a one-line `bodyMedium` box
-   (13sp on a 20sp `lineHeight`) measures ~35dp rather than 20dp: the model chip that draws
-   it comes out at 43dp against the 28dp its line height and its own padding add up to. An
-   assertion on an absolute height is therefore wrong by a wide margin *even when the
-   layout is right*, and it fails on the good build — assert a line count (how many children
-   carry `SemanticsProperties.Text`) or the relationship between two measured nodes instead.
-   **Width is the same story from the other side: text has no width**, so a long string
-   creates no layout pressure at all. A test that needs a row to be tight must take width
-   *away* from it (a `Modifier.width` on a state the test can change), not lengthen a name —
-   that is what `ComposerOverflowTest`'s squeeze case does, and its long-name cases would
-   pass against a deliberately broken row.
+1. **And a line box's height is arbitrary, so an absolute height proves nothing either.**
+   The same stub metrics make a *single* line measure ~35dp whatever `lineHeight` says
+   (density 1.0 there, so px == dp). A threshold that looks like evidence — `height >
+   30dp`, say, for a long string — is therefore satisfied by one row of text and cannot
+   fail, which is how a wrapping test in `JobOutputScrollTest` came to pass against the
+   very implementation it existed to catch. **Assert a relationship between two measured
+   things, or a count — never an absolute height.** That works for geometry: compare one
+   box's bounds against another's, or derive a distance from something measured rather
+   than writing it down, as the job-output drag tests do with row height. It does *not*
+   rescue a text-break claim, because the first half of this trap means there is no
+   second line to compare against — for those, the honest move is to assert the part the
+   harness can still see and say in the test what it cannot. Where a claim cannot be made
+   at all, say that too, rather than leaving the test looking stronger than it is.
 1. **Compose's `clickable` has no movement test, so a drag inside a button is a click.**
    Read from the 1.6.8 bytecode of `TapGestureDetectorKt.waitForUpOrCancellation` — the
    function every tap waits in — which compares exactly three things: `changedToUp`
