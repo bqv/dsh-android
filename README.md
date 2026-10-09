@@ -211,7 +211,8 @@ socket resumes streaming instead of silently freezing the UI.
   smooth; a per-turn process fold with a summary; a "Deep diving…" status with
   an elapsed clock; per-message clock and copy actions; a back-to-bottom button.
 - Chat / Trajectory / Shell view tabs: the second is the model's input/output
-  ledger, the third the session's PTY (see *The Shell tab*, below).
+  ledger, the third the session's PTY (see *The Shell tab*, below). A fourth,
+  **Server**, appears only for a local model (see *The Server tab*, below).
 - Back-pagination: scrolling to the oldest loaded row pulls one older page with
   `session/page`, so a long session is not capped at the follow window.
 - A deliverables row after each finished turn, opening the text preview.
@@ -223,7 +224,8 @@ socket resumes streaming instead of silently freezing the UI.
 
 ### The Shell tab
 
-- The view strip is **Chat / Trajectory / Shell**. The third is a real PTY over
+- The view strip is **Chat / Trajectory / Shell**, plus **Server** when the selected
+  model is local. The third is a real PTY over
   the host's native `terminal` Remote namespace (`environment`, `shells`, `list`,
   `create`, `follow`, `write`, `resize`, `rename`, `close`), streamed on the same
   `/api/remote.mux` the transcript uses. It is labelled **Shell** rather than
@@ -276,6 +278,49 @@ socket resumes streaming instead of silently freezing the UI.
   <img src="docs/images/shell.png" width="330"
        alt="The Shell tab: the terminal's chip and its running state, the two seats labelled Host shell · Full access and This session · Workspace Write, and htop running unconfined in the host shell — showing the host's own processes — above the Esc/Tab/^C/^D key row">
 </p>
+
+### The Server tab
+
+- A **fourth tab, present only while the session's selected model is local**. It
+  describes the `llama.cpp` server behind that model: the endpoint, protocol,
+  declared context window, output cap, modalities and whether a credential is sent
+  — all of them the host's own declarations, read from the `llm-pi-ai` provider
+  profile in the `settings/describe` reply the Settings panel already fetches — plus
+  one live check, run by the host on this client's behalf, that answers "can the
+  host reach that endpoint, and what does it advertise right now", with the time it
+  was taken.
+- **What it deliberately does not show, and why.** The phone reaches the host
+  through a single forwarded port, and on that port `GET /health`, `/v1/models`,
+  `/props`, `/slots` and `/metrics` all answer 404 — the routers are bound to the
+  host's loopback and nothing proxies them (nginx fronts the gate with one
+  `location /`; there is no `/api` passthrough). So the loaded model, slot
+  occupancy, memory and throughput are **not obtainable**, and the tab says so in
+  as many words rather than drawing a number nobody measured. The tab's name is
+  **Server** for the same reason: "Health" would promise a readout this client
+  cannot get.
+- **The gate is the declared endpoint, not the provider's name.** Nothing in
+  `session/modelCatalog` says which provider is local (a group is `{id, name,
+  models}` and nothing else), and this box's local routes are `dsh-local`,
+  `local-2slot`, `dsh-compactor` and `dsh-local-aux` — so a `dsh-local` prefix rule
+  misses one and a hand-kept list rots. A profile whose declared host is loopback
+  (`127.0.0.0/8`, `localhost`, `::1`) is local; a cloud profile never is. The gate
+  is derived from the model trigger's own `ModelChoice`, so the tab appears and
+  disappears with the route the chip names — **including a switch that is only
+  pending**: a local route the last turn ran does not keep the tab alive once a
+  cloud model has been selected, and the "when created" seat has no tabs at all.
+- **The check is `llm/discoverModels`**, and the request names **no provider**.
+  Naming one lets the host answer from its shipped `pi-ai` catalogue without
+  touching the network — probed: `{"provider":"groq","baseURL":"http://127.0.0.1:55599/v1"}`,
+  a dead port, answers `ok:true` with Groq's cloud catalogue. With no provider the
+  call is unconditionally a live `GET <baseURL>/models`, so a "reachable" verdict
+  is always a measurement and never a catalogue read, and (the handler sending one
+  bare GET and nothing else) it can never load a model. `dsh-local-llm-controller`'s
+  `localLlm/getState` is deliberately not surfaced: it reports that plugin's **own**
+  server process, which reads `stopped` on this box while both OpenRC routers are
+  serving.
+- **Unverified on device.** The tab's logic is unit-tested and the host calls behind
+  it were probed by hand, but the tab has not been built into the app and exercised
+  on the test handset.
 
 ### The composer
 
