@@ -1,5 +1,6 @@
 package uk.xa0.dsh.ui
 
+import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -63,6 +64,7 @@ import uk.xa0.dsh.term.ATTR_STRIKE
 import uk.xa0.dsh.term.ATTR_UNDERLINE
 import uk.xa0.dsh.term.COLOR_DEFAULT
 import uk.xa0.dsh.term.COLOR_RGB_FLAG
+import uk.xa0.dsh.term.TerminalCellSize
 import uk.xa0.dsh.term.TerminalEmulator
 import uk.xa0.dsh.term.TerminalInput
 import uk.xa0.dsh.term.TerminalInfo
@@ -70,6 +72,7 @@ import uk.xa0.dsh.term.TerminalIssue
 import uk.xa0.dsh.term.TerminalKey
 import uk.xa0.dsh.term.TerminalKeys
 import uk.xa0.dsh.term.TerminalSeat
+import uk.xa0.dsh.term.gridCells
 import uk.xa0.dsh.term.terminalIssueFact
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
@@ -88,11 +91,18 @@ import uk.xa0.dsh.ui.theme.DshType
  * [TerminalUiState.revision] is what invalidates the draw. That is safe because the
  * emulator is only ever mutated from the view model's main-dispatcher collector —
  * the same thread this Canvas draws on.
+ *
+ * `fontSp` is the cell size to draw at, and it is passed in rather than collected
+ * from the view model's whole `UiState`: the panel already recomposes on every
+ * terminal frame, and subscribing it to the transcript's state as well would
+ * recompose this chrome once per streamed token while a turn runs behind the Shell
+ * tab. The caller holds that state already.
  */
 @Composable
 fun TerminalScreen(
     vm: DshViewModel,
     sessionId: String?,
+    fontSp: Float,
     modifier: Modifier = Modifier,
 ) {
     val state by vm.terminal.collectAsState()
@@ -112,10 +122,17 @@ fun TerminalScreen(
     val inheritedTitle = remember(activeTerminalId) { emulator?.title.orEmpty() }
     val screenTitle = emulator?.title.orEmpty().takeIf { it != inheritedTitle }.orEmpty()
 
+    // The panel's one display preference, read from the caller's state rather than
+    // held here: the pinch, the bar's two buttons and a cold start all have to be the
+    // same size, and the persisted value is what makes them so.
+    val cellSize = TerminalCellSize.of(fontSp)
+
     Column(modifier.fillMaxWidth().background(DshTheme.colors.bgBase)) {
         TerminalBar(
             state = state,
             screenTitle = screenTitle,
+            cellSize = cellSize,
+            onCellSize = vm::setTerminalFontSp,
             onNew = vm::newTerminal,
             onClose = vm::closeActiveTerminal,
             onRetry = vm::retryTerminal,
@@ -129,6 +146,8 @@ fun TerminalScreen(
                 TerminalSurface(
                     emulator = emulator,
                     revision = state.revision,
+                    cellSize = cellSize,
+                    onCellSize = vm::setTerminalFontSp,
                     onWrite = vm::terminalWrite,
                     onResize = vm::terminalResize,
                 )
@@ -151,6 +170,8 @@ private fun DisposableEffectOnLeave(key: Any?, onLeave: () -> Unit) {
 private fun TerminalBar(
     state: TerminalUiState,
     screenTitle: String,
+    cellSize: TerminalCellSize,
+    onCellSize: (Float) -> Unit,
     onNew: () -> Unit,
     onClose: () -> Unit,
     onRetry: () -> Unit,
@@ -181,6 +202,13 @@ private fun TerminalBar(
                 color = if (state.phase == TerminalPhase.CONNECTED) colors.success else colors.labelTertiary,
             )
             Spacer(Modifier.width(DshSpacing.md))
+            // The cell size, as two caps. The pinch on the grid is the gesture the
+            // user asked for, but a gesture nobody can see is not an affordance: this
+            // is what says the size is choosable at all, and it is disabled at each
+            // end rather than silently doing nothing. Labels, not words, because the
+            // row already carries three word actions and a title on a 320dp screen.
+            BarAction("A\u2212", { onCellSize(cellSize.smaller().fontSp) }, enabled = !cellSize.smallest)
+            BarAction("A+", { onCellSize(cellSize.larger().fontSp) }, enabled = !cellSize.largest)
             if (state.phase != TerminalPhase.CONNECTED && state.phase != TerminalPhase.LOADING &&
                 state.phase != TerminalPhase.CONNECTING && state.phase != TerminalPhase.CREATING
             ) {
@@ -365,11 +393,20 @@ private fun TerminalPlaceholder(state: TerminalUiState, onRetry: () -> Unit) {
  * guess: the cell is one 'M' in the monospace face this draws with, measured by the
  * same [TextMeasurer] that lays the rows out, so a column boundary in the model is a
  * column boundary on screen.
+ *
+ * That one measurement is the whole of the size story — the font size *is* the cell,
+ * its width is the face's advance and its height is the line box — so [cellSize] is
+ * the only input. Changing it re-measures here, which changes [gridCells]' answer
+ * below, which changes the columns and rows the host is told about. There is no path
+ * that redraws the grid at a new size without re-reporting it, because the report is
+ * the effect of the same two numbers the draw uses.
  */
 @Composable
 private fun TerminalSurface(
     emulator: TerminalEmulator,
     revision: Long,
+    cellSize: TerminalCellSize,
+    onCellSize: (Float) -> Unit,
     onWrite: (String) -> Unit,
     onResize: (Int, Int) -> Unit,
 ) {
@@ -392,8 +429,12 @@ private fun TerminalSurface(
         Font(R.font.inconsolata_regular, FontWeight.Normal),
         Font(R.font.inconsolata_bold, FontWeight.Bold),
     )
-    val baseStyle = remember {
-        TextStyle(fontFamily = terminalFont, fontSize = 12.sp, lineHeight = 15.sp)
+    val baseStyle = remember(cellSize) {
+        TextStyle(
+            fontFamily = terminalFont,
+            fontSize = cellSize.fontSp.sp,
+            lineHeight = cellSize.lineHeightSp.sp,
+        )
     }
     val metrics = remember(measurer, baseStyle) {
         measurer.measure(AnnotatedString("MMMMMMMMMM"), style = baseStyle)
@@ -420,11 +461,31 @@ private fun TerminalSurface(
                 // The grid is drawn, not composed, so nothing else stops a row or a
                 // block cursor from painting past this box and over the key row.
                 .clipToBounds()
-                .background(colors.bgBase),
+                .background(colors.bgBase)
+                // Two fingers on the grid change the cell, and so the grid. On this
+                // box rather than on the whole panel: the key row below scrolls
+                // horizontally, and a second gesture on a node that already owns one
+                // is the trade this repository refused for the transcript's shell
+                // block. See [pinchCellSize] for what the gesture claims and what it
+                // leaves alone.
+                .pinchCellSize { steps ->
+                    val next = cellSize.stepped(steps)
+                    if (next != cellSize) {
+                        // The same tag `TerminalInputView` logs under, deliberately, so
+                        // one filter (`adb logcat -s DshTerm:I`) shows a gesture beside
+                        // the input it changes. This is the one place a real finger's
+                        // pinch can be seen: the harness can drive a synthetic one, but
+                        // only a logcat from the phone says what two thumbs did.
+                        Log.d("DshTerm", "cell pinch steps=$steps font=${next.fontSp}sp")
+                        onCellSize(next.fontSp)
+                    }
+                },
         ) {
-            val columns = (constraints.maxWidth / cellWidth).toInt().coerceAtLeast(2)
-            val rows = (constraints.maxHeight / cellHeight).toInt().coerceAtLeast(1)
+            val columns = gridCells(constraints.maxWidth, cellWidth).coerceAtLeast(2)
+            val rows = gridCells(constraints.maxHeight, cellHeight).coerceAtLeast(1)
             // The host owns the PTY size; the panel only reports its measurement.
+            // The keys are the grid itself, so a cell change *is* a re-report: the
+            // new size cannot be drawn without this effect being asked for it.
             LaunchedEffect(columns, rows) { onResize(columns, rows) }
 
             Box(
@@ -598,10 +659,10 @@ private fun DrawScope.drawTerminalGrid(
 ) {
     val columns = emulator.columns
     // Exactly the rows the viewport can show, with no partial row past its bottom
-    // edge: the panel reports `rows` to the host from the same division, so a row
-    // beyond it is not part of the grid the PTY believes in, and drawing it would
-    // paint outside this box.
-    val visibleRows = minOf(emulator.rows, (size.height / cellHeight).toInt())
+    // edge: the panel reports `rows` to the host from the same division
+    // ([gridCells]), so a row beyond it is not part of the grid the PTY believes in,
+    // and drawing it would paint outside this box.
+    val visibleRows = minOf(emulator.rows, gridCells(size.height.toInt(), cellHeight))
     for (row in 0 until visibleRows) {
         val line = emulator.row(row)
         val rowTop = row * cellHeight

@@ -258,6 +258,14 @@ of where the app stands against them.
       confined terminal (`term/HostShell.kt: TerminalSeat`, `DshViewModel`). Re-attach
       after a network drop is **unverified**: the emulator's `svc wifi/data` do not
       touch the app's path
+- [+] **The terminal's cell size is choosable** (app addition, not in the web client,
+      which draws xterm.js at a hard-coded `fontSize: 13` and offers no control; its
+      `Font size` setting is the conversation's and says so — "Only affects conversation
+      content"). A smaller cell is also the *default*: 10sp rather than the 12sp the
+      panel drew before, so a 320dp phone shows 64 columns instead of 53 and a 411dp
+      one 82 instead of 68. Two fingers on the grid step it, the bar's `A−`/`A+` do the
+      same thing visibly, and the choice is persisted in the config store
+      (`data/ConfigStore.kt: terminalFontSp`, applied in `ui/TerminalScreen.kt`)
 - [x] Preview panel: the `text` preview that a deliverable or a file row opens into
 - [+] **Share to DSH** (app addition, not in the web client). The app registers for
       `ACTION_SEND` and `ACTION_SEND_MULTIPLE` with `*/*`, so an image from the gallery

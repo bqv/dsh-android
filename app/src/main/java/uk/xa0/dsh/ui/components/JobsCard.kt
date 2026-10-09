@@ -705,6 +705,18 @@ private fun linesOf(text: String): List<String>? {
  * and the same 224dp cap the transcript's terminal block uses (kept there by that
  * same commit: "output is unbounded in that direction").
  *
+ * ## Not the Shell tab's cell size
+ *
+ * The Shell tab's cell size is deliberately not applied here, and this panel is why
+ * the distinction is worth writing down: it *reads* like a terminal but is not one.
+ * It has no cells — nothing is measured, nothing is addressed by column, and the
+ * lines wrap — so a width measured in character cells would have no referent. It
+ * also draws in `DshType.codeSmall` (the platform monospace at 11sp) rather than the
+ * terminal's Inconsolata at a measured advance, so the two sizes are not the same
+ * number and cannot be swapped for one another. And there is no host geometry to
+ * keep honest on this side: the PTY's columns and rows are a fact the Shell tab
+ * must report, while this window's only dimension is the 224dp cap above.
+ *
  * ## Following the tail
  *
  * The newest line is the interesting one, so the panel follows it — and it is

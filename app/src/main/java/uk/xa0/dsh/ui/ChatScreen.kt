@@ -832,6 +832,9 @@ fun ChatScreen(vm: DshViewModel) {
                 TerminalScreen(
                     vm = vm,
                     sessionId = ui.currentSessionId,
+                    // The cell size is a UI preference like the theme and the drawer's
+                    // modes, and this is the composable that already holds that state.
+                    fontSp = ui.terminalFontSp,
                     modifier = Modifier.weight(1f),
                 )
             } else if (view == ChatView.TRAJECTORY) {
