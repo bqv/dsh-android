@@ -150,7 +150,8 @@ class JobOutputScrollTest {
      * a constant that would silently stop meaning anything.
      */
     private fun rowHeight(): Float =
-        rule.onNodeWithText("line ${rowCount - 1}").getUnclippedBoundsInRoot().height.value
+        rule.onNodeWithText("line ${rowCount - 1}").getUnclippedBoundsInRoot()
+        .let { it.bottom - it.top }.value
 
     /**
      * One deliberate drag across the whole output, in steps.
