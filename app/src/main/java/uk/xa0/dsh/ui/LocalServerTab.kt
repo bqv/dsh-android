@@ -89,7 +89,12 @@ fun LocalServerTab(
         )
         ServerRow("Model", target.modelId)
         val declaredModel = target.model
-        if (declaredModel?.name != null && declaredModel.name != declaredModel.modelId) {
+        // The display name earns its row only when it says something the model row
+        // above does not: the host's document usually gives `name` as the same
+        // string as the id (`Spark-X2.5-4B-Q4_K_M-768k`), and drawing it twice is
+        // noise. `LocalModelEntry` names its own id `id`, which is the very string
+        // the entry was looked up by — so this compares against `target.modelId`.
+        if (declaredModel?.name != null && declaredModel.name != target.modelId) {
             ServerRow("Display name", declaredModel.name)
         }
         if (!effort.isNullOrEmpty()) ServerRow("Reasoning effort", effort)
