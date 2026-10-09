@@ -74,9 +74,14 @@ of where the app stands against them.
 
 - [x] Session title + shortened cwd crumb
 - [x] Hidden entirely for a blank/hero session
-- [x] View tabs strip — three tabs, order `Chat` (0), `Trajectory` (10) then `Shell`;
+- [x] View tabs strip — three tabs always, order `Chat` (0), `Trajectory` (10) then `Shell`;
       default `chat`; active = 2dp business-blue underline (not a pill); the strip
       renders only when the session has a transcript (`ui/ChatScreen.kt: ChatView`, `ViewTabs`).
+      A fourth, **`Server`**, joins them only while the session's selected route is
+      served by a provider whose declared endpoint is this host's own loopback
+      (`model/LocalModelServer.kt: localServerTargetOf`), and it leaves the moment a
+      cloud model is selected — see *The Server tab* in `README.md`. This one has no
+      web counterpart: the web shows no local-server status at all.
       `Chat` and `Trajectory` are the host's registered `conversation.view` entries;
       `Shell` is this client's own view over the host's `terminal` Remote namespace,
       not a host-registered view

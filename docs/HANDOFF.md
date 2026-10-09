@@ -319,6 +319,61 @@ local model selection can pull gigabytes of weights onto the user's GPU.
   `lastUsed` — which is what makes a pending switch a real, observable state rather than a
   UI invention.
 
+## Host behaviour: the local model server (probed on 0.2.0-rc.2)
+
+Measured, not inferred. This is what the app's fourth tab ("Server") is built on, and the
+first two bullets are the reason it does not show a health readout.
+
+- **The llama.cpp endpoints are unreachable from this client, and nothing on the host
+  proxies them.** The routers answer their own loopback ports on the host — `GET
+  http://127.0.0.1:55555/health` → `{"status":"ok"}` (same on `55556`), and
+  `/v1/models` → every GGUF in the scanned directory, each with
+  `status.value` ∈ `loaded`/`loading`/`unloaded` and its launch `args` (`--ctx-size` and
+  all). But the phone reaches the host through `adb reverse tcp:8081` and one URL, and on
+  that port `GET /health`, `/v1/models`, `/props`, `/slots` and `/metrics` all answer
+  **404**, `/api/*` is the RPC surface only (401 without a cookie), and nginx fronts the
+  gate with a single `location / { proxy_pass http://127.0.0.1:8080; }` (checked with
+  `nginx -T`; the only other server blocks are the LAN `192.168.1.110/111:80` ones, same
+  single location). **So loaded-model / slots / VRAM / throughput are not obtainable and
+  must never be invented.**
+- **`llm/discoverModels` is a real live probe the host performs for you — but only if
+  you do not name the provider.** `POST /api/llm/discoverModels` with
+  `{"settingsNs":"llm-pi-ai","request":{"baseURL":"http://127.0.0.1:55555/v1","api":"openai-completions","apiKey":"…"}}`
+  answers the twelve model ids the router advertises; against a port with nothing
+  listening it answers `{"ok":false,"error":{"code":"llm/model-discovery-rejected",
+  "message":"could not reach http://127.0.0.1:55599/v1/models"}}`. **Add
+  `"provider":"<id>"` and that stops being true**: the host checks its shipped pi-ai
+  catalog *by provider id* before it touches the network
+  (`dsh-llm-pi-ai/lib/index.js:2286-2296`), so `{"provider":"groq",
+  "baseURL":"http://127.0.0.1:55599/v1"}` — a dead port — answers `ok:true` with
+  Groq's cloud catalogue. A reachability verdict built from that is confident and
+  false. With no provider, `catalogModels(undefined)` finds nothing and the call is
+  unconditionally `GET <baseURL>/models` — one GET and nothing else
+  (`dsh-llm-pi-ai/lib/index.js:2313`), so it can never load a model and is safe for a
+  tab to run on open. The namespace is exposed to clients, unlike the rest of `llm/*`:
+  `llm/list` and `llm/status` are 404, while `llm/listProviders`,
+  `llm/listConfigurableProviders` and `llm/discoverModels` are the three real
+  descriptors (`dsh-llm/lib/typert.host.js`) and all three answer.
+- **The declared endpoint is in `settings/describe`, and it is the only honest way to say
+  which provider is "local".** The `llm-pi-ai` namespace's `value.providers.<id>` holds
+  `displayName`, `api`, `baseURL`, `models[]` (each with `contextWindow`, `maxTokens`,
+  `input`) and the provider's `defaultContextWindow`/`defaultMaxTokens`/`defaultInput`/
+  `headers`. Nothing in `session/modelCatalog` carries an endpoint or a locality flag — a
+  group is `{id, name, models}` — and the live local routes are `dsh-local`, `local-2slot`,
+  `dsh-compactor` and `dsh-local-aux`, so a name-prefix rule misses `local-2slot`. The
+  app's rule is therefore the endpoint: a profile whose host is loopback
+  (`127.0.0.0/8`, `localhost`, `::1`). A model's `"input": []` means the *provider's*
+  `defaultInput` applies, not "no modalities" (`Qwen3.8-27B-UD-Q4_K_M` is declared that
+  way).
+- **`dsh-local-llm-controller`'s `localLlm/getState` is not server health.**
+  `POST /api/localLlm/getState` answers (`status`, `slot`, `mode`, `preset`, `pid`,
+  `lastError`, `logTail`, `config`) and the namespace appears in `settings/describe` — but
+  that plugin manages **its own** `llama-server` child on Windows (`serverExe` default
+  `llama-server.exe`, `llamaDir` empty here), so on this box it reports
+  `status:"stopped"` while both OpenRC routers are in fact serving. Its `status` must not
+  be shown as the server's. Its host half does run `curl http://127.0.0.1:<port>/health`
+  internally, but exposes no Remote method that returns the result.
+
 ## Open items
 
 - **Scrolling is being rebuilt from evidence, not from an account of it.** The
