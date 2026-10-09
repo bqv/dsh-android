@@ -124,6 +124,18 @@ editing the live copy. There is no install step to forget.
    been deleted for being unable to see their own subject: one comparing composition cost
    by wall clock (the first run pays the JIT warm-up) and one asserting a "Show more"
    offer appears on a clipped paragraph.
+   The **height** is stubbed too, and it is not the height the tokens promise. The harness
+   density is 1.0, so px and dp are the same number, and a one-line `bodyMedium` box
+   (13sp on a 20sp `lineHeight`) measures ~35dp rather than 20dp: the model chip that draws
+   it comes out at 43dp against the 28dp its line height and its own padding add up to. An
+   assertion on an absolute height is therefore wrong by a wide margin *even when the
+   layout is right*, and it fails on the good build — assert a line count (how many children
+   carry `SemanticsProperties.Text`) or the relationship between two measured nodes instead.
+   **Width is the same story from the other side: text has no width**, so a long string
+   creates no layout pressure at all. A test that needs a row to be tight must take width
+   *away* from it (a `Modifier.width` on a state the test can change), not lengthen a name —
+   that is what `ComposerOverflowTest`'s squeeze case does, and its long-name cases would
+   pass against a deliberately broken row.
 1. **Locks live in the checkout, never `/tmp`.** Each DSH bash call gets a private
    tmpfs, so a `/tmp` flock is not a mutex at all; two holders never meet. Every
    lock is `$ROOT/.build.lock`, `.install.lock`, `.device-<serial>.lock`.
