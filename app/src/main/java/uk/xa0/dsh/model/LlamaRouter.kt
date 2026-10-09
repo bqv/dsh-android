@@ -60,7 +60,7 @@ import org.json.JSONObject
  *    and against the live router it answers the twelve model ids the router
  *    advertises. That is a real fact about the running router — *whether the host
  *    can reach it, and what it advertises right now* — and it is the only one
- *    `llm/*` offers. The provider is deliberately left unnamed in the request;
+ *    `llm/<method>` offers. The provider is deliberately left unnamed in the request;
  *    [discoverModelsArgs] records the probed trap that makes that necessary.
  *
  * ## Why the load and prefill state is still missing, and what would supply it
@@ -88,7 +88,7 @@ import org.json.JSONObject
  *    at all), and it is built to *refuse* private addresses — "the connection
  *    cannot resolve the hostname again to a private address". `dsh-http-proxy`
  *    merges loopback into every policy's `noProxy`.
- *  * **`localLlm/*` is the wrong router.** Its complete Remote surface is
+ *  * **`localLlm/<method>` is the wrong router.** Its complete Remote surface is
  *    `getState / start / stop / saveConfig / listSlotFiles / addProviders` —
  *    probed one by one, with `listSlotStatus`, `getSlots`, `getMetrics`,
  *    `getHealth`, `getProps` and `getRouterStatus` all answering `not found`.
@@ -493,7 +493,7 @@ private fun bearerToken(header: String): String? {
  * The shape is `llm/discoverModels`' own — `{settingsNs, request:{baseURL, api,
  * apiKey}}` — because that method is the proof the transport works, and a plugin
  * that mirrors it inherits the same probe with the same credential handling. It is
- * a different namespace on purpose: `llm/*` belongs to the host's model layer, and
+ * a different namespace on purpose: `llm/<method>` belongs to the host's model layer, and
  * this is a router readout a separate plugin can own without patching core.
  */
 const val ROUTER_STATUS_METHOD: String = "localRouter/status"
