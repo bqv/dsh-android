@@ -74,14 +74,9 @@ of where the app stands against them.
 
 - [x] Session title + shortened cwd crumb
 - [x] Hidden entirely for a blank/hero session
-- [x] View tabs strip — three tabs always, order `Chat` (0), `Trajectory` (10) then `Shell`;
+- [x] View tabs strip — three tabs, order `Chat` (0), `Trajectory` (10) then `Shell`;
       default `chat`; active = 2dp business-blue underline (not a pill); the strip
       renders only when the session has a transcript (`ui/ChatScreen.kt: ChatView`, `ViewTabs`).
-      A fourth, **`Server`**, joins them only while the session's selected route is
-      served by a provider whose declared endpoint is this host's own loopback
-      (`model/LocalModelServer.kt: localServerTargetOf`), and it leaves the moment a
-      cloud model is selected — see *The Server tab* in `README.md`. This one has no
-      web counterpart: the web shows no local-server status at all.
       `Chat` and `Trajectory` are the host's registered `conversation.view` entries;
       `Shell` is this client's own view over the host's `terminal` Remote namespace,
       not a host-registered view
@@ -207,12 +202,6 @@ of where the app stands against them.
       route the catalog has dropped from the host's own `provider/model` and marks it
       unavailable, and applies a pick made on the new-session screen to the session that
       screen creates (`model/ModelSelection.kt`, `ui/ModelTriggerState.kt`)
-- [x] That state is a **caption beneath the model name**, not a peer beside it. Beside it
-      the name and the marker together are wider than the composer row: on a 411dp phone
-      "when created" next to a long name pushed the send button off the card's right edge
-      and truncated the name at the same time. Under the name it costs height, which the
-      row has spare, and the row's trailing group owns the weight, so no name and no
-      marker can displace send (`ui/components/Composer.kt`, `ui/ComposerOverflowTest.kt`)
 - [x] `/` command picker and the `+` add menu, both from one `commands/list` roster:
       client-owned File/Model/Permission rows, an input-taking command claimed into the
       draft, a bare one run through `commands/execute` (`ui/components/CommandMenu.kt`,
@@ -276,7 +265,11 @@ of where the app stands against them.
       panel drew before, so a 320dp phone shows 64 columns instead of 53 and a 411dp
       one 82 instead of 68. Two fingers on the grid step it, the bar's `A−`/`A+` do the
       same thing visibly, and the choice is persisted in the config store
-      (`data/ConfigStore.kt: terminalFontSp`, applied in `ui/TerminalScreen.kt`)
+      (`data/ConfigStore.kt: terminalFontSp`, applied in `ui/TerminalScreen.kt`). The
+      grid's gesture handler also refuses a *drag* to the tap target — a one-finger move
+      past touch slop no longer brings the soft keyboard up, which `clickable` alone did
+      not distinguish (see `docs/HANDOFF.md`, "Compose's `clickable` has no movement
+      test")
 - [x] Preview panel: the `text` preview that a deliverable or a file row opens into
 - [+] **Share to DSH** (app addition, not in the web client). The app registers for
       `ACTION_SEND` and `ACTION_SEND_MULTIPLE` with `*/*`, so an image from the gallery
