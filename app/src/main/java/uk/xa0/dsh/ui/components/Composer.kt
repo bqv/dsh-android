@@ -263,38 +263,58 @@ fun Composer(
                 // Left group is attach + modes; the model trigger belongs to the
                 // *trailing* group with the context ring and send, right-flushed —
                 // as the web's `.row` does with `justify-content: space-between`.
-                Spacer(Modifier.weight(1f))
+                //
+                // The trailing group is this row's only weighted child, and its own
+                // fixed controls — the ring and the send button — are the children
+                // measured before anything else. So the group can never be wider than
+                // what the leading controls leave, and inside it only the model
+                // trigger gives way. That is the guarantee: no model name and no
+                // state caption, however long, can push the primary action off the
+                // card. Before this, every control was unweighted, so a long name
+                // plus a caption simply overflowed the row and took send with it.
+                Row(
+                    Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (modelTrigger != null) {
+                        ModelTrigger(
+                            state = modelTrigger,
+                            onClick = onModelClick,
+                            // `fill = false` so a short name keeps a short chip: the
+                            // weight supplies a ceiling, not a width. Whatever the
+                            // trigger does not use is left to the arrangement, which
+                            // right-flushes it against the ring.
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Spacer(Modifier.width(DshSpacing.md))
+                    }
 
-                if (modelTrigger != null) {
-                    ModelTrigger(state = modelTrigger, onClick = onModelClick)
+                    ContextMeter(
+                        percent = contextPercent,
+                        usedTokens = contextTokens,
+                        windowTokens = contextWindow,
+                        breakdown = contextBreakdown,
+                    )
+                    Spacer(Modifier.width(DshSpacing.lg))
+
+                    SendButton(
+                        canSend = canSend,
+                        running = running,
+                        draftBlank = value.text.isBlank(),
+                        busyEnter = busyEnter,
+                        onSend = {
+                            focusManager.clearFocus()
+                            onSend()
+                        },
+                        onStop = onStop,
+                        onSendMode = { mode ->
+                            focusManager.clearFocus()
+                            onSendMode(mode)
+                        },
+                        onToggleBusyEnter = onToggleBusyEnter,
+                    )
                 }
-
-                Spacer(Modifier.width(DshSpacing.md))
-
-                ContextMeter(
-                    percent = contextPercent,
-                    usedTokens = contextTokens,
-                    windowTokens = contextWindow,
-                    breakdown = contextBreakdown,
-                )
-                Spacer(Modifier.width(DshSpacing.lg))
-
-                SendButton(
-                    canSend = canSend,
-                    running = running,
-                    draftBlank = value.text.isBlank(),
-                    busyEnter = busyEnter,
-                    onSend = {
-                        focusManager.clearFocus()
-                        onSend()
-                    },
-                    onStop = onStop,
-                    onSendMode = { mode ->
-                        focusManager.clearFocus()
-                        onSendMode(mode)
-                    },
-                    onToggleBusyEnter = onToggleBusyEnter,
-                )
             }
         }
     }
@@ -505,14 +525,20 @@ private fun SendModeRow(
 }
 
 /**
- * Model trigger. The web trigger shows the model name (the provider appears only
- * in a degenerate fallback). The label is width-capped so a long name ellipsizes
- * rather than pushing the trailing group off the card's margin.
+ * Model trigger: the route's name and reasoning effort, and — when the route is not
+ * simply in force — the state as a **caption beneath the name**.
  *
- * [ModelTriggerState.marker] sits *outside* that capped label on purpose: it is the
- * word that says the route is not simply in force — a switch not yet run, a pick the
- * host has not answered, a pick waiting on the session this screen will create, or a
- * route that has gone away — and an ellipsized label must not be able to swallow it.
+ * The caption used to sit beside the name. The two together are wider than the row:
+ * on a 411dp phone with a long name the pair pushed the send button off the card's
+ * right edge and the name lost characters to the ellipsis at the same time. Beneath
+ * the name it costs height instead of width, which is the one axis this row has
+ * spare, and it is the relationship the desktop's own trigger uses — a secondary
+ * value in the caption tone under the primary one. A bare name still draws one line;
+ * only the states that need saying make the chip taller.
+ *
+ * The name gives way first: it is the only weighted child, so an over-long name
+ * ellipsises rather than displacing the caption or the chevron. See [CHIP_LABEL_MAX]
+ * for the resting cap.
  */
 @Composable
 private fun ModelTrigger(state: ModelTriggerState, onClick: () -> Unit, modifier: Modifier = Modifier) {
@@ -525,22 +551,25 @@ private fun ModelTrigger(state: ModelTriggerState, onClick: () -> Unit, modifier
             .semantics { state.description?.let { contentDescription = it } },
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = state.label,
-            style = DshType.bodyMedium.copy(fontWeight = FontWeight.Medium),
-            color = colors.labelSecondary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 132.dp),
-        )
-        if (state.marker != null) {
-            Spacer(Modifier.width(DshSpacing.xs))
+        Column(Modifier.weight(1f, fill = false)) {
             Text(
-                text = state.marker,
-                style = DshType.micro,
-                color = if (state.alert) colors.error else colors.labelTertiary,
+                text = state.label,
+                style = DshType.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                color = colors.labelSecondary,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = CHIP_LABEL_MAX),
             )
+            if (state.marker != null) {
+                Text(
+                    text = state.marker,
+                    style = DshType.micro,
+                    color = if (state.alert) colors.error else colors.labelTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = CHIP_LABEL_MAX),
+                )
+            }
         }
         Spacer(Modifier.width(DshSpacing.xxs))
         Icon(
@@ -551,6 +580,15 @@ private fun ModelTrigger(state: ModelTriggerState, onClick: () -> Unit, modifier
         )
     }
 }
+
+/**
+ * How wide the trigger's own text may grow before it ellipsises.
+ *
+ * A *resting* cap, not a guarantee: when the row is tighter than this, the weight on
+ * the trigger's column caps it lower still, so the caption, the chevron and — most
+ * importantly — everything to the trigger's right keep their full width.
+ */
+private val CHIP_LABEL_MAX = 132.dp
 
 /**
  * A mode selector: 28dp tall, r8, 13/20/500, with a 12dp chevron trailing it —

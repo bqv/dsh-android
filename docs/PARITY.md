@@ -202,6 +202,12 @@ of where the app stands against them.
       route the catalog has dropped from the host's own `provider/model` and marks it
       unavailable, and applies a pick made on the new-session screen to the session that
       screen creates (`model/ModelSelection.kt`, `ui/ModelTriggerState.kt`)
+- [x] That state is a **caption beneath the model name**, not a peer beside it. Beside it
+      the name and the marker together are wider than the composer row: on a 411dp phone
+      "when created" next to a long name pushed the send button off the card's right edge
+      and truncated the name at the same time. Under the name it costs height, which the
+      row has spare, and the row's trailing group owns the weight, so no name and no
+      marker can displace send (`ui/components/Composer.kt`, `ui/ComposerOverflowTest.kt`)
 - [x] `/` command picker and the `+` add menu, both from one `commands/list` roster:
       client-owned File/Model/Permission rows, an input-taking command claimed into the
       draft, a bare one run through `commands/execute` (`ui/components/CommandMenu.kt`,
