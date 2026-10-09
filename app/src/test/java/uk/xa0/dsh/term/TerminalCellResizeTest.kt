@@ -54,8 +54,12 @@ class TerminalCellResizeTest {
         heightPx: Int,
         density: Float,
         cell: TerminalCellSize,
-    ): Pair<Int, Int> = gridCells(widthPx, TerminalCellSize.ADVANCE_EM * cell.fontSp * density)
-        .coerceAtLeast(2) to gridCells(heightPx, cell.lineHeightSp * density).coerceAtLeast(1)
+    ): Pair<Int, Int> {
+        val columns = gridCells(widthPx, TerminalCellSize.ADVANCE_EM * cell.fontSp * density)
+        val rows = gridCells(heightPx, cell.lineHeightSp * density)
+        // The same two floors the panel applies before it reports anything.
+        return columns.coerceAtLeast(2) to rows.coerceAtLeast(1)
+    }
 
     @Test
     fun `a smaller cell is a bigger grid, and the bigger grid is what is sent`() {
