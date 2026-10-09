@@ -431,27 +431,27 @@ fun ChatScreen(vm: DshViewModel) {
         hadShell = seats > 0
     }
 
-    // The Server tab's gate, and the strip it decides.
+    // The Router tab's gate, and the strip it decides.
     //
-    // `ui.localServerTarget` is derived from the host's own model selection — the
+    // `ui.routerTarget` is derived from the host's own model selection — the
     // same value the composer's trigger draws — so the tab exists exactly while the
     // route this session will run is served by something on the host's loopback. A
     // cloud model selected in force, a switch to one that is only pending, and a
     // selection the host's document does not describe all remove it.
     //
     // `shownView` is the selection the *screen* honours: while the gate is shut the
-    // Server seat reads as the conversation, so the one composition between the
+    // Router seat reads as the conversation, so the one composition between the
     // model changing and the effect below resetting `view` cannot leave the body
     // hanging on a tab that is no longer drawn.
-    val localServerTarget = ui.localServerTarget
-    val views = if (localServerTarget != null) ALL_VIEWS else BASE_VIEWS
-    val shownView = if (view == ChatView.LOCAL_SERVER && localServerTarget == null) ChatView.CHAT else view
+    val routerTarget = ui.routerTarget
+    val views = if (routerTarget != null) ALL_VIEWS else BASE_VIEWS
+    val shownView = if (view == ChatView.ROUTER && routerTarget == null) ChatView.CHAT else view
 
-    // Leaving the Server tab behind when its model is gone, for the same reason the
+    // Leaving the Router tab behind when its model is gone, for the same reason the
     // last closed shell returns to the conversation: a seat that is no longer drawn
     // must not still be selected.
-    LaunchedEffect(localServerTarget) {
-        if (localServerTarget == null && view == ChatView.LOCAL_SERVER) {
+    LaunchedEffect(routerTarget) {
+        if (routerTarget == null && view == ChatView.ROUTER) {
             android.util.Log.d("DshView", "local route left; returning to the conversation")
             view = ChatView.CHAT
         }
@@ -461,14 +461,14 @@ fun ChatScreen(vm: DshViewModel) {
     // reachability answer is only worth reading with the time it was taken, so the
     // check is re-run rather than shown from a previous visit. The session is a key
     // too: two sessions can select the same local route, and moving between them is
-    // a new "is my server up now", not a reason to show the other one's answer.
+    // a new "is my router up now", not a reason to show the other one's answer.
     LaunchedEffect(
         ui.currentSessionId,
         shownView,
-        localServerTarget?.provider?.id,
-        localServerTarget?.modelId,
+        routerTarget?.provider?.id,
+        routerTarget?.modelId,
     ) {
-        if (shownView == ChatView.LOCAL_SERVER && localServerTarget != null) vm.checkLocalServer()
+        if (shownView == ChatView.ROUTER && routerTarget != null) vm.checkRouter()
     }
 
     // The right panel's `files` surface. A phone has no room for a column beside
@@ -519,7 +519,7 @@ fun ChatScreen(vm: DshViewModel) {
     // dismiss themselves. Composed here rather than at the root because this is where
     // the state lives, and the root gate is asked only after the screen declines.
     //
-    // `shownView`, not `view`: while the Server tab's gate is shut the screen is
+    // `shownView`, not `view`: while the Router tab's gate is shut the screen is
     // already showing the conversation, and consuming a press to "return" to a view
     // it is on would swallow the back gesture for nothing.
     BackHandler(enabled = showFiles || shownView != ChatView.CHAT || subagentParent != null) {
@@ -898,17 +898,17 @@ fun ChatScreen(vm: DshViewModel) {
                     // would be a second copy of it.
                     showHeader = false,
                 )
-            } else if (shownView == ChatView.LOCAL_SERVER) {
-                // The fourth tab. `localServerTarget` is non-null by construction
-                // here: `shownView` is only LOCAL_SERVER while the gate is open.
+            } else if (shownView == ChatView.ROUTER) {
+                // The fourth tab. `routerTarget` is non-null by construction
+                // here: `shownView` is only ROUTER while the gate is open.
                 // The model trigger's own labels are reused so the tab cannot name
                 // the effort differently from the chip beside the composer.
-                localServerTarget?.let { target ->
-                    LocalServerTab(
+                routerTarget?.let { target ->
+                    RouterTab(
                         target = target,
-                        probe = ui.localServerProbe,
+                        probe = ui.routerProbe,
                         effort = effortLabel(ui.selectedModel, ui.selectedEffort),
-                        onCheck = vm::checkLocalServer,
+                        onCheck = vm::checkRouter,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -1861,7 +1861,7 @@ private fun ChatHeader(
     onView: (ChatView) -> Unit = {},
     /**
      * The tabs to draw, in order. Passed in rather than read off the enum because
-     * the Server tab is conditional on the session's selected model.
+     * the Router tab is conditional on the session's selected model.
      */
     views: List<ChatView> = ChatView.entries,
     showTabs: Boolean = false,
@@ -2027,20 +2027,23 @@ private enum class ChatView(val label: String) {
     // general one, and the seat chips inside say which is which.
     TERMINAL("Shell"),
     // The fourth tab, and the only conditional one. It describes the llama.cpp
-    // server behind the session's selected model, so it is offered only while that
+    // router behind the session's selected model, so it is offered only while that
     // model belongs to a provider whose declared endpoint is this host's own
     // loopback — and it goes away the moment a cloud model is selected. See
-    // `model/LocalModelServer.kt` for the gate and for the probe evidence behind
+    // `model/LlamaRouter.kt` for the gate and for the probe evidence behind
     // what the tab does — and does not — claim.
     //
-    // "Server", not "Local model" and certainly not "Health": the tab is the
-    // server's identity card plus one reachability check, and a name that promised
-    // a health readout would promise something this client cannot obtain.
-    LOCAL_SERVER("Server"),
+    // "Router", which is the user's own word and the accurate one: the thing behind
+    // a local route is a `llama-server` started with `--models-dir`, which holds
+    // several GGUFs and loads one on demand — its own `/props` answers
+    // `{"role":"router"}`. "Server" was never more than a placeholder for it, and
+    // mislabelled the surface as a single model process. "Health" would be worse
+    // still: it would promise a readout this client cannot obtain.
+    ROUTER("Router"),
 }
 
 /** The tabs every session is offered: everything except the conditional one. */
-private val BASE_VIEWS: List<ChatView> = ChatView.entries.filter { it != ChatView.LOCAL_SERVER }
+private val BASE_VIEWS: List<ChatView> = ChatView.entries.filter { it != ChatView.ROUTER }
 
 /** Every tab, for a session whose selected route is local. */
 private val ALL_VIEWS: List<ChatView> = ChatView.entries.toList()
@@ -2057,7 +2060,7 @@ private val ALL_VIEWS: List<ChatView> = ChatView.entries.toList()
 @Composable
 private fun ViewTabs(selected: ChatView, views: List<ChatView>, onSelect: (ChatView) -> Unit) {
     val colors = DshTheme.colors
-    // Four labels — Chat / Trajectory / Shell / Server — do not fit a narrow phone
+    // Four labels — Chat / Trajectory / Shell / Router — do not fit a narrow phone
     // at 36px gaps, and "Trajectory" is the width that decides it. The gap is
     // tightened only when the fourth tab is actually drawn, so the ordinary
     // three-tab strip is untouched.

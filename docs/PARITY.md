@@ -74,12 +74,18 @@ of where the app stands against them.
 
 - [x] Session title + shortened cwd crumb
 - [x] Hidden entirely for a blank/hero session
-- [x] View tabs strip — three tabs, order `Chat` (0), `Trajectory` (10) then `Shell`;
-      default `chat`; active = 2dp business-blue underline (not a pill); the strip
-      renders only when the session has a transcript (`ui/ChatScreen.kt: ChatView`, `ViewTabs`).
+- [x] View tabs strip — order `Chat` (0), `Trajectory` (10) then `Shell`, plus a
+      conditional fourth, `Router`; default `chat`; active = 2dp business-blue
+      underline (not a pill); the strip renders only when the session has a
+      transcript (`ui/ChatScreen.kt: ChatView`, `ViewTabs`).
       `Chat` and `Trajectory` are the host's registered `conversation.view` entries;
       `Shell` is this client's own view over the host's `terminal` Remote namespace,
-      not a host-registered view
+      not a host-registered view. `Router` is this client's own view over the
+      `llama.cpp` router behind a local route and appears only while that route is
+      selected — see `docs/HANDOFF.md`, *Host behaviour: the llama.cpp routers*.
+      Reachability is real; load and prefill are **not obtainable** until the host
+      gains the `localRouter/status` method specified there, and the tab says so
+      rather than inventing a number
 - [~] Header seats: agent-preset label, terminal recovery (error-only), schedule catalog,
       background jobs, open-in-app, right-panel expand, subagent lineage.
       Present: background jobs, right panel (Files), subagent lineage (while descendants

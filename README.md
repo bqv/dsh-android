@@ -212,7 +212,7 @@ socket resumes streaming instead of silently freezing the UI.
   an elapsed clock; per-message clock and copy actions; a back-to-bottom button.
 - Chat / Trajectory / Shell view tabs: the second is the model's input/output
   ledger, the third the session's PTY (see *The Shell tab*, below). A fourth,
-  **Server**, appears only for a local model (see *The Server tab*, below).
+  **Router**, appears only for a local model (see *The Router tab*, below).
 - Back-pagination: scrolling to the oldest loaded row pulls one older page with
   `session/page`, so a long session is not capped at the follow window.
 - A deliverables row after each finished turn, opening the text preview.
@@ -224,7 +224,7 @@ socket resumes streaming instead of silently freezing the UI.
 
 ### The Shell tab
 
-- The view strip is **Chat / Trajectory / Shell**, plus **Server** when the selected
+- The view strip is **Chat / Trajectory / Shell**, plus **Router** when the selected
   model is local. The third is a real PTY over
   the host's native `terminal` Remote namespace (`environment`, `shells`, `list`,
   `create`, `follow`, `write`, `resize`, `rename`, `close`), streamed on the same
@@ -279,25 +279,37 @@ socket resumes streaming instead of silently freezing the UI.
        alt="The Shell tab: the terminal's chip and its running state, the two seats labelled Host shell · Full access and This session · Workspace Write, and htop running unconfined in the host shell — showing the host's own processes — above the Esc/Tab/^C/^D key row">
 </p>
 
-### The Server tab
+### The Router tab
 
 - A **fourth tab, present only while the session's selected model is local**. It
-  describes the `llama.cpp` server behind that model: the endpoint, protocol,
+  describes the `llama.cpp` **router** behind that model: the endpoint, protocol,
   declared context window, output cap, modalities and whether a credential is sent
   — all of them the host's own declarations, read from the `llm-pi-ai` provider
   profile in the `settings/describe` reply the Settings panel already fetches — plus
   one live check, run by the host on this client's behalf, that answers "can the
   host reach that endpoint, and what does it advertise right now", with the time it
   was taken.
+- **"Router", not "Server."** The thing behind a local route is a `llama-server`
+  started with `--models-dir`, which holds several GGUFs and loads one on demand —
+  its own `/props` answers `{"role":"router"}`. "Server" was a placeholder that
+  mislabelled it as a single model process, and the router's own word is the
+  accurate one.
 - **What it deliberately does not show, and why.** The phone reaches the host
   through a single forwarded port, and on that port `GET /health`, `/v1/models`,
   `/props`, `/slots` and `/metrics` all answer 404 — the routers are bound to the
   host's loopback and nothing proxies them (nginx fronts the gate with one
   `location /`; there is no `/api` passthrough). So the loaded model, slot
-  occupancy, memory and throughput are **not obtainable**, and the tab says so in
-  as many words rather than drawing a number nobody measured. The tab's name is
-  **Server** for the same reason: "Health" would promise a readout this client
-  cannot get.
+  occupancy, memory and throughput are **not obtainable**, and the tab says so in as
+  many words rather than drawing a number nobody measured.
+- **The gap is a missing host method, and it is closeable.** The host *can* see the
+  load state — `llm/discoverModels` already performs the very `GET /v1/models` that
+  carries each model's `loaded`/`unloaded` status — it simply does not return that
+  field. A sweep of every client-callable method found no other one that can report
+  it. `docs/HANDOFF.md` therefore specifies **`localRouter/status`**, a small plugin
+  that would answer with the resident model, each slot's prefill progress and the
+  decoded-token counts. **The app's half of that call is already written**: a host
+  that gains the plugin lights the tab's LOAD and PREFILL sections up with no app
+  change, and until then the tab states plainly that the readout is not offered.
 - **The gate is the declared endpoint, not the provider's name.** Nothing in
   `session/modelCatalog` says which provider is local (a group is `{id, name,
   models}` and nothing else), and this box's local routes are `dsh-local`,
@@ -308,16 +320,17 @@ socket resumes streaming instead of silently freezing the UI.
   disappears with the route the chip names — **including a switch that is only
   pending**: a local route the last turn ran does not keep the tab alive once a
   cloud model has been selected, and the "when created" seat has no tabs at all.
-- **The check is `llm/discoverModels`**, and the request names **no provider**.
-  Naming one lets the host answer from its shipped `pi-ai` catalogue without
-  touching the network — probed: `{"provider":"groq","baseURL":"http://127.0.0.1:55599/v1"}`,
+- **The reachability check is `llm/discoverModels`**, and the request names **no
+  provider**. Naming one lets the host answer from its shipped `pi-ai` catalogue
+  without touching the network — probed: `{"provider":"groq","baseURL":"http://127.0.0.1:55599/v1"}`,
   a dead port, answers `ok:true` with Groq's cloud catalogue. With no provider the
   call is unconditionally a live `GET <baseURL>/models`, so a "reachable" verdict
   is always a measurement and never a catalogue read, and (the handler sending one
   bare GET and nothing else) it can never load a model. `dsh-local-llm-controller`'s
   `localLlm/getState` is deliberately not surfaced: it reports that plugin's **own**
   server process, which reads `stopped` on this box while both OpenRC routers are
-  serving.
+  serving, and its `start` refuses to launch beside anything already answering
+  `/health` on that port.
 - **Unverified on device.** The tab's logic is unit-tested and the host calls behind
   it were probed by hand, but the tab has not been built into the app and exercised
   on the test handset.

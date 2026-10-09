@@ -353,60 +353,216 @@ local model selection can pull gigabytes of weights onto the user's GPU.
   `lastUsed` — which is what makes a pending switch a real, observable state rather than a
   UI invention.
 
-## Host behaviour: the local model server (probed on 0.2.0-rc.2)
+## Host behaviour: the llama.cpp routers (probed on 0.2.0-rc.2, re-probed 2026-10-10)
 
-Measured, not inferred. This is what the app's fourth tab ("Server") is built on, and the
-first two bullets are the reason it does not show a health readout.
+Measured, not inferred. This is what the app's fourth tab is built on. The tab is
+called **Router**, which is the user's word and the router's own: `/props` on both
+ports answers `{"role":"router", …}`. "Server" was a placeholder that mislabelled
+the surface as a single model process.
 
-- **The llama.cpp endpoints are unreachable from this client, and nothing on the host
-  proxies them.** The routers answer their own loopback ports on the host — `GET
-  http://127.0.0.1:55555/health` → `{"status":"ok"}` (same on `55556`), and
-  `/v1/models` → every GGUF in the scanned directory, each with
-  `status.value` ∈ `loaded`/`loading`/`unloaded` and its launch `args` (`--ctx-size` and
-  all). But the phone reaches the host through `adb reverse tcp:8081` and one URL, and on
-  that port `GET /health`, `/v1/models`, `/props`, `/slots` and `/metrics` all answer
-  **404**, `/api/*` is the RPC surface only (401 without a cookie), and nginx fronts the
-  gate with a single `location / { proxy_pass http://127.0.0.1:8080; }` (checked with
-  `nginx -T`; the only other server blocks are the LAN `192.168.1.110/111:80` ones, same
-  single location). **So loaded-model / slots / VRAM / throughput are not obtainable and
-  must never be invented.**
-- **`llm/discoverModels` is a real live probe the host performs for you — but only if
-  you do not name the provider.** `POST /api/llm/discoverModels` with
-  `{"settingsNs":"llm-pi-ai","request":{"baseURL":"http://127.0.0.1:55555/v1","api":"openai-completions","apiKey":"…"}}`
-  answers the twelve model ids the router advertises; against a port with nothing
-  listening it answers `{"ok":false,"error":{"code":"llm/model-discovery-rejected",
-  "message":"could not reach http://127.0.0.1:55599/v1/models"}}`. **Add
-  `"provider":"<id>"` and that stops being true**: the host checks its shipped pi-ai
-  catalog *by provider id* before it touches the network
-  (`dsh-llm-pi-ai/lib/index.js:2286-2296`), so `{"provider":"groq",
-  "baseURL":"http://127.0.0.1:55599/v1"}` — a dead port — answers `ok:true` with
-  Groq's cloud catalogue. A reachability verdict built from that is confident and
-  false. With no provider, `catalogModels(undefined)` finds nothing and the call is
-  unconditionally `GET <baseURL>/models` — one GET and nothing else
-  (`dsh-llm-pi-ai/lib/index.js:2313`), so it can never load a model and is safe for a
-  tab to run on open. The namespace is exposed to clients, unlike the rest of `llm/*`:
-  `llm/list` and `llm/status` are 404, while `llm/listProviders`,
-  `llm/listConfigurableProviders` and `llm/discoverModels` are the three real
-  descriptors (`dsh-llm/lib/typert.host.js`) and all three answer.
-- **The declared endpoint is in `settings/describe`, and it is the only honest way to say
-  which provider is "local".** The `llm-pi-ai` namespace's `value.providers.<id>` holds
-  `displayName`, `api`, `baseURL`, `models[]` (each with `contextWindow`, `maxTokens`,
-  `input`) and the provider's `defaultContextWindow`/`defaultMaxTokens`/`defaultInput`/
-  `headers`. Nothing in `session/modelCatalog` carries an endpoint or a locality flag — a
-  group is `{id, name, models}` — and the live local routes are `dsh-local`, `local-2slot`,
-  `dsh-compactor` and `dsh-local-aux`, so a name-prefix rule misses `local-2slot`. The
-  app's rule is therefore the endpoint: a profile whose host is loopback
-  (`127.0.0.0/8`, `localhost`, `::1`). A model's `"input": []` means the *provider's*
-  `defaultInput` applies, not "no modalities" (`Qwen3.8-27B-UD-Q4_K_M` is declared that
-  way).
-- **`dsh-local-llm-controller`'s `localLlm/getState` is not server health.**
-  `POST /api/localLlm/getState` answers (`status`, `slot`, `mode`, `preset`, `pid`,
-  `lastError`, `logTail`, `config`) and the namespace appears in `settings/describe` — but
-  that plugin manages **its own** `llama-server` child on Windows (`serverExe` default
-  `llama-server.exe`, `llamaDir` empty here), so on this box it reports
-  `status:"stopped"` while both OpenRC routers are in fact serving. Its `status` must not
-  be shown as the server's. Its host half does run `curl http://127.0.0.1:<port>/health`
-  internally, but exposes no Remote method that returns the result.
+### What the routers report — on the host, and only there
+
+Two OpenRC routers on the host's loopback: `llama` on `127.0.0.1:55555`
+(`--models-max 1`) and `llamb` on `127.0.0.1:55556` (`--models-max 2`). Measured
+with `curl` on 2026-10-10:
+
+| Endpoint | Answers | Carries |
+| --- | --- | --- |
+| `GET /health` | `{"status":"ok"}` | liveness |
+| `GET /v1/models` | every GGUF in the scanned dir | **`status.value` ∈ `loaded`/`loading`/`unloaded`**, and on a loaded entry the launch `args` — `--ctx-size` (`122880`) and the child's `--port` (`43723`) |
+| `GET /props` | `{"role":"router","max_instances":1,"models_autoload":true,…}` | router identity |
+| `GET /slots?model=<id>` | per-slot state | **`is_processing`, `n_prompt_tokens`, `n_prompt_tokens_processed`, `n_prompt_tokens_cache`**, `next_token[0].n_decoded` / `.n_remain` |
+| `GET /metrics?model=<id>` | Prometheus counters | `llamacpp:prompt_tokens_total`, `prompt_tokens_cached_total`, … |
+
+Without `?model=`, `/slots` and `/metrics` answer `400 model name is missing from
+the request` — these are per-model routes on a router.
+
+**Trap: never query `/slots?model=` for a model that is not `loaded`.** `/props`
+reports `models_autoload: true`. One such request did not answer within 8 s
+(`HTTP 000`) while the loaded model was mid-prefill; `ss -ltnp` and
+`pgrep -x llama-server` both showed no new process afterwards and the target still
+read `unloaded`, so nothing was loaded — but *why* it hung is inference, not
+measurement. Read `/v1/models` first and ask for slots only for the resident model.
+
+### What this client can reach: none of it
+
+Re-verified 2026-10-10 rather than inherited. On `127.0.0.1:8080` and
+`127.0.0.1:8081` — the two ports the phone can reach — `/health`, `/v1/models`,
+`/props`, `/slots` and `/metrics` all answer **404**; `:80` answers **302** (nginx's
+primer redirect). `nginx -T` still shows a single
+`location / { proxy_pass http://127.0.0.1:8080; }` per server block and nothing
+else. So loaded-model / slots / VRAM / throughput are not obtainable directly and
+**must never be invented**.
+
+### `llm/discoverModels` is the one host-performed probe — and it drops the answer
+
+`POST /api/llm/discoverModels` with
+`{"settingsNs":"llm-pi-ai","request":{"baseURL":"http://127.0.0.1:55555/v1","api":"openai-completions","apiKey":"…"}}`
+makes the host perform `GET <baseURL>/models`. Against a dead port it answers
+`{"ok":false,"error":{"code":"llm/model-discovery-rejected","message":"could not
+reach http://127.0.0.1:55599/v1/models"}}`; against the live router it answers the
+twelve model ids. **Add `"provider":"<id>"` and it stops being a probe**: the host
+checks its shipped pi-ai catalogue by provider id before it touches the network
+(`dsh-llm-pi-ai/lib/index.js:2286-2296`), so `{"provider":"groq","baseURL":
+"http://127.0.0.1:55599/v1"}` — a dead port — answers `ok:true` with Groq's cloud
+catalogue. The app leaves the provider unnamed for that reason.
+
+**The transport works and the report is lossy.** `readListing` in the same file maps
+each entry to `{id, name, contextWindow?, maxTokens?}` and drops every other field,
+`status` and its launch args included. So the host already performs exactly the GET
+that carries the load state and then declines to return it.
+
+### Why no existing method reports load or prefill
+
+Swept on 2026-10-10, all negative:
+
+- **`llm/discoverModels` cannot be bent into a general GET.** `listingUrl` is a bare
+  `` `${base}/models` `` string concatenation and `readListing` accepts only a `data`
+  array or a `models` object, so no `baseURL` value reaches `/slots`, and a `/slots`
+  reply would be rejected as "not a model listing" anyway.
+- **No other client-callable method names a URL.** Of the 26 `typert.host.js`
+  descriptors installed, only `dsh-llm`'s has a URL-bearing parameter
+  (`settingsNs` + `request`). `web/fetch`, `webFetch/fetch`, `fetch/url`, `http/get`,
+  `httpProxy/get`, `web/fetchUrl` and `proxy/fetch` all answer `not found`.
+- **The Web-fetch plugins are not a door.** `dsh-web-fetch-http` is loaded but
+  registers into the `web` service, not a Remote namespace (it has no
+  `typert.host.js`), and it is built to *refuse* private addresses. `dsh-http-proxy`
+  merges loopback into every policy's `noProxy`.
+- **`localLlm/*` is the wrong router.** `dsh-local-llm-controller` 2.1.2 is
+  user-installed at `~/.dsh/profiles/web/node_modules/dsh-local-llm-controller/`.
+  Its **complete** Remote surface is `getState / start / stop / saveConfig /
+  listSlotFiles / addProviders` — probed one by one, with `listSlotStatus`,
+  `getSlots`, `getMetrics`, `getHealth`, `getProps` and `getRouterStatus` all
+  answering `not found`. `getState` reports that plugin's **own child process**; its
+  `config` still carries the Windows default `serverExe: "llama-server.exe"` and an
+  empty `llamaDir`, so on this box it reads `status:"stopped"`, `pid:null` — its
+  `pid` is `this.proc ? (this.serverPid ?? null) : null`, so it is null whenever the
+  plugin owns no child, even though `resolveServerPid()` does ask the OS which
+  process LISTENs on the configured port. It cannot adopt the OpenRC routers either:
+  `startSlot` calls `probeHealth()` (`curl -s -m 3 http://127.0.0.1:<port>/health`)
+  and refuses when `"ok"` comes back — `端口 … 已有服务在运行（/health 返回 ok）`.
+  **It can only spawn its own child, and it will not start beside one.**
+  It does prove the shape of the answer, though: the host *can* run `curl` at the
+  router's `/health`; it just exposes no method that returns the result.
+
+### The method that would close the gap: `localRouter/status`
+
+**Not implemented.** This is a spec for a small plugin, so the user can decide
+whether to write it. The app's client half is already written against it
+(`ROUTER_STATUS_METHOD`, `routerStatusArgs`, `parseRouterStatus`,
+`classifyRouterStatus` in `app/src/main/java/uk/xa0/dsh/model/LlamaRouter.kt`), so a
+plugin that answers this shape lights the tab up with no app change. Until then the
+host answers `not found`, the client latches that off, and the tab says the readout
+is not offered.
+
+It is a sibling of `llm/discoverModels`, not an extension of it: same argument
+shape, same "the host does the HTTP", but a namespace a standalone plugin can own
+without patching `dsh-llm` core.
+
+**How the client detects its absence**, measured: the carrier answers an uncomposed
+method with HTTP **404**, `content-type: text/plain`, body exactly `not found` (no
+trailing newline). `DshClient.rpcRaw` fails to parse that as JSON and throws
+`DshRpcException("http/404", "not found")`; `isMethodAbsent` matches on either half.
+That response is the *only* one the client falls back from — any other failure is
+reported as a verdict on the router, so a plugin that exists but misfires can never
+be mistaken for one that was never installed.
+
+**Request** — `POST /api/localRouter/status`, body
+`{"type":"client-request","rpcId":"x","method":"localRouter/status","payload":{"args": …}}`:
+
+```json
+{
+  "settingsNs": "llm-pi-ai",
+  "request": {
+    "baseURL": "http://127.0.0.1:55555/v1",
+    "api": "openai-completions",
+    "apiKey": "…"
+  }
+}
+```
+
+| Argument | Required | Meaning |
+| --- | --- | --- |
+| `settingsNs` | yes | The settings namespace the provider profile lives in; mirrors `llm/discoverModels` so one args-builder serves both. |
+| `request.baseURL` | yes | The endpoint to interrogate — the profile's own, so the probe asks the router a real request would use. |
+| `request.api` | no | The wire protocol; accepted for symmetry, unused by this method. |
+| `request.apiKey` | no | A `Bearer` credential, used verbatim as the `Authorization` header. |
+
+**The plugin must not name a provider**, for the reason recorded above: a
+`provider` field would let the answer come from a shipped catalogue instead of the
+router. It should reject an unknown `provider` rather than ignore it.
+
+**Reply** — the host performs, in this order and no other:
+
+1. `GET <baseURL>/props`
+2. `GET <baseURL>/models`
+3. `GET <baseURL>/slots?model=<id>` — **only** when step 2 reported exactly one model
+   with `status.value == "loaded"` (or `"loading"`). Never for an unloaded model:
+   see the autoload trap above.
+
+```json
+{
+  "ok": true,
+  "value": {
+    "reachable": true,
+    "checkedAt": 1791587528123,
+    "role": "router",
+    "maxInstances": 1,
+    "modelsAutoload": true,
+    "models": [
+      { "id": "Qwen3.5-35B-A3B-UD-IQ4_XS", "status": "unloaded" },
+      { "id": "Qwen3.8-27B-abliterated-120k", "status": "loaded",
+        "contextSize": 122880, "childPort": 43723 },
+      { "id": "Spark-X2.5-4B-Q4_K_M", "status": "loading" }
+    ],
+    "slots": {
+      "model": "Qwen3.8-27B-abliterated-120k",
+      "nCtx": 122880,
+      "entries": [
+        { "id": 0, "isProcessing": true, "promptTokens": 38893,
+          "promptTokensProcessed": 1032, "promptTokensCache": 37639,
+          "decoded": 222, "remaining": 16162 }
+      ]
+    }
+  }
+}
+```
+
+| Field | Source | Notes |
+| --- | --- | --- |
+| `reachable` | — | `true` on this reply; the failure shape below is the only other outcome. |
+| `checkedAt` | host clock | Epoch ms. The tab timestamps every reading, so a fresh one is required per call. |
+| `role` | `/props` `role` | `"router"` on this box. |
+| `maxInstances` | `/props` `max_instances` | |
+| `modelsAutoload` | `/props` `models_autoload` | |
+| `models[]` | `/v1/models` `data[]` | **In the router's own order**, id and `status.value` verbatim. Do not narrow `status` to an enum — the client shows an unfamiliar word as itself. |
+| `models[].contextSize` | `status.args` `--ctx-size` | Omit when the model is not loaded, or the flag is absent. |
+| `models[].childPort` | `status.args` `--port` | The **child instance's** port, not the router's. |
+| `slots.model` | — | The id whose `/slots` these are. |
+| `slots.nCtx` | `/slots[0].n_ctx` | |
+| `slots.entries[]` | `/slots[]` | `id`, `is_processing`, `n_prompt_tokens` → `promptTokens`, `n_prompt_tokens_processed` → `promptTokensProcessed`, `n_prompt_tokens_cache` → `promptTokensCache`, `next_token[0].n_decoded` → `decoded`, `next_token[0].n_remain` → `remaining`. |
+
+**Failure** — one shape, and the message must name the URL that failed:
+
+```json
+{ "ok": false, "error": { "code": "local-router/unreachable",
+  "message": "could not reach http://127.0.0.1:55599/v1/models" } }
+```
+
+Requirements, in the order they matter:
+
+1. **Read-only.** No `start`, no `stop`, no load. In particular the plugin must not
+   touch `/slots` for a model that is not already resident — the autoload trap.
+2. **Never a guessed number.** If a field cannot be read, omit it. The client renders
+   absent as absent and a wrong number as a fact.
+3. **One round of HTTP, no caching.** The tab exists to answer "now"; a cached report
+   would carry `checkedAt` from a moment that is not this one.
+4. **Loopback only, and no `provider` argument.** The method exists to interrogate a
+   router the host runs; it must not become a general fetch of an arbitrary URL.
+
+Memory, VRAM and throughput are deliberately **not** in this reply. They were not
+asked for, and adding them would mean inventing fields from a router that does not
+report them in this document.
 
 ## Open items
 

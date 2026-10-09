@@ -59,13 +59,18 @@ import uk.xa0.dsh.model.SettingsApply
 import uk.xa0.dsh.model.SettingsWritePlan
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.HostSettings
-import uk.xa0.dsh.model.LocalProbeRecord
+import uk.xa0.dsh.model.RouterProbeRecord
 import uk.xa0.dsh.model.LocalProvider
-import uk.xa0.dsh.model.LocalServerProbeResult
-import uk.xa0.dsh.model.LocalServerTarget
+import uk.xa0.dsh.model.RouterProbeResult
+import uk.xa0.dsh.model.RouterTarget
 import uk.xa0.dsh.model.discoverModelsArgs
-import uk.xa0.dsh.model.localServerFailureText
-import uk.xa0.dsh.model.localServerTargetOf
+import uk.xa0.dsh.model.routerFailureText
+import uk.xa0.dsh.model.ROUTER_STATUS_METHOD
+import uk.xa0.dsh.model.RouterCallFailure
+import uk.xa0.dsh.model.RouterStatusOutcome
+import uk.xa0.dsh.model.classifyRouterStatus
+import uk.xa0.dsh.model.routerStatusArgs
+import uk.xa0.dsh.model.routerTargetOf
 import uk.xa0.dsh.model.parseLocalProviders
 import uk.xa0.dsh.model.SessionStats
 import uk.xa0.dsh.model.SessionTarget
@@ -756,17 +761,28 @@ data class UiState(
      *
      * Only routes with a declared endpoint are kept, and nothing here says which
      * of them is *local* — that is the endpoint's own fact, decided per route by
-     * `localServerTargetOf`. See `model/LocalModelServer.kt`.
+     * `routerTargetOf`. See `model/LlamaRouter.kt`.
      */
-    val localServers: Map<String, LocalProvider> = emptyMap(),
+    val localProviders: Map<String, LocalProvider> = emptyMap(),
     /**
-     * The last local-server check, bound to the route it was made for.
+     * The last router check, bound to the route it was made for.
      *
      * Null until one runs. It is a single record rather than a map because only
      * one route can be the session's selection at a time, and the binding is what
      * stops a check made for the previous route being drawn beside the current one.
      */
-    val localProbe: LocalProbeRecord? = null,
+    val routerProbeRecord: RouterProbeRecord? = null,
+    /**
+     * Whether this host has answered `localRouter/status`.
+     *
+     * True until a host refuses it, then false for the rest of the app run: a
+     * method the host does not compose is a fact about the host, and retrying it on
+     * every visit to the tab would buy nothing. Nothing is claimed *about* the
+     * router by this flag — only about which calls are worth sending. It is
+     * in-memory, so a host that gains the plugin is picked up by restarting the app,
+     * the same lifetime the drawer's content-search latch has.
+     */
+    val routerStatusOffered: Boolean = true,
 ) {
     /**
      * The route the model trigger advertises, and how the host came to it.
@@ -801,7 +817,7 @@ data class UiState(
             ?: selectedModel?.defaultEffort
 
     /**
-     * The server behind the route this session will run, when that route is local.
+     * The router behind the route this session will run, when that route is local.
      *
      * The fourth tab's whole gate: null means no tab. Derived from [modelChoice] —
      * the very value the composer's model trigger draws — so the tab and the chip
@@ -809,22 +825,22 @@ data class UiState(
      * cloud model is selected, including while the switch is only pending: the
      * route the session is *leaving* does not keep it alive.
      */
-    val localServerTarget: LocalServerTarget?
-        get() = localServerTargetOf(modelChoice, localServers)
+    val routerTarget: RouterTarget?
+        get() = routerTargetOf(modelChoice, localProviders)
 
     /**
      * The last check's answer, but only when it was made for the route on screen
      * now. A record for any other route reads as "not checked yet", so a stale
-     * reachability answer can never be shown against the wrong server.
+     * reachability answer can never be shown against the wrong router.
      */
-    val localServerProbe: LocalServerProbeResult
+    val routerProbe: RouterProbeResult
         get() {
-            val target = localServerTarget ?: return LocalServerProbeResult.Idle
-            val record = localProbe ?: return LocalServerProbeResult.Idle
+            val target = routerTarget ?: return RouterProbeResult.Idle
+            val record = routerProbeRecord ?: return RouterProbeResult.Idle
             return if (record.provider == target.provider.id && record.model == target.modelId) {
                 record.result
             } else {
-                LocalServerProbeResult.Idle
+                RouterProbeResult.Idle
             }
         }
 
@@ -883,7 +899,7 @@ data class UiState(
  */
 private data class HostDescribe(
     val settings: HostSettings?,
-    val localServers: Map<String, LocalProvider>,
+    val localProviders: Map<String, LocalProvider>,
     val failure: String?,
 )
 
@@ -941,7 +957,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private var settingsJob: Job? = null
 
     /** The one in-flight local-server reachability check. */
-    private var localProbeJob: Job? = null
+    private var routerProbeJob: Job? = null
     private var controlJob: Job? = null
     private var workspacesJob: Job? = null
     private var muxWired = false
@@ -2356,10 +2372,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // keeps the document; a read that succeeded replaces them even when
                 // it declared none, so a provider the host has dropped cannot keep
                 // the local-server tab alive on a stale profile.
-                localServers = if (described.settings != null) {
-                    described.localServers
+                localProviders = if (described.settings != null) {
+                    described.localProviders
                 } else {
-                    _ui.value.localServers
+                    _ui.value.localProviders
                 },
                 hostSettingsLoading = false,
                 hostSettingsError = described.failure,
@@ -2374,14 +2390,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 val parsed = parseHostSettings(reply)
                 HostDescribe(
                     settings = parsed,
-                    localServers = parseLocalProviders(reply),
+                    localProviders = parseLocalProviders(reply),
                     failure = if (parsed == null) "The host's settings reply was not a settings document" else null,
                 )
             },
             onFailure = { error ->
                 HostDescribe(
                     settings = null,
-                    localServers = emptyMap(),
+                    localProviders = emptyMap(),
                     failure = when (error) {
                         is DshAuthException -> "Not signed in"
                         else -> error.message ?: "Could not read the host's settings"
@@ -2390,78 +2406,61 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             },
         )
 
-    // -------------------------------------------------------- local model server
+    // ------------------------------------------------------------- llama router
 
     /**
-     * Ask the host to reach the local endpoint behind the session's route.
+     * Ask the host to report the llama.cpp router behind the session's route.
      *
-     * This is the only live fact about a local model server this client can obtain,
-     * and it is the host doing the measuring: `llm/discoverModels` opens the
-     * declared `baseURL` and reads its model list with a single `GET
-     * <baseURL>/models`. Probed on 0.2.0-rc.2, a dead port answers
-     * `llm/model-discovery-rejected` / `could not reach <url>` and the live router
-     * answers the ids it advertises — so both a "yes" and a "no" here are
-     * measurements, not guesses, provided the provider is not named in the request.
-     * `discoverModelsArgs` carries the probed reason why (naming it lets the host
-     * answer from its own catalogue without touching the network), and the request
-     * is a bare GET, so this can never load a model.
+     * Two host-performed reads, and the order is deliberate:
      *
-     * `rpcRaw`, not `rpc`: the answer is a bare array of `{id, name}`, which `rpc`
-     * would read as an object and hand back empty.
+     *  1. **`localRouter/status`** — the method specified in `docs/HANDOFF.md` for
+     *     exactly this question. When a host offers it, one call answers *both*
+     *     halves: whether the router is reachable, and what it reports about load
+     *     and prefill. **No host offers it today**, so this call currently answers
+     *     `not found` and the fallback below runs instead.
+     *  2. **`llm/discoverModels`** — the always-present check. It opens the declared
+     *     `baseURL` and reads its model list with a single `GET <baseURL>/models`.
+     *     A dead port answers `llm/model-discovery-rejected` / `could not reach
+     *     <url>` and the live router answers the ids it advertises, so both a "yes"
+     *     and a "no" here are measurements. `discoverModelsArgs` carries the probed
+     *     reason the provider must not be named (naming it lets the host answer from
+     *     its own catalogue without touching the network), and the request is a bare
+     *     GET, so this can never load a model.
+     *
+     * The fallback is taken **only** for `not found` / HTTP 404 — a fact about the
+     * host's composition, not about the router. Any other failure from the status
+     * call is a verdict on the router and is reported as one: falling back there
+     * would replace a real "could not reach it" with a weaker answer and hide which
+     * call actually failed.
+     *
+     * [UiState.routerStatusOffered] latches the absence so the doomed call is made
+     * once per app run rather than on every visit to the tab. It is in-memory, so a
+     * host that gains the plugin is picked up by restarting the app — the same
+     * lifetime the drawer's content-search latch has, and for the same reason.
+     *
+     * `rpcRaw`, not `rpc`: `llm/discoverModels` answers a bare array of `{id, name}`,
+     * which `rpc` would read as an object and hand back empty.
      *
      * Nothing here starts, stops or reconfigures anything. The one plugin that could
      * (`localLlm/getState`, `dsh-local-llm-controller`) runs its *own* llama-server
-     * and reports its own process — on this host it reads `stopped` while the
-     * routers are in fact serving — so its status is not this server's status and
-     * is deliberately not shown.
+     * and reports its own process — on this host it reads `stopped` while both
+     * routers are in fact serving — so its status is not the router's status and is
+     * deliberately not shown.
      */
-    fun checkLocalServer() {
-        if (localProbeJob?.isActive == true) return
-        val target = _ui.value.localServerTarget ?: return
-        localProbeJob = viewModelScope.launch {
+    fun checkRouter() {
+        if (routerProbeJob?.isActive == true) return
+        val target = _ui.value.routerTarget ?: return
+        routerProbeJob = viewModelScope.launch {
             _ui.value = _ui.value.copy(
-                localProbe = LocalProbeRecord(
+                routerProbeRecord = RouterProbeRecord(
                     provider = target.provider.id,
                     model = target.modelId,
-                    result = LocalServerProbeResult.Checking,
+                    result = RouterProbeResult.Checking,
                 ),
             )
-            val outcome = runCatching {
-                client.rpcRaw("llm/discoverModels", discoverModelsArgs(target))
-            }.fold(
-                onSuccess = { value ->
-                    LocalServerProbeResult.Reachable(
-                        modelIds = advertisedModelIds(value),
-                        atMillis = System.currentTimeMillis(),
-                    )
-                },
-                onFailure = { error ->
-                    val code: String
-                    val message: String
-                    when (error) {
-                        is DshRpcException -> {
-                            code = error.code
-                            message = error.message
-                        }
-
-                        is DshAuthException -> {
-                            code = ""
-                            message = "Not signed in"
-                        }
-
-                        else -> {
-                            code = ""
-                            message = error.message ?: "Could not reach the host"
-                        }
-                    }
-                    LocalServerProbeResult.Unreachable(
-                        message = localServerFailureText(code, message),
-                        atMillis = System.currentTimeMillis(),
-                    )
-                },
-            )
+            val outcome = readRouterStatus(target)
             _ui.value = _ui.value.copy(
-                localProbe = LocalProbeRecord(
+                routerProbeRecord = RouterProbeRecord(
                     provider = target.provider.id,
                     model = target.modelId,
                     result = outcome,
@@ -2469,6 +2468,62 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
     }
+
+    /**
+     * The status call, then the discovery call when — and only when — the host does
+     * not have the status call.
+     */
+    private suspend fun readRouterStatus(target: RouterTarget): RouterProbeResult {
+        if (_ui.value.routerStatusOffered) {
+            val attempted = runCatching { client.rpc(ROUTER_STATUS_METHOD, routerStatusArgs(target)) }
+            val outcome = classifyRouterStatus(
+                value = attempted.getOrNull(),
+                failure = attempted.exceptionOrNull()?.let(::rpcFailure),
+            )
+            when (outcome) {
+                is RouterStatusOutcome.Reported -> return RouterProbeResult.Reachable(
+                    modelIds = outcome.load.models.map { it.id },
+                    load = outcome.load,
+                    atMillis = System.currentTimeMillis(),
+                )
+                // A real verdict on the router, or a reply this client cannot read.
+                // Neither is a reason to ask the weaker question and quietly drop the
+                // readout: the tab says which of the two happened.
+                is RouterStatusOutcome.Refused -> return RouterProbeResult.Unreachable(
+                    message = outcome.message,
+                    atMillis = System.currentTimeMillis(),
+                )
+                // Absent, not broken: remember it so the next visit does not pay for a
+                // call this host is known not to answer.
+                RouterStatusOutcome.NotOffered ->
+                    _ui.value = _ui.value.copy(routerStatusOffered = false)
+            }
+        }
+        val discovered = runCatching { client.rpcRaw("llm/discoverModels", discoverModelsArgs(target)) }
+        return discovered.fold(
+            onSuccess = { value ->
+                RouterProbeResult.Reachable(
+                    modelIds = advertisedModelIds(value),
+                    atMillis = System.currentTimeMillis(),
+                )
+            },
+            onFailure = { error ->
+                val failure = rpcFailure(error)
+                RouterProbeResult.Unreachable(
+                    message = routerFailureText(failure.code, failure.message),
+                    atMillis = System.currentTimeMillis(),
+                )
+            },
+        )
+    }
+
+    /** One failed RPC, with the auth case named as itself rather than as a code. */
+    private fun rpcFailure(error: Throwable): RouterCallFailure =
+        when (error) {
+            is DshRpcException -> RouterCallFailure(error.code, error.message)
+            is DshAuthException -> RouterCallFailure("", "Not signed in")
+            else -> RouterCallFailure("", error.message ?: "Could not reach the host")
+        }
 
     /** The model ids one `llm/discoverModels` answer advertises, in the endpoint's own order. */
     private fun advertisedModelIds(value: Any?): List<String> {
