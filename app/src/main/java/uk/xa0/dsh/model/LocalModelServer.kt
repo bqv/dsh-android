@@ -120,8 +120,16 @@ data class LocalServerTarget(
     /** Declared modalities: the model's own list, else the provider's default. */
     val input: List<String> get() = model?.input?.takeIf { it.isNotEmpty() } ?: provider.defaultInput
 
-    /** Whether the profile declares any credential at all. */
-    val authenticated: Boolean get() = authHeader != null || headerNames.isNotEmpty()
+    /**
+     * Whether the profile declares any credential at all.
+     *
+     * A fact about the *profile*, not about this route, so both halves are read off
+     * [provider]: `headers` is where the host puts the per-request credential, and
+     * only its presence is ever reported — the value is [LocalProvider.authHeader]
+     * and is never rendered.
+     */
+    val authenticated: Boolean
+        get() = provider.authHeader != null || provider.headerNames.isNotEmpty()
 }
 
 /**
