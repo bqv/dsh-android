@@ -551,122 +551,14 @@ when the terminal route was found:
   — `端口 … 已有服务在运行（/health 返回 ok）`.
   **It can only spawn its own child, and it will not start beside one.**
 
-### The optional cheaper route: `localRouter/status`
+### Plugins are not a route
 
-**Not implemented, and no longer needed.** The terminal readout above supplies the
-same state on this host today. This spec is kept because a host that composes the
-method answers in one round trip and never needs a terminal, and the app already
-prefers it: `readRouterStatus` tries `localRouter/status` first, then the terminal
-readout, then `llm/discoverModels`.
-
-It is a sibling of `llm/discoverModels`, not an extension of it: same argument
-shape, same "the host does the HTTP", but a namespace a standalone plugin can own
-without patching `dsh-llm` core.
-
-**How the client detects its absence**, measured: the carrier answers an uncomposed
-method with HTTP **404**, `content-type: text/plain`, body exactly `not found` (no
-trailing newline). `DshClient.rpcRaw` fails to parse that as JSON and throws
-`DshRpcException("http/404", "not found")`; `isMethodAbsent` matches on either half.
-That response is the *only* one the client falls back from — any other failure is
-reported as a verdict on the router, so a plugin that exists but misfires can never
-be mistaken for one that was never installed.
-
-**Request** — `POST /api/localRouter/status`, body
-`{"type":"client-request","rpcId":"x","method":"localRouter/status","payload":{"args": …}}`:
-
-```json
-{
-  "settingsNs": "llm-pi-ai",
-  "request": {
-    "baseURL": "http://127.0.0.1:55555/v1",
-    "api": "openai-completions",
-    "apiKey": "…"
-  }
-}
-```
-
-| Argument | Required | Meaning |
-| --- | --- | --- |
-| `settingsNs` | yes | The settings namespace the provider profile lives in; mirrors `llm/discoverModels` so one args-builder serves both. |
-| `request.baseURL` | yes | The endpoint to interrogate — the profile's own, so the probe asks the router a real request would use. |
-| `request.api` | no | The wire protocol; accepted for symmetry, unused by this method. |
-| `request.apiKey` | no | A `Bearer` credential, used verbatim as the `Authorization` header. |
-
-**The plugin must not name a provider**, for the reason recorded above: a
-`provider` field would let the answer come from a shipped catalogue instead of the
-router. It should reject an unknown `provider` rather than ignore it.
-
-**Reply** — the host performs, in this order and no other:
-
-1. `GET <baseURL>/props`
-2. `GET <baseURL>/models`
-3. `GET <baseURL>/slots?model=<id>` — **only** when step 2 reported exactly one model
-   with `status.value == "loaded"` (or `"loading"`). Never for an unloaded model:
-   see the autoload trap above.
-
-```json
-{
-  "ok": true,
-  "value": {
-    "reachable": true,
-    "checkedAt": 1791587528123,
-    "role": "router",
-    "maxInstances": 1,
-    "modelsAutoload": true,
-    "models": [
-      { "id": "Qwen3.5-35B-A3B-UD-IQ4_XS", "status": "unloaded" },
-      { "id": "Qwen3.8-27B-abliterated-120k", "status": "loaded",
-        "contextSize": 122880, "childPort": 43723 },
-      { "id": "Spark-X2.5-4B-Q4_K_M", "status": "loading" }
-    ],
-    "slots": {
-      "model": "Qwen3.8-27B-abliterated-120k",
-      "nCtx": 122880,
-      "entries": [
-        { "id": 0, "isProcessing": true, "promptTokens": 38893,
-          "promptTokensProcessed": 1032, "promptTokensCache": 37639,
-          "decoded": 222, "remaining": 16162 }
-      ]
-    }
-  }
-}
-```
-
-| Field | Source | Notes |
-| --- | --- | --- |
-| `reachable` | — | `true` on this reply; the failure shape below is the only other outcome. |
-| `checkedAt` | host clock | Epoch ms. The tab timestamps every reading, so a fresh one is required per call. |
-| `role` | `/props` `role` | `"router"` on this box. |
-| `maxInstances` | `/props` `max_instances` | |
-| `modelsAutoload` | `/props` `models_autoload` | |
-| `models[]` | `/v1/models` `data[]` | **In the router's own order**, id and `status.value` verbatim. Do not narrow `status` to an enum — the client shows an unfamiliar word as itself. |
-| `models[].contextSize` | `status.args` `--ctx-size` | Omit when the model is not loaded, or the flag is absent. |
-| `models[].childPort` | `status.args` `--port` | The **child instance's** port, not the router's. |
-| `slots.model` | — | The id whose `/slots` these are. |
-| `slots.unread` | — | **Optional, and the client now honours it.** A sentence saying why no slot reading is included, for a plugin that withheld the request. Without it an omitted `slots` reads as "the router reported no slots", which is a different fact — the terminal readout always sets it (it becomes `RouterLoad.slotsUnread`). |
-| `slots.nCtx` | `/slots[0].n_ctx` | |
-| `slots.entries[]` | `/slots[]` | `id`, `is_processing`, `n_prompt_tokens` → `promptTokens`, `n_prompt_tokens_processed` → `promptTokensProcessed`, `n_prompt_tokens_cache` → `promptTokensCache`, `next_token[0].n_decoded` → `decoded`, `next_token[0].n_remain` → `remaining`. |
-
-**Failure** — one shape, and the message must name the URL that failed:
-```json
-{ "ok": false, "error": { "code": "local-router/unreachable",
-  "message": "could not reach http://127.0.0.1:55599/v1/models" } }
-```
-
-Requirements, in the order they matter:
-
-1. **Read-only.** No `start`, no `stop`, no load. In particular the plugin must not
-   touch `/slots` for a model that is not already resident — the autoload trap.
-2. **Never a guessed number.** If a field cannot be read, omit it. The client renders
-   absent as absent and a wrong number as a fact.
-3. **One round of HTTP, no caching.** The tab exists to answer "now"; a cached report
-   would carry `checkedAt` from a moment that is not this one.
-4. **Loopback only, and no `provider` argument.** The method exists to interrogate a
-   router the host runs; it must not become a general fetch of an arbitrary URL.
-
-Memory, VRAM and throughput are deliberately **not** in this reply. They were not
-asked for, and adding them would mean inventing fields from a router that does not
-report them in this document.
+The terminal readout above is the supported path. An earlier draft specified a
+`localRouter/status` host plugin as a cheaper alternative; the user has ruled that out
+("at most we'd proxy things through nginx, but we won't"), so the spec is gone. The
+client still tries that method first and latches its absence, because it costs one
+refused call per app run and it keeps a broken plugin distinguishable from an absent
+one.
 
 ## Open items
 
