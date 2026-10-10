@@ -77,35 +77,85 @@ class RouterReadoutTest {
     @Test
     fun `read line asks for props and the model listing in one write`() {
         val line = routerReadoutReadLine("http://127.0.0.1:55555")
-        // One write, because a write is a PTY round trip and the two requests share it.
-        assertEquals("one newline-terminated command", 1, line.count { it == '\n' })
-        assertTrue(line.contains("'http://127.0.0.1:55555/props'"))
-        assertTrue(line.contains("'http://127.0.0.1:55555/v1/models'"))
+        val where = "the read line was: $line"
+
         assertTrue(line.contains(RouterReadoutMarkers.PROPS_BEGIN))
         assertTrue(line.contains(RouterReadoutMarkers.MODELS_HTTP))
         assertTrue(line.contains(RouterReadoutMarkers.READ_END))
+
+        // Both URLs, each as ONE single-quoted shell word with its suffix inside the
+        // quotes. Quoting only the root and appending "/props" outside them is also
+        // valid shell and nothing there is exploitable — but it is a second rule, and
+        // the two builders disagreed about it until this assertion caught them.
+        assertTrue(
+            "expected the /props URL quoted whole: 'http://127.0.0.1:55555/props'; $where",
+            line.contains("'http://127.0.0.1:55555/props'"),
+        )
+        assertTrue(
+            "expected the /v1/models URL quoted whole: 'http://127.0.0.1:55555/v1/models'; $where",
+            line.contains("'http://127.0.0.1:55555/v1/models'"),
+        )
+
+        // One command line, so the two requests are one execution and one PTY round
+        // trip. **This cannot prove the transport makes a single write call** — the
+        // write count is `readOnce`'s structure, not this string's, and a JVM test
+        // cannot see a suspend network call. What it pins is that there is no second
+        // newline, which would make the second request its own command line and a
+        // separate prompt boundary. The single-write claim itself rests on
+        // `RouterReadoutTransport.readOnce` having exactly one `write` call for it.
+        assertEquals("one command line; $where", 1, line.count { it == '\n' })
+        assertTrue(
+            "both requests must be in the same command line, /props first — the model " +
+                "listing is what decides whether /slots may be asked for at all; $where",
+            line.indexOf("/props") in 0 until line.indexOf("/v1/models"),
+        )
+
+        // Exactly two requests, and no verb but GET. A third `curl` would mean the
+        // /slots read had been wired into this line unconditionally, which is the
+        // autoload trap the readout exists to avoid: it must be asked for separately,
+        // and only for a model the listing has already named as resident.
+        assertEquals("exactly two requests; $where", 2, Regex("curl ").findAll(line).count())
         // Each request is bounded and reports curl's own status, so a dead port is HTTP
         // 000 rather than an empty body that would read as "no models".
-        assertEquals(2, Regex("-m 5").findAll(line).count())
-        assertEquals(2, Regex("%\\{http_code\\}").findAll(line).count())
+        assertEquals(
+            "both requests bounded by -m 5; $where",
+            2, Regex("-m 5").findAll(line).count(),
+        )
+        assertEquals(
+            "both requests report their own status; $where",
+            2, Regex("%\\{http_code\\}").findAll(line).count(),
+        )
         // Read-only by construction: no other verb is in the line.
-        assertFalse(line.contains("POST"))
-        assertFalse(line.contains(" -X "))
+        assertFalse("must not POST; $where", line.contains("POST"))
+        assertFalse("must not pass a method; $where", line.contains(" -X "))
     }
 
     @Test
     fun `a base URL is quoted so nothing in it can run`() {
-        val line = routerReadoutReadLine("http://127.0.0.1:55555")
-        assertTrue(line.contains("'/props'"))
-        // Every URL is a single-quoted shell word, and a quote inside one is closed and
-        // re-opened rather than left to end the word early.
+        val plain = routerReadoutReadLine("http://127.0.0.1:55555")
+        assertTrue(
+            "the whole URL must be one quoted word: 'http://127.0.0.1:55555/props'; " +
+                "the read line was: $plain",
+            plain.contains("'http://127.0.0.1:55555/props'"),
+        )
+        // A quote inside the URL is closed and re-opened, so it cannot end the word
+        // early and let the rest of the URL run as shell. The expected text is what
+        // `shellQuote("http://127.0.0.1:55555'x/props")` produces, computed by hand from
+        // that rule rather than copied out of a failing run.
         val hostile = routerReadoutReadLine("http://127.0.0.1:55555'x")
-        assertTrue(hostile.contains("'http://127.0.0.1:55555'\\''x'/props"))
-        // The model id is percent-encoded *before* it is quoted, so a quote in it never
-        // reaches the shell as a quote at all — belt and braces, and the reason the
-        // encoding is written out rather than borrowed from form encoding.
+        assertTrue(
+            "a quote in the root must be closed and re-opened around it, giving " +
+                "'http://127.0.0.1:55555'\\''x/props'; the read line was: $hostile",
+            hostile.contains("'http://127.0.0.1:55555'\\''x/props'"),
+        )
+        // The same rule in the other builder: the model id is percent-encoded *before*
+        // it is quoted, so a quote in it never reaches the shell as a quote.
         val encoded = routerReadoutSlotsLine("http://127.0.0.1:55555", "x'y")
-        assertTrue(encoded.contains("slots?model=x%27y"))
+        assertTrue(
+            "a quote in a model id must be percent-encoded, giving slots?model=x%27y; " +
+                "the slots line was: $encoded",
+            encoded.contains("slots?model=x%27y"),
+        )
     }
 
     @Test
