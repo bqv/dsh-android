@@ -43,7 +43,7 @@ import org.json.JSONObject
  * **But the app does reach the router's state — through a terminal on the host.** The
  * route that needs no plugin, no tunnel, no listener and no exposure was found and
  * implemented on 2026-10-10: `model/RouterReadout.kt` and `net/RouterReadoutTransport.kt`
- * open a terminal in the session through the `terminal/*` Remote namespace the app
+ * open a terminal in the session through the `terminal/<method>` Remote namespace the app
  * already drives for the Shell tab, run `curl` on the host's own loopback, and read the
  * answer back from the `terminal/follow` output stream. Measured from a throwaway
  * session against both live routers: `/props` + `/v1/models` in one write at 24 ms,

@@ -587,6 +587,22 @@ report them in this document.
   kills anything started by hand, so check `rc-service --user emulator status`
   before assuming a device is up.
 
+## trap: Kotlin's root error is listed LAST
+
+Kotlin's frontend reports downstream cascades first and the actual cause last. A single
+`Unclosed comment` at the end of one file produced **134** "Unresolved reference" errors across
+five others (`DshViewModel` 54, `RouterTab` 56, `RouterReadout` 15, …), and reading the first
+ten lines showed only the cascades — three times in one night, with a `*/`-eating `/*` inside a
+KDoc each time (a glob like `llm/*` or `terminal/*` in prose).
+
+**Read the whole error list, and filter for what is *not* a cascade first:**
+
+    grep "^e: " BUILD.log | grep -viE "unresolved reference" | head
+
+`Unclosed comment`, `Expecting`, and `@Composable invocations can only happen…` are the shapes
+that name a real cause. Counting `/*` against `*/` in the file named by the last error settles
+it in seconds.
+
 ## trap: a missing instrument reads exactly like a finding
 
 Twice in one session I concluded "the app never receives X" from a diag file that had no
