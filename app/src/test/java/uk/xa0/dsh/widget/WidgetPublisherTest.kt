@@ -120,7 +120,7 @@ class WidgetPublisherTest {
      * `System.currentTimeMillis()` at the call site inside instrumented classes
      * (`AndroidInterceptors$SystemTimeInterceptor`), and in the PAUSED looper mode this
      * harness runs, that resolves through `ShadowPausedSystemClock.uptimeMillis()` —
-     * exactly the clock `ShadowSystemClock.advanceBy` advances. An implementation that
+     * which is NOT the clock `advanceBy` moves — see the note at the call below. An implementation that
      * kept the earlier instant instead of recording the loss would answer `confirmedAt`,
      * and one that zeroed the field would answer `0`; only the rule under test produces
      * `confirmedAt + 60_000`.
@@ -133,7 +133,10 @@ class WidgetPublisherTest {
         val confirmedAt = reading()?.needsYou?.asOf ?: 0L
         assertTrue("nothing was ever confirmed, so the test would prove nothing", confirmedAt > 0L)
 
-        ShadowSystemClock.advanceBy(Duration.ofMinutes(1))
+        // The wall clock, not `advanceBy`: that moves the uptime clock, while the
+        // publisher reads `System.currentTimeMillis()`. Advancing the wrong one left
+        // `now` unchanged and the assertion below failed on correct production code.
+        ShadowSystemClock.setCurrentTimeMillis(confirmedAt + 60_000L)
         publisher.needsYou(0, null, null, known = false)
 
         val withdrawn = reading()?.needsYou
