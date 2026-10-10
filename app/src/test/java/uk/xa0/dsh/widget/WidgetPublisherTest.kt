@@ -39,6 +39,9 @@ class WidgetPublisherTest {
     private val component: ComponentName get() = ComponentName(context, DshWidgetProvider::class.java)
     private val file: File get() = File(context.filesDir, WidgetPublisher.FILE_NAME)
 
+    /** A wall-clock instant the tests name, since none of them can move the real clock. */
+    private val confirmedAt = 1_700_000_000_000L
+
     private fun boundWidget() {
         shadowOf(AppWidgetManager.getInstance(context)).bindAppWidgetId(WIDGET_ID, component)
     }
@@ -247,6 +250,81 @@ class WidgetPublisherTest {
 
         assertTrue("a title the reader can see is a value that moved", file.isFile)
         assertEquals(listOf("Alpha renamed"), reading()?.running?.map { it.title })
+    }
+
+    /**
+     * The stagger, pinned with both instants supplied.
+     *
+     * This is the rule the feature's whole battery story rests on. The view model renews
+     * the running reading once a second, and before this gate every one of those renewals
+     * reached the launcher — an `updateAppWidget` binder call, a `RemoteViews` re-applied
+     * and a `Chronometer` base reset, up to 86,400 times a day, screen on or off, widget on
+     * screen or not. A renewal carrying the same values is not news:
+     * [WidgetSnapshot.sameValuesAs] ignores `asOf`, which is exactly what makes that true,
+     * so only a value that moved and the heartbeat may draw.
+     *
+     * `now` is supplied rather than waited for, for the reason [WidgetPublisher.stamped]
+     * records: this harness cannot move the wall clock (`ShadowSystemClock` offers
+     * `currentTimeMillis` and `advanceBy`, and `advanceBy` moves the uptime clock). The two
+     * instants are the entire input to the rule, so they are its parameters.
+     */
+    @Test
+    fun `a renewal with nothing new in it is not published`() {
+        val publisher = publisher()
+        val reading = WidgetSnapshot(working = WidgetReading(known = true, value = 2, asOf = confirmedAt))
+        val fresher = reading.copy(working = reading.working.copy(asOf = confirmedAt + 1_000L))
+
+        assertTrue(
+            "the first publication of a reading has to reach the card",
+            publisher.publishDue(reading, previous = null, writtenAt = 0L, now = confirmedAt),
+        )
+        assertFalse(
+            "a fresher instant for the same value is not news, and is what a one-second loop pushes",
+            publisher.publishDue(
+                fresher,
+                previous = reading,
+                writtenAt = confirmedAt,
+                now = confirmedAt + 1_000L,
+            ),
+        )
+        assertTrue(
+            "the heartbeat is what makes an unchanged reading worth saying again",
+            publisher.publishDue(
+                fresher,
+                previous = reading,
+                writtenAt = confirmedAt,
+                now = confirmedAt + WidgetPublisher.HEARTBEAT_MS,
+            ),
+        )
+    }
+
+    @Test
+    fun `a value that moved reaches the card at once, inside the heartbeat`() {
+        val publisher = publisher()
+        val before = WidgetSnapshot(needsYou = WidgetReading(known = true, value = 0, asOf = confirmedAt))
+        val after = before.copy(needsYou = WidgetReading(known = true, value = 1, asOf = confirmedAt + 1_000L))
+
+        assertTrue(
+            "an approval appearing cannot wait for the quarter hour",
+            publisher.publishDue(after, previous = before, writtenAt = confirmedAt, now = confirmedAt + 1_000L),
+        )
+    }
+
+    @Test
+    fun `a widget that has just been placed is drawn whatever the other rules say`() {
+        val publisher = publisher()
+        val reading = WidgetSnapshot(working = WidgetReading(known = true, value = 2, asOf = confirmedAt))
+
+        assertTrue(
+            "a widget with nothing on screen cannot wait a quarter of an hour for its first draw",
+            publisher.publishDue(
+                reading,
+                previous = reading,
+                writtenAt = confirmedAt,
+                now = confirmedAt + 1_000L,
+                forced = true,
+            ),
+        )
     }
 
     private companion object {

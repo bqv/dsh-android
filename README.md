@@ -454,9 +454,9 @@ socket resumes streaming instead of silently freezing the UI.
 
 - **DSH status**, a 3×2 card with three lines: what is waiting on you (an approval,
   a question or a plan review, ranked the way the drawer's status dot is), how much
-  is running, and the age of the **oldest** of those readings — the bound on how much
-  to trust the rest, labelled "oldest reading" rather than "checked", because a label
-  about the app's activity under a number about the lines above it describes the wrong
+  is running, and when the **oldest** of those readings was confirmed — the bound on how
+  much to trust the rest, labelled "oldest reading" rather than "checked", because a label
+  about the app's activity under a value about the lines above it describes the wrong
   thing. Tapping it opens the app on the session that most needs you, through the same
   `Attention.EXTRA_SESSION` path a notification uses.
 - Four things are deliberately **not** on it: the model/session a turn would run
@@ -466,13 +466,16 @@ socket resumes streaming instead of silently freezing the UI.
   ages worst of all), and per-session detail.
 - **"Not known" is never drawn as "nothing needs you."** Every reading is
   `(known, value, asOf)`, so an app that cannot currently hear the host says so, and
-  a reading nobody ever confirmed has no age invented for it.
-- **The age maintains itself.** The stamp is a `Chronometer` based on the reading's
-  instant, ticking in the launcher's own process: it keeps counting with nothing of
-  ours running, so a force-stop cannot leave a stale "just now" behind.
-- **Nothing is scheduled.** `updatePeriodMillis` is 0 and there is no `WorkManager`;
-  the app writes the snapshot while it runs, and when it does not run nothing happens
-  and the age says so. No widget placed means no file write at all.
+  a reading nobody ever confirmed has no instant invented for it.
+- **The stamp maintains itself.** It is the reading's instant written out as a date and a
+  time — complete when it is drawn and true from then on, with nothing ticking in the
+  launcher to keep it that way and nothing of ours alive to withdraw it. The date is
+  always there because a bare clock time would read as fresh after a day.
+- **Nothing is scheduled, and nothing re-renders on a timer.** `updatePeriodMillis` is 0
+  and there is no `WorkManager`; the app writes the snapshot and redraws the card while it
+  runs, at most once per quarter hour unless a reading actually moves, and when it does
+  not run nothing happens and the stamp says when it last did. No widget placed means no
+  file write at all.
 
   The design record — what was cut and why, and what is still unverified — is
   `docs/WIDGET.md`.
@@ -541,8 +544,9 @@ is left alone.
   while it has a socket. An approval that arrives after the process is gone is never
   on the card — it cannot be, because the host has already failed the waterfall by
   then — and after a force-stop its alarms would be cancelled even if it tried to
-  schedule one, which is why the card carries a self-ticking age instead. See
-  `docs/WIDGET.md`.
+  schedule one, which is why the card carries the instant of its oldest reading
+  instead: a fact that cannot go stale, needing nothing to be woken to keep it true.
+  See `docs/WIDGET.md`.
 
 ## Repository map
 

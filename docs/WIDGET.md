@@ -18,7 +18,7 @@ Approval waiting            <- headline: what is waiting on a human
 · Fix the login bug
 · Widget sessions
 +2 more                     <- what the list had no room for
-oldest reading 0:12 ago     <- stamp: a bound over every line above
+oldest reading 11 Oct 12:03 <- stamp: when the oldest line above was confirmed
 ```
 
 and a tap target on every line: each named row opens *its own* session, and the card
@@ -27,9 +27,9 @@ notification already uses (`Attention.EXTRA_SESSION`).
 
 The footer's word is load-bearing. It read `checked 0:12 ago` in the first draft, and that
 was the wrong sentence: it describes when the *app* last looked, which a reader takes as
-"the app is live and nothing is wrong", while the number under it is the age of the
+"the app is live and nothing is wrong", while the value under it is a fact about the
 *oldest* reading on the card — the worst line, and the one that bounds how much any of
-them may be trusted. `oldest reading` says what the number is. The copy layer could name
+them may be trusted. `oldest reading` says what the value is. The copy layer could name
 *which* line is the oldest, and deliberately does not: the two readings are renewed by two
 different owners on two different clocks, so in the app's idle state the answer flips
 between "needs you" and "running" every quarter hour for no reason a reader could act on,
@@ -84,8 +84,8 @@ device is unverified.
 
 The names live in the snapshot, not in a second source of truth, and they are covered by
 the `working` reading rather than by a stamp of their own: they are the detail *of* that
-reading, taken from the same roster pull at the same instant, so the age in the footer
-bounds them already. When the reading loses its basis the names go with it — the publisher
+reading, taken from the same roster pull at the same instant, so the instants in the footer
+bound them already. When the reading loses its basis the names go with it — the publisher
 drops them and the card says `Running: unknown` — because a list of names under a reading
 the app can no longer assert is exactly the stale-and-quietly-wrong card this feature
 exists to prevent.
@@ -143,13 +143,16 @@ covers them: when it falls the publisher drops the names and the card says
 `Running: unknown`, because an empty list and an unknown one must never be drawn the same
 way.
 
-### The age is a ticking view, not a number we maintain
+### The stamp is an instant, not a ticking view
 
 `RemoteViews` has no rich text and no live update, and the three ways to keep a claim
 from rotting are not equal:
 
-1. **Print a wall-clock time** (`as of 14:32`). Never a lie, but the reader has to do
-   arithmetic, and nothing on the card says the number above it has expired.
+1. **Print a wall-clock instant** (`oldest reading 11 Oct 12:03`). Complete when it is
+   written and true forever after, because it claims nothing that time can take away. The
+   reader does the subtraction, against the clock already on the same screen. Costs
+   nothing per second and needs no wake-up to correct, because there is nothing to
+   correct.
 2. **Schedule a wake-up to withdraw the claim** (an `AlarmManager` alarm at the moment
    the reading goes stale). Correct while it works — and it does not always work.
    A force-stopped app has its alarms cancelled *and* its receiver disabled, so the
@@ -158,24 +161,73 @@ from rotting are not equal:
 3. **A `Chronometer` whose base is the reading's instant.** It ticks up in the
    *launcher's* process, so the age stays true with nothing of ours alive. It cannot be
    left behind, because there is nothing to leave: the age is derived from a timestamp at
-   the moment it is drawn, not written down. This is also the one premise of the design
-   that can be checked without a device, and it was: `android.widget.Chronometer` carries
-   the `android.widget.RemoteViews$RemoteView` runtime annotation in the API 34
-   `android.jar`, which is what the host inspects before it will inflate a view inside a
-   widget (`javap -v` on the platform jar).
+   the moment it is drawn, not written down.
 
-This uses (3). `oldest reading 0:12 ago` becomes `oldest reading 3:41:07 ago` by itself, and the
-headline above it is read against it. What the card never does is claim *now*: there is
-no "live" lamp and no "connected" badge, because both would need (2) to be withdrawn and
-(2) has a hole in it.
+This uses (1). (3) was how this widget was first written, and it was then removed rather
+than tuned; the reason is worth recording in full, because it was a good design and it is
+tempting to put back:
 
-While the app *is* running it renews the stamp, so the age stays small and means "the app
-was still listening a quarter of an hour ago at the outside" rather than "nothing has
-changed since whenever". `WidgetPublisher.HEARTBEAT_MS` is fifteen minutes because that
-is `AttentionCenter.QUESTION_TIMEOUT_MS`: the window in which a waterfall can still be
-answered, and therefore the window in which a count on a homescreen is still actionable.
-The named rows do not get a stamp of their own: they are the detail of the `working`
-reading, from the same pull at the same instant, so the footer already bounds them.
+- **The tick is once a second and cannot be slowed.** `Chronometer.updateRunning` gates
+  on `mVisible && mStarted && isShown()` and, when all three hold, calls
+  `postDelayed(mTickRunnable, 1000)`. A hardcoded second: not a parameter, and no
+  `RemoteViews` call reaches it. "Staggering" a `Chronometer` is not a thing that exists.
+- **A widget cannot bound it either.** The launcher owns the view, and the only lever
+  `RemoteViews.setChronometer` has is the one-way `started` flag baked into the blob when
+  it is applied. `started = false` is not "tick slowly", it is "print the age at the
+  instant this blob was applied, then stop": the first apply of a healthy reading prints
+  `0:00 ago`, and with no process of ours alive to re-apply it, that is what the card says
+  until the launcher happens to re-bind it. That is precisely the stale-and-quietly-wrong
+  card this design exists to prevent, so it is not an option — the two positions are
+  *ticking* and *frozen*, and only one of them is honest.
+- **What it does not cost is a wake-up.** The framework bounds it already: the ticker
+  only runs while the widget is actually shown. `Chronometer.onWindowVisibilityChanged`
+  clears `mVisible` whenever the app's window is not visible — `ViewRootImpl.performTraversals`
+  dispatches that from `getHostVisibility()`, which is `GONE` while `mAppVisible` is
+  false — so with the screen off, or the launcher behind another app, there is no ticker
+  at all. The standing cost is one extra `TextView` relayout per second in the launcher
+  while somebody is looking at a home screen that has this card on it.
+- **And that relayout buys nothing.** The difference between an age of 3:41:07 and
+  3:41:08 is not a difference a reader can act on; the difference between *today* and
+  *three days ago* is the entire question the footer answers, and an instant answers it
+  exactly. A per-second redraw for a number whose rate of change is uninformative is work
+  done for its own sake.
+
+(3) also carried a trap that cost a real homescreen, and it is worth keeping on the record
+because the shape of it is not obvious: a `Chronometer` counts from a
+`SystemClock.elapsedRealtime()` base, not a wall-clock one, so a card handed
+`System.currentTimeMillis()` made the launcher compute `uptime - wallClock` and drew
+`oldest reading -406865:16:56` — a negative age of roughly the forty-six years between
+1970 and the machine's uptime. The conversion that fixed it (`chronometerBase`, clamped at
+both ends) was correct and exactly testable, and it is the one thing worth regretting about
+deleting the view. With no view there is no second clock, so there is no longer a timebase
+to get wrong; the only clocks left on this card are the reader's own.
+
+An instant also removes the failure mode a ticking view was uniquely built to survive,
+by removing the thing that could be left behind: nothing has to be kept true, so nothing
+can be left untrue. What the card never does is claim *now*: there is no "live" lamp and
+no "connected" badge, because both would need (2) to be withdrawn and (2) has a hole in
+it. An instant claims only the past, and the past does not change.
+
+Two details of the format are load-bearing and both are in `WidgetCopy.stampTime`:
+
+- **The date is always written.** A clock time is unambiguous only inside its own day, and
+  the card is drawn once and then read at a moment it cannot know and cannot be woken for.
+  `12:03` drawn yesterday reads as seven minutes old to somebody glancing at the card just
+  after noon, and nothing would ever correct it. That was the one thing a relative age was
+  genuinely better at; the date is what an instant pays for it.
+- **It is the reader's zone and the reader's month name**, from `Locale.getDefault()` and
+  `TimeZone.getDefault()`, because the stamp is a wall-clock reading for the person holding
+  the phone — but the *order* (`d MMM HH:mm`) is the app's, matching the `d MMM` the
+  drawer's own `relativeTime` falls back to, so the two surfaces write a date the same way.
+
+While the app *is* running it re-stamps and re-draws, so the instant in the footer stays
+inside the heartbeat and means "the app was still listening a quarter of an hour ago at the
+outside" rather than "nothing has changed since whenever". `WidgetPublisher.HEARTBEAT_MS`
+is fifteen minutes because that is `AttentionCenter.QUESTION_TIMEOUT_MS`: the window in
+which a waterfall can still be answered, and therefore the window in which a count on a
+homescreen is still actionable. The named rows do not get a stamp of their own: they are
+the detail of the `working` reading, from the same pull at the same instant, so the footer
+already bounds them.
 
 ## How it updates
 
@@ -187,12 +239,23 @@ Nothing is scheduled. `updatePeriodMillis` is **0**.
   that already watches the mux, handing over every running session and its title.
   `WidgetPublisher` collapses all of that into a file write and a widget update at most
   once per `HEARTBEAT_MS`, or immediately when a value moves — and a rename is a value
-  moving, because the title is a thing the card draws. The write is off the main thread and
-  coalesced through a conflated channel.
+  moving, because the title is a thing the card draws. The write and the draw are off the
+  main thread and coalesced through a conflated channel.
+
+  That collapse is now real on **both** halves, and the gap between them is the largest
+  cost this feature ever had. The write was gated on the heartbeat and the *draw* was not,
+  so every renewal of the one-second loop became an `updateAppWidget`: a binder call into
+  the system service, which then re-applied a `RemoteViews` in the launcher's process —
+  up to 86,400 a day for as long as the app held its socket, screen on or off, widget on
+  screen or not. `WidgetPublisher.publishDue` is that gate, and it sits in front of
+  `getAppWidgetIds` too, so a phone with no widget placed is no longer asked once a second
+  either. This is what "staggering" the widget actually turned out to mean: the ticking
+  view could not be staggered, and did not need to be, because the cost that could be
+  removed was entirely our own.
 - **When the app is not running**, nothing at all happens. Every number on the card
   arrived over a socket; a wake-up could only re-read the same file and draw the same
-  bytes, one interval older. The age the launcher is already ticking is what carries the
-  staleness, and it needs no alarm, no `JobScheduler`, no `WorkManager` and no
+  bytes, one interval older. The instant the card already carries is what says how old it
+  is, and it needs no alarm, no `JobScheduler`, no `WorkManager` and no
   `RECEIVE_BOOT_COMPLETED`.
 - **If no widget is placed**, the publisher writes nothing and updates nothing. The
   reading is still held in memory, so adding a widget draws what this run already knows;
@@ -202,7 +265,8 @@ Measured comparison, for the record: `updatePeriodMillis` would cost up to 48 pr
 wake-ups a day *whether or not the app has anything to say*, on a device where the whole
 point of the battery-exemption dance is that the process should not be roused for
 nothing. This design costs one widget update per quarter hour, and only while a widget is
-placed and the app already has a socket open.
+placed and the app already has a socket open. Nothing here ticks, per second or per
+minute, in either process.
 
 ## Where the state lives, and who writes it
 
@@ -229,9 +293,9 @@ DshViewModel ────┘        (the one writer)                            
   to "not known" until the app next ran, and this change does not need that. The version
   exists for documents a build cannot read at all.
 - **Seeded from the last run at construction.** A restart does not make yesterday's
-  reading false, it makes it old, which is what the age already says. Starting from
+  reading false, it makes it old, which is what its instant already says. Starting from
   nothing would instead claim that nothing was ever seen, which is a *worse* lie than an
-  old number. The names come back with it, and are drawn under the new age like every
+  old number. The names come back with it, and are drawn under the new stamp like every
   other reading.
 
 ## Why this is plain `RemoteViews` and not Glance
@@ -249,13 +313,15 @@ Established before anything was written, because it decides the whole shape of t
 - **`minSdk` is not the obstacle.** The `glance-appwidget:1.1.0` AAR declares
   `minSdkVersion="21"`, comfortably below this app's 26. Availability is the obstacle, not
   the API level.
-- **Glance could not express this design anyway.** Its primitives cannot tick: a Glance
-  widget re-renders when it is told to, which is precisely the wake-up that a force-stopped
-  app never receives. The only route to a `Chronometer` is `AndroidRemoteViews`
-  (`AndroidRemoteViewsKt` is in that AAR), which takes a hand-built `RemoteViews` — the
-  fallback, wearing a dependency tree. Glance is a fine answer to "I want to write widget
-  layouts as composables"; this card is a handful of `TextView`s and a clock, and the clock
-  is the part Glance cannot give.
+- **Glance could not express this design anyway** — and it is no longer the design. Its
+  primitives re-render only when they are told to, which is precisely the wake-up that a
+  force-stopped app never receives; the only route to a `Chronometer` is
+  `AndroidRemoteViews` (`AndroidRemoteViewsKt` is in that AAR), which takes a hand-built
+  `RemoteViews` — the fallback, wearing a dependency tree. That mattered when the footer
+  was a live age. It does not any more: the footer is a string, which is the one thing
+  every widget toolkit can already draw. The conclusion is unchanged and now for a
+  smaller reason: this card is a handful of `TextView`s, and a dependency tree to write
+  five of them as composables buys nothing.
 
 So: a plain `AppWidgetProvider`, a plain XML layout, and no new dependency.
 
@@ -264,15 +330,25 @@ So: a plain `AppWidgetProvider`, a plain XML layout, and no new dependency.
 Written honestly, because an inferred number presented as measured is the failure this
 whole document is about:
 
-- **Nothing here has run on a device.** No build had been made when this was written. The
-  layout, the `Chronometer`, the provider registration and the `exported="true"` choice
-  are all reasoned from the platform's API and from what the shipped widgets on the test
-  handset declare (checked with `aapt2 dump xmltree` on a pulled APK), not observed.
-- **Whether a launcher keeps a widget `Chronometer` ticking** across its own process
-  restarts is not measured. That `Chronometer` is a `@RemoteView` — i.e. that a launcher
-  will inflate it at all — *is* measured (see above); that it goes on counting after the
-  launcher is restarted is documented behaviour, and the cached `RemoteViews` is what a
-  restarted launcher re-applies, but it has not been watched.
+- **The layout has been seen on a device, but only in its earlier shape.** The layout, the
+  provider registration and the `exported="true"` choice were reasoned from the platform's
+  API and from what the shipped widgets on the test handset declare (checked with
+  `aapt2 dump xmltree` on a pulled APK) rather than observed. Since then the card has
+  drawn itself on a real homescreen at least once — the `Chronometer` conversion bug
+  recorded above is only visible if it did — but the footer *this* build draws has not been
+  looked at. The `TextView` that replaced the `Chronometer` is the simplest view in the
+  layout, which is not a measurement either.
+- **The ticker's behaviour is read from the platform's own code, not watched on a
+  device.** Every claim in "The stamp is an instant, not a ticking view" about what a
+  `Chronometer` does — the `postDelayed(mTickRunnable, 1000)`, the
+  `mVisible && mStarted && isShown()` gate, `onWindowVisibilityChanged` clearing
+  `mVisible`, and `ViewRootImpl.performTraversals` dispatching that from
+  `getHostVisibility()` — comes from disassembling `android.widget.Chronometer`,
+  `android.view.View` and `android.view.ViewRootImpl` out of the Robolectric
+  `android-all` jar, which is AOSP framework code with real bodies (the SDK's own
+  `android.jar` is stubs). That the launcher is actually driven through those callbacks on
+  a given OEM build has not been watched, and neither has a `Chronometer` ticking on a
+  homescreen.
 - **No device verification of the card's appearance.** `app/src/main/res/layout/widget_dsh.xml`
   is asserted to inflate and to carry the right text, and *not* to look right: the JVM
   harness cannot see where text breaks (`docs/HANDOFF.md`), so `ellipsize`/`maxLines` and
@@ -283,7 +359,10 @@ whole document is about:
   card's height *inside* that tile is arithmetic over Roboto's font metrics
   (about 130 dp with three names, the `+N more` line and the footer), not a measurement,
   and a launcher that hands a 2-cell widget less than that would clip the footer.
-- **Text measurement on a widget of any width is unverified**, for the same reason.
+- **Text measurement on a widget of any width is unverified**, for the same reason. That
+  includes the footer's new width: `oldest reading 11 Oct 12:03` is about four characters
+  longer than `oldest reading 0:12 ago`, and the arithmetic over the 408 dp tile says it
+  fits with room to spare, which is still arithmetic.
 - **Whether a launcher delivers a tap to a child view inside a widget** — which is what
   every named row depends on — is not measured here. It is how `setOnClickPendingIntent`
   is specified to work and how the card's own single target already worked, and the request
@@ -294,9 +373,23 @@ whole document is about:
   through their parent's caret in the drawer, and `MainActivity.consume` →
   `DshViewModel.openSessionExplicit` does not distinguish them, so the tap should land; it
   has not been tried.
-- **The 15-minute heartbeat's battery cost is reasoned, not measured.**
+- **The battery argument is reasoned, not measured, and there was nothing to measure it
+  with.** No widget of this app is placed on either attached handset — read from
+  `dumpsys appwidget` on the disposable one and on the daily phone — and placing one is a
+  user action with no supported `adb` path, so neither the per-second `updateAppWidget`
+  this change removes nor a ticking `Chronometer` has ever been observed from here. What is
+  *not* guesswork is where the cost was: the draw gate is absent in the previous revision's
+  source and the one-second caller is in it (`DshViewModel.publishWidgetWorking`), and the
+  framework's tick interval is in its bytecode. Everything else — how much of a launcher's
+  CPU one extra `TextView` relayout costs per second, and what that is in mAh — is
+  arithmetic and judgement, not a reading from `batterystats`. The claim this change makes
+  is therefore the narrow one: a per-second binder call into the system service and a
+  per-second `RemoteViews` re-apply are gone, and nothing on the card re-renders on a timer
+  any more.
 - **`WidgetPublisher`'s dispatch is `Dispatchers.Unconfined` in tests and `Dispatchers.IO`
-  in the app**; the tests therefore exercise the publish decision, not the thread hop.
+  in the app**; the tests therefore exercise the decisions — `publishDue`'s among them —
+  and neither the thread hop nor the binder call the decisions lead to, which a JVM cannot
+  make.
 
 ## How to see it on the disposable handset
 

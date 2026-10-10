@@ -2,15 +2,14 @@ package uk.xa0.dsh.widget
 
 import android.content.Context
 import android.view.View
-import android.widget.Chronometer
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.junit.Assert.assertTrue
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
@@ -46,7 +45,7 @@ class WidgetRenderTest {
     private fun View.headline(): TextView = findViewById(R.id.widget_headline)
     private fun View.detail(): TextView = findViewById(R.id.widget_detail)
     private fun View.stamp(): TextView = findViewById(R.id.widget_stamp)
-    private fun View.age(): Chronometer = findViewById(R.id.widget_age)
+    private fun View.age(): TextView = findViewById(R.id.widget_age)
 
     private fun View.row(index: Int): TextView = findViewById(ROW_IDS[index])
     private fun View.moreRows(): TextView = findViewById(R.id.widget_row_more)
@@ -59,7 +58,7 @@ class WidgetRenderTest {
                 headline = "Approval waiting",
                 detail = "2 running · 1 subagent",
                 stampLabel = WidgetCopy.STAMP_OLDEST,
-                ageBase = at,
+                ageInstant = at,
                 level = WidgetLevel.ATTENTION,
             ),
         )
@@ -69,18 +68,36 @@ class WidgetRenderTest {
         // The literal, not the constant: the word on the card is the claim.
         assertEquals("oldest reading", view.stamp().text.toString())
         assertEquals(View.VISIBLE, view.age().visibility)
-        // The base is the reading's instant CONVERTED to the clock a Chronometer counts on,
-        // not the instant itself. Asserting `at` here is what let a real launcher draw
-        // "oldest reading -406865:16:56": the wall clock is not the base's timebase, and
-        // this test agreed with the bug. The render call uses the machine's real clocks, so
-        // the converted value cannot be predicted from here - the conversion itself is
-        // pinned exactly, with both clocks supplied, in ChronometerBaseTest.
-        val base = view.age().base
-        assertTrue("the base must not be the wall-clock instant", base != at)
-        assertTrue("a reading in the past must not give a negative age", base >= 0L)
-        assertTrue(
-            "the base is an uptime instant, so it cannot exceed the uptime it is measured against",
-            base <= android.os.SystemClock.elapsedRealtime(),
+        // The footer's value is the reading's own instant, written out — not a number the
+        // launcher has to derive. The format itself is pinned in WidgetStampTest, with the
+        // locale and the zone supplied; this is the wiring, which is the renderer's job.
+        assertEquals(WidgetCopy.stampTime(at), view.age().text.toString())
+    }
+
+    /**
+     * The stamp is a *value*, not a constant and not the current clock: two readings with
+     * different instants have to reach the card as two different stamps, and the one drawn
+     * is the one the copy layer chose (the oldest, `WidgetCopy.of`'s answer) rather than
+     * whatever the renderer had to hand.
+     */
+    @Test
+    fun `the footer prints the oldest reading's instant and not the clock`() {
+        val at = 1_700_000_000_000L
+        val view = draw(
+            WidgetCopy.of(
+                WidgetSnapshot(
+                    needsYou = WidgetReading(known = true, value = 1, asOf = at),
+                    working = WidgetReading(known = true, value = 0, asOf = at - 600_000L),
+                    subagents = WidgetReading(known = true, value = 0, asOf = at - 600_000L),
+                ),
+            ),
+        )
+
+        assertEquals(WidgetCopy.stampTime(at - 600_000L), view.age().text.toString())
+        assertNotEquals(
+            "the newer reading must not be the one that stamps the card",
+            WidgetCopy.stampTime(at),
+            view.age().text.toString(),
         )
     }
 
@@ -91,13 +108,13 @@ class WidgetRenderTest {
                 headline = WidgetCopy.NEEDS_UNKNOWN,
                 detail = WidgetCopy.RUNNING_UNKNOWN,
                 stampLabel = WidgetCopy.STAMP_OPEN,
-                ageBase = null,
+                ageInstant = null,
                 level = WidgetLevel.UNKNOWN,
             ),
         )
         assertEquals(WidgetCopy.NEEDS_UNKNOWN, view.headline().text.toString())
         assertEquals(WidgetCopy.STAMP_OPEN, view.stamp().text.toString())
-        assertEquals("no age may be drawn without an instant to count from", View.GONE, view.age().visibility)
+        assertEquals("no instant may be drawn when nothing was ever true", View.GONE, view.age().visibility)
     }
 
     @Test

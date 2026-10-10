@@ -8,7 +8,6 @@ import android.widget.RemoteViews
 import uk.xa0.dsh.Attention
 import uk.xa0.dsh.MainActivity
 import uk.xa0.dsh.R
-import android.os.SystemClock
 
 /**
  * Turns [WidgetText] into the `RemoteViews` a launcher draws.
@@ -80,23 +79,23 @@ object WidgetRenderer {
         views.setTextViewText(R.id.widget_stamp, text.stampLabel)
         views.setTextColor(R.id.widget_stamp, context.getColor(R.color.widget_text_stamp))
 
-        val base = text.ageBase
-        if (base == null) {
-            // "Open DSH to connect" is a sentence, not a moment: there is no age to
-            // tick because there is nothing that was ever true.
+        val instant = text.ageInstant
+        if (instant == null) {
+            // "Open DSH to connect" is a sentence, not a moment: there is no instant to
+            // print because there is nothing that was ever true.
             views.setViewVisibility(R.id.widget_age, View.GONE)
         } else {
             views.setViewVisibility(R.id.widget_age, View.VISIBLE)
-            // started = true is the whole honesty mechanism. The launcher's own
-            // Chronometer keeps counting with no process of ours alive, so the age
-            // cannot be left behind by a force-stop, an OEM kill or a reboot — the
-            // three cases where a scheduled "mark it stale" wake-up never arrives.
-            views.setChronometer(
-                R.id.widget_age,
-                chronometerBase(base),
-                "%s ago",
-                true,
-            )
+            // The reading's own instant, as a date and a time. Nothing on this card ticks.
+            // A `Chronometer` re-renders once a second inside the launcher's process for as
+            // long as the card is on a homescreen, and no widget-side call can slow that
+            // down or stop it: the launcher owns the view, and the only lever `RemoteViews`
+            // has is the one-way `started` flag — whose "off" position freezes the number
+            // at the instant it was applied and nothing of ours is alive to re-apply it,
+            // which is the stale-and-quietly-wrong card this whole design refuses. An
+            // instant needs none of that: it is already complete, so there is nothing to
+            // keep true. See `WidgetCopy.stampTime` for why it carries the date.
+            views.setTextViewText(R.id.widget_age, WidgetCopy.stampTime(instant))
         }
 
         views.setOnClickPendingIntent(R.id.widget_root, contentIntent(context, sessionId))
@@ -174,21 +173,3 @@ object WidgetRenderer {
         WidgetLevel.UNKNOWN -> R.color.widget_text_unknown
     }
 }
-
-/**
- * The base `RemoteViews.setChronometer` needs, from the wall-clock instant a reading carries.
- *
- * A [android.widget.Chronometer] counts from a `SystemClock.elapsedRealtime()` base, not from a
- * wall-clock one, so handing it `System.currentTimeMillis()` makes the launcher compute
- * `uptime - wallClock` — which drew `oldest reading -406865:16:56` on a real homescreen: a
- * negative age of roughly the forty-six years between 1970 and this machine's uptime. Both
- * clocks are parameters so the conversion is testable without a device, and the result is
- * clamped at BOTH ends: below zero a reading older than the boot would be counted from an
- * impossible pun, and above the uptime a reading in the future would make the launcher's
- * `elapsedRealtime() - base` negative in exactly the way this function exists to prevent.
- */
-internal fun chronometerBase(
-    wallInstant: Long,
-    now: Long = System.currentTimeMillis(),
-    uptime: Long = SystemClock.elapsedRealtime(),
-): Long = (uptime - (now - wallInstant)).coerceIn(0L, uptime)

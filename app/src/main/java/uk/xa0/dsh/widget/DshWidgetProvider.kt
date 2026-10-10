@@ -13,8 +13,8 @@ import uk.xa0.dsh.DshApplication
  * a timer — `updatePeriodMillis` is declared as zero in `xml/dsh_widget_info.xml` —
  * because nothing a periodic wake-up could learn has changed while the app is not
  * running. Every number this widget can show arrives over the app's own socket, and
- * when that socket is gone the honest answer is the age of the last reading, which
- * the launcher's Chronometer is already keeping.
+ * when that socket is gone the honest answer is the instant of the last reading, which
+ * the card already carries and which does not need to be kept true.
  *
  * Being `exported="true"` is the platform's own requirement for a provider that
  * declares an intent-filter, and is what every shipped widget on the test handset

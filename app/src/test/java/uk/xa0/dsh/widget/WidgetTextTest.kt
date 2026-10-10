@@ -46,7 +46,7 @@ class WidgetTextTest {
         assertEquals("Needs you: unknown", text.headline)
         assertEquals("Running: unknown", text.detail)
         assertEquals(WidgetCopy.STAMP_OPEN, text.stampLabel)
-        assertNull("there is no age because nothing was ever true", text.ageBase)
+        assertNull("there is no age because nothing was ever true", text.ageInstant)
         assertEquals(WidgetLevel.UNKNOWN, text.level)
     }
 
@@ -61,7 +61,7 @@ class WidgetTextTest {
         // but it *cannot* tell the oldest reading from the newest. Which instant stamps
         // is the subject of the two tests below, and they are given instants that
         // discriminate.
-        assertEquals(at, text.ageBase)
+        assertEquals(at, text.ageInstant)
         assertEquals(WidgetLevel.QUIET, text.level)
     }
 
@@ -76,7 +76,7 @@ class WidgetTextTest {
         assertEquals("Running: unknown", text.detail)
         // It was confirmed once, so the instant is still worth printing: the card says
         // when it last knew rather than pretending it never did.
-        assertEquals(at, text.ageBase)
+        assertEquals(at, text.ageInstant)
         assertEquals(WidgetLevel.UNKNOWN, text.level)
     }
 
@@ -91,7 +91,7 @@ class WidgetTextTest {
         )
         assertEquals("Needs you: unknown", text.headline)
         assertEquals("Running: unknown", text.detail)
-        assertNull(text.ageBase)
+        assertNull(text.ageInstant)
         assertEquals(WidgetCopy.STAMP_OPEN, text.stampLabel)
     }
 
@@ -270,7 +270,7 @@ class WidgetTextTest {
             ),
         )
         assertEquals("· Alpha", text.rows.first().title)
-        assertEquals(at - 600_000, text.ageBase)
+        assertEquals(at - 600_000, text.ageInstant)
     }
 
     /**
@@ -291,7 +291,7 @@ class WidgetTextTest {
         assertEquals(
             "the running reading is the older of the two, so it is the one that bounds the card",
             at - 600_000,
-            text.ageBase,
+            text.ageInstant,
         )
     }
 
@@ -312,7 +312,7 @@ class WidgetTextTest {
         assertEquals(
             "the reading that needs the user is the older one here, so it bounds the card",
             at - 600_000,
-            text.ageBase,
+            text.ageInstant,
         )
     }
 
@@ -330,7 +330,7 @@ class WidgetTextTest {
                 subagents = WidgetReading(known = true, value = 1, asOf = at),
             ),
         )
-        assertEquals(at - 600_000, text.ageBase)
+        assertEquals(at - 600_000, text.ageInstant)
         assertEquals("Needs you: unknown", text.headline)
     }
 

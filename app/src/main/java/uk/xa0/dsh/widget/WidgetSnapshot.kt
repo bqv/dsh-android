@@ -21,9 +21,10 @@ import org.json.JSONObject
  * ## Why `asOf` is the app's own clock and not the file's
  *
  * [asOf] advances only when the reading's owner re-publishes it while it can still
- * see the truth. It is the base of the ticking age the widget draws, so a reading
- * that stops being renewed goes on to say how long ago it was true — which is the
- * only honest thing a number can do once nothing is maintaining it. See
+ * see the truth. It is the instant the footer prints, so a reading that stops being
+ * renewed goes on to say *when* it was last true — which is the only honest thing a
+ * stamp can do once nothing is maintaining it, and unlike an age it needs no
+ * maintenance to stay honest. See
  * [WidgetPublisher] for who renews what, and `docs/WIDGET.md` for the whole trade.
  */
 data class WidgetReading(
@@ -148,23 +149,24 @@ data class WidgetSnapshot(
      * reading that has a line on the card was confirmed.
      *
      * It is a bound over the whole card, not a stamp on one line, and that is what the
-     * footer says in words (`WidgetCopy.STAMP_OLDEST`): the worst line was confirmed that
-     * long ago, so everything above it is at least that fresh. Taking the newest instead
-     * would put a fresh-looking age under a figure that may be hours old — which is
-     * exactly the shape of lie a stale model chip is.
+     * footer says in words (`WidgetCopy.STAMP_OLDEST`): the worst line was confirmed then,
+     * so everything above it is at least that fresh. Taking the newest instead would put a
+     * fresh-looking instant under a figure that may be hours old — which is exactly the
+     * shape of lie a stale model chip is.
      *
-     * One instant rather than one per line because `RemoteViews` gives a widget a single
-     * Chronometer and no way to stamp two lines differently. The filter is
+     * One instant rather than one per line because the footer is a single line — the
+     * layout has one stamp and no way to write two differently — so the card takes the
+     * worst of them and says what it is. The filter is
      * [WidgetReading.everSeen] rather than `known` for the same reason that field exists:
      * a withdrawn reading is still *drawn*, as "Needs you: unknown", so the instant it was
-     * withdrawn is genuinely the age of a line on the card and must be allowed to bound
+     * withdrawn is genuinely a fact about a line on the card and must be allowed to bound
      * the others.
      *
      * `null` means nothing has ever been established on this phone, and the footer then
-     * carries the way in rather than an age.
+     * carries the way in rather than an instant.
      *
      * [running] adds no instant of its own: the named rows are the detail *of* [working]
-     * — the same roster pull, the same fold, the same instant — so the age that bounds
+     * — the same roster pull, the same fold, the same instant — so the stamp that bounds
      * the running line already bounds every name under it. A separate stamp for the list
      * would only be a second thing to keep honest.
      */

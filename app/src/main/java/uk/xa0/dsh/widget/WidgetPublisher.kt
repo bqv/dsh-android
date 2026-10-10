@@ -27,7 +27,7 @@ import java.io.File
  *
  * A reading is renewed only by the component that can still see the truth, so a
  * reading stops being renewed exactly when the app loses the ability to confirm it —
- * which is the only honest reason for an age to start counting. `AttentionCenter`
+ * which is the only honest reason for the stamp to stop advancing. `AttentionCenter`
  * renews from `DshConnectionService`'s keep-alive loop and from every pending-set
  * change; the view model renews from the loop that already watches the socket. When
  * neither is running, nothing at all happens here, which is the point: there is no
@@ -37,11 +37,17 @@ import java.io.File
  * ## What a renewal costs
  *
  * Callers may push as often as they like — [working] is called from a one-second
- * loop — and this class collapses that into a file write and a widget update at
- * most once per [HEARTBEAT_MS], or immediately when a value actually moves. That
- * keeps the ticking age in [WidgetCopy] small while the app is genuinely looking at
- * the world, so "checked 0:20 ago" means what it says instead of drifting to hours
- * while the app is fine.
+ * loop — and this class collapses that into a file write **and a widget update** at
+ * most once per [HEARTBEAT_MS], or immediately when a value actually moves. Both
+ * halves of that matter, and the second is the one this feature is paying for: an
+ * `updateAppWidget` is a binder call into the system and a `RemoteViews` re-applied
+ * in the launcher's process, so a draw per renewal is up to 86,400 of them a day for
+ * as long as the app holds its socket — screen on or off, widget on screen or not.
+ * [publishDue] is what stops that. The heartbeat is what still makes an unchanged
+ * reading worth saying again: the footer prints an instant rather than ticking an
+ * age ([WidgetCopy.stampTime]), so the re-draw is the only thing that moves that
+ * instant forward, and it is a bound the card owes the reader rather than a refresh
+ * the reader is paying for by the second.
  *
  * ## What it deliberately does when no widget is placed
  *
@@ -91,13 +97,21 @@ class WidgetPublisher(
     @Volatile
     private var everPublished = false
 
+    /**
+     * A draw that has been asked for regardless of the heartbeat: the host has just added
+     * or re-bound a widget and has nothing on screen yet. Sticky until [publish] consumes
+     * it, so a conflated burst of requests cannot lose the one that matters — the flag
+     * survives whatever the channel collapses it into.
+     */
+    private var drawRequested = false
+
     /** Only ever touched by [publish] and the constructor, both of which are serial. */
     private var lastWritten: WidgetSnapshot? = null
     private var lastWriteAt = 0L
 
     init {
         // Seeded from the last run, not reset. A restart does not make yesterday's
-        // reading false — it makes it old, which is what its age already says. Starting
+        // reading false — it makes it old, which is what its instant already says. Starting
         // from nothing would instead claim that nothing was ever seen, which is a worse
         // lie than an old number.
         store.read()?.let { previous ->
@@ -163,14 +177,19 @@ class WidgetPublisher(
     /**
      * Called by [DshWidgetProvider] when a widget appears, and by nothing else.
      *
-     * If an owner has already published, the ordinary path draws it. If not — the
+     * If an owner has already published, the ordinary path draws it — but *forced*, past
+     * [publishDue], because a widget that has just been placed has nothing on screen and
+     * an unchanged reading is exactly what it needs. If no owner has published yet — the
      * receiver was started cold by the host to add a widget — the last run's file is
      * drawn *here and now*, because there is no guarantee this process outlives the
-     * broadcast, and an asynchronously drawn widget that never arrives is a blank
-     * card.
+     * broadcast, and an asynchronously drawn widget that never arrives is a blank card.
      */
     fun onWidgetsChanged() {
-        if (everPublished) {
+        val published = synchronized(lock) {
+            drawRequested = true
+            everPublished
+        }
+        if (published) {
             wake.trySend(Unit)
             return
         }
@@ -179,6 +198,11 @@ class WidgetPublisher(
     }
 
     private fun publish() {
+        val forced = synchronized(lock) {
+            val requested = drawRequested
+            drawRequested = false
+            requested
+        }
         val snapshot = synchronized(lock) {
             WidgetSnapshot(
                 needsYouReading,
@@ -189,18 +213,22 @@ class WidgetPublisher(
                 sessionId,
             )
         }
-        val ids = placedWidgetIds()
-        // No widget on any home screen: the reading is still held in memory, so adding
-        // one is drawn from what this run knows, but nothing is written and nobody is
-        // woken. A user who never placed the widget pays nothing for it.
-        if (ids.isEmpty()) return
-
         val now = System.currentTimeMillis()
-        if (!snapshot.sameValuesAs(lastWritten) || now - lastWriteAt >= HEARTBEAT_MS) {
-            store.write(snapshot)
-            lastWritten = snapshot
-            lastWriteAt = now
-        }
+        // The gate, and it is deliberately in front of `placedWidgetIds()` as well as in
+        // front of the write: a renewal with nothing new in it must not cost a binder call
+        // into the system service, let alone one into the launcher's process. `lastWriteAt`
+        // moves here, before the ids are asked for, so a phone with no widget placed is
+        // asked once per heartbeat rather than once per renewal.
+        if (!publishDue(snapshot, lastWritten, lastWriteAt, now, forced)) return
+        lastWritten = snapshot
+        lastWriteAt = now
+
+        val ids = placedWidgetIds()
+        // No widget on any home screen: nothing is written and nobody is woken. A user who
+        // never placed one pays nothing here, and the reading stays in memory so that
+        // placing one later is drawn from what this run already knows.
+        if (ids.isEmpty()) return
+        store.write(snapshot)
         draw(snapshot, ids)
     }
 
@@ -266,6 +294,41 @@ class WidgetPublisher(
             else -> previous
         }
 
+    /**
+     * Whether a publication is worth a file write **and** a widget update.
+     *
+     * Public, and with the clock supplied, for the same reason [stamped] is: this repo's
+     * unit-test source set cannot see an `internal` symbol, and this harness cannot move
+     * the wall clock, so a rule about the passage of time has to be handed the two instants
+     * rather than made to wait for one of them.
+     *
+     * The rule is the whole battery story. [working] is renewed once a second while the app
+     * holds its socket, and before this gate existed each of those renewals reached the
+     * launcher: an `updateAppWidget` binder call, a `RemoteViews` re-applied, and a
+     * `Chronometer` base reset, up to 86,400 times a day, screen on or off, widget on screen
+     * or not. Only two things are worth any of that:
+     *
+     *  * **A value that moved.** A count, a name, a kind, the session a tap would open —
+     *    each is a thing the card draws, so each has to reach it at once. The comparison
+     *    ignores `asOf` ([WidgetSnapshot.sameValuesAs]), which is what makes a renewal with
+     *    nothing new in it free: a fresher instant for the same value is not news.
+     *  * **The heartbeat.** Without it an unchanged card would never be re-drawn, and the
+     *    instant in the footer would stop advancing while the app was still listening —
+     *    so the card would say "11 Oct 12:03" for as long as the app ran. [HEARTBEAT_MS]
+     *    is the longest the stamp may lag the truth, and it is the same window
+     *    `AttentionCenter` gives a waterfall to be answered in.
+     *
+     * [forced] is the third case and not a rule: a widget has just been placed or re-bound
+     * and has nothing on screen, so it is drawn whatever the other two say.
+     */
+    fun publishDue(
+        snapshot: WidgetSnapshot,
+        previous: WidgetSnapshot?,
+        writtenAt: Long,
+        now: Long,
+        forced: Boolean = false,
+    ): Boolean = forced || !snapshot.sameValuesAs(previous) || now - writtenAt >= HEARTBEAT_MS
+
     companion object {
         /**
          * Under `files/`, where only this app can read it. It is deliberately not
@@ -275,14 +338,14 @@ class WidgetPublisher(
         const val FILE_NAME = "widget/snapshot.json"
 
         /**
-         * How long a reading may go un-renewed before the file is stamped again.
+         * How long a reading may go un-renewed before it is written and drawn again.
          *
          * Fifteen minutes is not a round number picked for looks: it is
          * `AttentionCenter.QUESTION_TIMEOUT_MS`, the longest a waterfall can still be
          * answerable. While the app is connected it re-stamps at least this often, so
-         * the widget's age stays inside the window in which a count could still be
-         * acted on. It costs one widget update per quarter hour, and only while a
-         * widget is placed *and* the app is already running — never a wake-up of a
+         * the instant the footer prints stays inside the window in which a count could
+         * still be acted on. It costs one widget update per quarter hour, and only while
+         * a widget is placed *and* the app is already running — never a wake-up of a
          * dead app, which is what `updatePeriodMillis` would buy.
          */
         const val HEARTBEAT_MS = 15 * 60 * 1000L

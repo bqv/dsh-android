@@ -149,16 +149,26 @@
             android:textSize="11sp" />
 
         <!--
-          The age. A Chronometer rather than a string on purpose: it counts up in the
-          launcher's own process, so the age stays true with nothing of ours running,
-          and a force-stop cannot leave a stale "just now" behind. The format is
-          applied by the launcher, so "%s ago" there is not a typo.
+          The instant the oldest reading on the card was confirmed, as a date and a time.
+
+          A TextView holding a finished string rather than a Chronometer: a Chronometer
+          re-renders once a second inside the launcher's process for as long as the card is
+          on a homescreen, and no widget-side call can slow that down or stop it — the
+          launcher owns the view and the only lever `RemoteViews` has is the one-way
+          `started` flag, whose "off" position freezes the number at the moment it was
+          applied with nothing of ours alive to re-apply it. An instant is complete when it
+          is written, so it has nothing to keep true and nothing to leave behind. The
+          reader does the subtraction, against the clock on the same screen. The date is
+          part of it because a bare clock time would be ambiguous after a day — see
+          `WidgetCopy.stampTime`.
         -->
-        <Chronometer
+        <TextView
             android:id="@+id/widget_age"
+            android:gravity="start"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="4dp"
+            android:maxLines="1"
             android:textColor="@color/widget_text_stamp"
             android:textSize="11sp"
             android:visibility="gone" />
