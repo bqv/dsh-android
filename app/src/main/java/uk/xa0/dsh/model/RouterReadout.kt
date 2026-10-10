@@ -124,20 +124,25 @@ fun routerReadoutSyncMarker(nonce: String): String = "<<<DSH_SYNC-$nonce>>>"
 /**
  * The one line that reads the router's identity and its model listing.
  *
- * One write, not two: each write costs a PTY round trip, and the two requests share
- * it. `-m 5` bounds each request, and `-w` reports curl's own status so a dead port
- * is reported as HTTP 000 rather than as an empty body.
+ * One line, and therefore one `terminal/write` — [uk.xa0.dsh.net.RouterReadoutTransport]
+ * makes exactly one write call for it — because each write costs a PTY round trip and
+ * the two requests share it. `-m 5` bounds each request, and `-w` reports curl's own
+ * status so a dead port is reported as HTTP 000 rather than as an empty body.
+ *
+ * **Each URL is one single-quoted shell word with its suffix inside the quotes.**
+ * Quoting the root and appending `/props` outside them would also be *correct* shell —
+ * the suffixes are fixed literals with no metacharacter, so nothing there is
+ * exploitable — but it is a second rule to remember, and the `/slots` builder quotes
+ * the whole URL. One rule for every URL in this file: build the string, then quote it.
+ * Nothing is ever concatenated into a command after it has been quoted.
  */
-fun routerReadoutReadLine(root: String): String {
-    val base = shellQuote(root)
-    return listOf(
-        "printf '\\n${RouterReadoutMarkers.PROPS_BEGIN}\\n'",
-        "curl -s -m 5 -w '\\n${RouterReadoutMarkers.PROPS_HTTP}%{http_code}>>>\\n' ${base}/props",
-        "printf '\\n${RouterReadoutMarkers.MODELS_BEGIN}\\n'",
-        "curl -s -m 5 -w '\\n${RouterReadoutMarkers.MODELS_HTTP}%{http_code}>>>\\n' ${base}/v1/models",
-        "printf '\\n${RouterReadoutMarkers.READ_END}\\n'",
-    ).joinToString("; ") + "\n"
-}
+fun routerReadoutReadLine(root: String): String = listOf(
+    "printf '\\n${RouterReadoutMarkers.PROPS_BEGIN}\\n'",
+    "curl -s -m 5 -w '\\n${RouterReadoutMarkers.PROPS_HTTP}%{http_code}>>>\\n' ${shellQuote("$root/props")}",
+    "printf '\\n${RouterReadoutMarkers.MODELS_BEGIN}\\n'",
+    "curl -s -m 5 -w '\\n${RouterReadoutMarkers.MODELS_HTTP}%{http_code}>>>\\n' ${shellQuote("$root/v1/models")}",
+    "printf '\\n${RouterReadoutMarkers.READ_END}\\n'",
+).joinToString("; ") + "\n"
 
 /**
  * The line that reads `/slots` for **one already-resident** model.
