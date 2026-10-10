@@ -33,14 +33,26 @@ import org.json.JSONObject
  *  * `GET /metrics?model=<id>` → Prometheus counters
  *    (`llamacpp:prompt_tokens_total`, `prompt_tokens_cached_total`, …).
  *
- * **None of that is reachable from this client, and nothing on the host proxies
- * it.** Re-verified 2026-10-10 rather than inherited: on `127.0.0.1:8080` and
- * `127.0.0.1:8081` — the only two ports the phone can reach — `/health`,
- * `/v1/models`, `/props`, `/slots` and `/metrics` all answer **404**; `:80` answers
- * **302** (nginx's primer redirect). `nginx -T` still shows a single
- * `location / { proxy_pass http://127.0.0.1:8080; }` per server block and no other
- * route. So the router's own health, slots, memory and throughput are **not
- * available to this client**, and this file never pretends otherwise.
+ * **The host's Remote API proxies none of it, and no method names a URL.** Re-verified
+ * 2026-10-10 rather than inherited: on `127.0.0.1:8080` and `127.0.0.1:8081` — the only
+ * two ports the phone can reach — `/health`, `/v1/models`, `/props`, `/slots` and
+ * `/metrics` all answer **404**; `:80` answers **302** (nginx's primer redirect).
+ * `nginx -T` still shows a single `location / { proxy_pass http://127.0.0.1:8080; }`
+ * per server block and no other route.
+ *
+ * **But the app does reach the router's state — through a terminal on the host.** The
+ * route that needs no plugin, no tunnel, no listener and no exposure was found and
+ * implemented on 2026-10-10: `model/RouterReadout.kt` and `net/RouterReadoutTransport.kt`
+ * open a terminal in the session through the `terminal/*` Remote namespace the app
+ * already drives for the Shell tab, run `curl` on the host's own loopback, and read the
+ * answer back from the `terminal/follow` output stream. Measured from a throwaway
+ * session against both live routers: `/props` + `/v1/models` in one write at 24 ms,
+ * plus `/slots` for a resident model at 42 ms in total, attach included at ~46 ms.
+ *
+ * The rest of this header is kept because it is still true of the *direct* routes, and
+ * because it records why a plugin was once believed to be the only answer. The
+ * `localRouter/status` spec survives as an optional cheaper path: a host that composes
+ * it answers in one round trip and never needs a terminal.
  *
  * ## The two sources this file does use
  *
@@ -83,6 +95,14 @@ import org.json.JSONObject
  *    `typert.host.js` descriptors installed, only `dsh-llm`'s has a URL-bearing
  *    parameter (`settingsNs` + `request`), and `web/fetch`, `http/get` and five
  *    similar guesses all answer `not found`.
+ *  * **There is no one-shot exec, and a client cannot start a job.** The complete
+ *    `job` namespace is `job/list`, `job/follow` and `job/kill` — there is no start,
+ *    and `dsh-jobs-local` refuses to create one for anything but a live agent
+ *    (`"background job owner must be live"`). The `commands` namespace is a
+ *    *human-command* registry: `commands/list` and `commands/execute` act on
+ *    slash-commands such as `/compact` and `/goal`, so "a registered command that
+ *    curls the router" would itself have to be registered by a plugin. A command is
+ *    therefore not a route around the plugin; the terminal is.
  *  * **The Web-fetch plugins are not a door.** `dsh-web-fetch-http` is loaded but
  *    registers into the `web` service, not a Remote namespace (no `typert.host.js`
  *    at all), and it is built to *refuse* private addresses — "the connection
@@ -104,13 +124,16 @@ import org.json.JSONObject
  *    mid-prefill. The readings were taken with `curl -m 8`, no new `llama-server`
  *    appeared (`ss -ltnp` and `pgrep -x llama-server` both unchanged), and the
  *    target model still read `unloaded` afterwards — so nothing was loaded, but
- *    *why* it hung is inference, not measurement. A status probe must read
- *    `/v1/models` first and ask for slots only for the model already resident.
+ *    *why* it hung is inference, not measurement. The readout therefore reads
+ *    `/v1/models` first and asks for slots only for the model already resident:
+ *    [residentModelForSlots] is that gate, and [slotsForReadout] carries the reason
+ *    whenever it says no — so "we did not ask" stays distinguishable from "the router
+ *    reported no slots".
  *
- * [routerStatusArgs] and [parseRouterStatus] write the **client half** of the
- * method that would close the gap, specified in `docs/HANDOFF.md` as
- * `localRouter/status`. Until such a plugin exists the host answers `not found`,
- * and the tab says exactly that instead of drawing a number nobody measured.
+ * [routerStatusArgs] and [parseRouterStatus] remain the **client half** of the method
+ * specified in `docs/HANDOFF.md` as `localRouter/status`. It is no longer the only
+ * route and no longer required: it is kept because a host that composes it answers in
+ * one round trip, and the tab prefers it when it exists.
  *
  * ## Why the gate is the endpoint and not the provider's name
  *
@@ -335,6 +358,26 @@ sealed interface RouterProbeResult {
         val modelIds: List<String>,
         val atMillis: Long,
         val load: RouterLoad? = null,
+        /**
+         * Why the router's own readout was not obtained, when the endpoint is
+         * reachable but nothing was measured.
+         *
+         * Three states, and they are different facts:
+         *
+         *  * [load] non-null — the router's load and prefill were read.
+         *  * [load] null and this null — nothing here can read them, so they were
+         *    never offered. The tab says the readout is not available.
+         *  * [load] null and this set — the readout *was* attempted and did not
+         *    arrive, and this is the reason in the host's or the app's own words. The
+         *    tab shows the reason rather than a generic "not reported", so a readout
+         *    that failed for a fixable reason does not look like a host that cannot
+         *    offer one.
+         *
+         * The endpoint being reachable is established independently of the readout —
+         * `llm/discoverModels` makes the host perform the `GET <baseURL>/models` — so
+         * a readout failure never downgrades the reachability answer itself.
+         */
+        val readoutIssue: String? = null,
     ) : RouterProbeResult {
         fun advertises(modelId: String): Boolean = modelIds.any { it == modelId }
     }
@@ -424,12 +467,29 @@ data class RouterLoad(
     val slotsModel: String? = null,
     /** The loaded instance's context size, when it differs from the model listing's. */
     val slotsContextSize: Int? = null,
+    /**
+     * Why no slot reading is shown, when none is.
+     *
+     * This is the third reading the tab has to keep apart, and the reason it exists:
+     * [slots] being **empty** is the router saying it holds no slots, while this
+     * being **set** is the router never being asked — or not answering. Drawing the
+     * first sentence for the second case would turn "we did not look" into "there was
+     * nothing to see", which is the confusion every honesty rule in this file is
+     * about. It is null on a report that was read, empty or not.
+     *
+     * See [slotsForReadout]: it is set whenever the `/slots` request was not made or
+     * did not answer, and it names which.
+     */
+    val slotsUnread: String? = null,
 ) {
     val loaded: List<RouterModelStatus> get() = models.filter { it.isLoaded }
     val loading: List<RouterModelStatus> get() = models.filter { it.isLoading }
 
     /** The slots the router says are mid-task. */
     val processing: List<RouterSlot> get() = slots.filter { it.isProcessing }
+
+    /** Whether a slot reading was obtained at all, as opposed to withheld. */
+    val slotsRead: Boolean get() = slotsUnread == null
 }
 
 /**

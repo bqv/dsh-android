@@ -50,20 +50,30 @@ import java.util.Locale
  *    right now". Shown with the time it was taken, because a reachability answer
  *    without a timestamp is a claim about the past.
  *  * **What the router itself reports** — which model is resident, each slot's
- *    prefill progress, and how many tokens have been decoded. **This section is
- *    drawn only when the host actually answered `localRouter/status`.** On every
- *    host today that method does not exist, so the section is replaced by a
- *    paragraph naming the readout that is missing and the call that would supply it
- *    — rather than by rows of dashes, which read as measured zeroes.
+ *    prefill progress, and how many tokens have been decoded. Read by running `curl`
+ *    on the host through a terminal this app opens in the session and never presents
+ *    (`model/RouterReadout.kt`, `net/RouterReadoutTransport.kt`), so it needs no
+ *    plugin and no forwarded port. When that read cannot be made, the section says
+ *    why — rather than by rows of dashes, which read as measured zeroes.
  *
- * The distinction the tab is most careful about is between **not reported** and
- * **reported as nothing**. [RouterProbeResult.Reachable.load] being null means the
- * host does not offer the readout; a [RouterLoad] with no models means the router
- * listed none. Those are different facts and they get different sentences.
+ * The distinctions the tab is most careful about:
  *
- * Memory, VRAM and throughput are *not* here even in the reported case. The
- * specified method carries load and prefill state only — the two things the user
- * asked for — and this tab does not draw a number no call returned.
+ *  * **not reported** — [RouterProbeResult.Reachable.load] is null and
+ *    [RouterProbeResult.Reachable.readoutIssue] is null: nothing here offers the
+ *    readout, and its absence is stated as an absence;
+ *  * **attempted and not obtained** — `load` is null and `readoutIssue` is set: the
+ *    readout was tried and failed, and the reason is printed rather than a generic
+ *    "not available", so a fixable failure cannot look like a host that cannot offer
+ *    it at all;
+ *  * **reported as nothing** — a [RouterLoad] with no models is the router listing
+ *    none, and a [RouterLoad] whose `slotsUnread` is null with no slots is the router
+ *    saying it holds no slots. A [RouterLoad] whose `slotsUnread` is set is the
+ *    opposite: the slots were never read, and the PREFILL section says so instead of
+ *    borrowing the sentence for an empty report.
+ *
+ * Memory, VRAM and throughput are *not* here even in the reported case. The router
+ * reports load and prefill state only — the two things the user asked for — and this
+ * tab does not draw a number no call returned.
  */
 @Composable
 fun RouterTab(
@@ -167,9 +177,12 @@ fun RouterTab(
 
         Spacer(Modifier.height(DshSpacing.md))
         RouterNote(
-            text = "The host makes this check; this app cannot reach the endpoint itself. " +
-                "The phone talks to the host over one forwarded port, and the host's API " +
-                "does not forward the router's own endpoints.",
+            text = "The routers answer on the host's own loopback, which this phone cannot " +
+                "reach: the host's API forward no router endpoint, and nothing here opens " +
+                "a port to the network. The readout above is made by a shell command the " +
+                "host runs at this app's request — a terminal this app opens in the " +
+                "session and does not show — so it travels the same connection as " +
+                "everything else and needs no plugin, no tunnel and no adb.",
         )
         if (load != null) {
             RouterNote(
@@ -177,20 +190,18 @@ fun RouterTab(
                     "host. Memory and throughput are not part of that report and are " +
                     "therefore not shown.",
             )
+        } else if ((probe as? RouterProbeResult.Reachable)?.readoutIssue != null) {
+            RouterNote(
+                text = "The endpoint answered, so the router is up; the readout itself " +
+                    "did not arrive. The reason is above, and it is a fact about this " +
+                    "app's access to the host rather than about the router.",
+            )
         } else {
             RouterNote(
                 text = "The router's own readouts — which model is loaded, each slot's " +
-                    "prefill progress, and how many tokens it has decoded — are still not " +
-                    "available: no method this host offers can return them, and saying so " +
-                    "is better than drawing a number nobody measured.",
-            )
-            RouterNote(
-                text = "The host can see them (its model discovery already fetches " +
-                    "GET /v1/models, which carries each model's loaded/unloaded state) — " +
-                    "it simply does not return that field. A small plugin exposing " +
-                    "localRouter/status {settingsNs, request:{baseURL, api, apiKey}} would " +
-                    "supply the missing half; its exact reply is specified in " +
-                    "docs/HANDOFF.md.",
+                    "prefill progress, and how many tokens it has decoded — were not " +
+                    "obtained for this check. Saying so is better than drawing a number " +
+                    "nobody measured.",
             )
         }
     }
@@ -242,6 +253,19 @@ private fun ProbeBlock(probe: RouterProbeResult, target: RouterTarget) {
                     text = "It does not advertise ${target.modelId}. The endpoint lists " +
                         "different models from the host's profile; a turn may still " +
                         "load it, or may fail.",
+                    style = DshType.bodySmall,
+                    color = colors.warn,
+                )
+            }
+            // Three states, and the third is the one that is easy to lose: the readout
+            // was *attempted* and did not arrive. Printing the generic "not available"
+            // sentence here would let a fixable failure look like a host that cannot
+            // offer the readout at all.
+            probe.readoutIssue?.let { issue ->
+                Text(
+                    text = "The router's own load and prefill readout could not be read: " +
+                        "$issue The reachability above was measured separately, so it " +
+                        "stands on its own.",
                     style = DshType.bodySmall,
                     color = colors.warn,
                 )
@@ -354,6 +378,18 @@ private fun PrefillSection(load: RouterLoad) {
         color = colors.labelCaption,
     )
     Column(verticalArrangement = Arrangement.spacedBy(DshSpacing.xs)) {
+        // "Not read" first, and as its own sentence: the router never being asked is a
+        // different fact from the router answering that it holds no slots, and the two
+        // must not share copy. `slotsUnread` is set by the reader whenever the request
+        // was withheld or did not answer, and it carries the reason.
+        load.slotsUnread?.let { reason ->
+            Text(
+                text = "Not read: $reason.",
+                style = DshType.bodySmall,
+                color = colors.labelTertiary,
+            )
+            return@Column
+        }
         if (load.slots.isEmpty()) {
             Text(
                 text = "The router reported no slots.",

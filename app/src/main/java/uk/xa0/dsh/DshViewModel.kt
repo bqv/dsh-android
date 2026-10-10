@@ -71,6 +71,10 @@ import uk.xa0.dsh.model.RouterStatusOutcome
 import uk.xa0.dsh.model.classifyRouterStatus
 import uk.xa0.dsh.model.routerStatusArgs
 import uk.xa0.dsh.model.routerTargetOf
+import uk.xa0.dsh.model.ROUTER_READOUT_NO_SESSION
+import uk.xa0.dsh.model.isRouterReadoutTerminal
+import uk.xa0.dsh.net.RouterReadoutAttempt
+import uk.xa0.dsh.net.RouterReadoutTransport
 import uk.xa0.dsh.model.parseLocalProviders
 import uk.xa0.dsh.model.SessionStats
 import uk.xa0.dsh.model.SessionTarget
@@ -1094,6 +1098,19 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private val terminalClient by lazy { TerminalClient(client) }
 
     /**
+     * The router readout: `curl` on the host, run through a terminal this app opens
+     * in the session and never presents.
+     *
+     * It rides the same Remote connection as every other call, so it needs no plugin,
+     * no forwarded port, no listener and no LAN exposure — the only thing it costs is
+     * one extra terminal per session, under a reserved id the Shell tab filters out.
+     * See `net/RouterReadoutTransport.kt` for the protocol and the measured latencies.
+     */
+    private val routerReadout by lazy {
+        RouterReadoutTransport(viewModelScope, terminalClient)
+    }
+
+    /**
      * The host's `job` namespace.
      *
      * The roster is a stream per session rather than the `session/control` block it
@@ -1417,7 +1434,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // before the terminal call that can fail.
                 _terminal.value = _terminal.value.copy(seats = terminalSeatsFor(sessionId))
                 val environment = terminalClient.environment(agentId)
+                // The router readout's own terminal is excluded here, at the one place
+                // the Shell tab learns what the host retains. It is a real terminal in
+                // this session with a reserved id, and without this filter `terminalToAdopt`
+                // could adopt it — handing the reader the readout's stream instead of
+                // their shell — and the picker would offer it as a shell to switch to.
+                // See `isRouterReadoutTerminal`.
                 val existing = terminalClient.list(agentId)
+                    .filterNot { isRouterReadoutTerminal(it.id) }
                 // Only a running terminal may be adopted: the fallback to
                 // `existing.firstOrNull()` adopted an *exited* one, which the host
                 // still answers with a snapshot, so the panel painted it as connected
@@ -2409,16 +2433,20 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------- llama router
 
     /**
-     * Ask the host to report the llama.cpp router behind the session's route.
+     * Ask for the llama.cpp router behind the session's route.
      *
-     * Two host-performed reads, and the order is deliberate:
+     * Three reads, in the order they are tried, and the order is the whole design:
      *
-     *  1. **`localRouter/status`** — the method specified in `docs/HANDOFF.md` for
-     *     exactly this question. When a host offers it, one call answers *both*
-     *     halves: whether the router is reachable, and what it reports about load
-     *     and prefill. **No host offers it today**, so this call currently answers
-     *     `not found` and the fallback below runs instead.
-     *  2. **`llm/discoverModels`** — the always-present check. It opens the declared
+     *  1. **`localRouter/status`** — the host-side method specified in
+     *     `docs/HANDOFF.md` for exactly this question. When a host offers it, one call
+     *     answers *both* halves. **No host offers it today**, so this call answers
+     *     `not found` once per app run and latches itself off.
+     *  2. **The terminal readout** — `curl` run on the host through a terminal this app
+     *     opens in the session and never presents. This is what actually answers here:
+     *     it reaches the routers' own loopback from the host, which is the only place
+     *     they are reachable, and it needs nothing installed and nothing exposed. See
+     *     `net/RouterReadoutTransport.kt`.
+     *  3. **`llm/discoverModels`** — the always-present check. It opens the declared
      *     `baseURL` and reads its model list with a single `GET <baseURL>/models`.
      *     A dead port answers `llm/model-discovery-rejected` / `could not reach
      *     <url>` and the live router answers the ids it advertises, so both a "yes"
@@ -2427,25 +2455,25 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      *     its own catalogue without touching the network), and the request is a bare
      *     GET, so this can never load a model.
      *
-     * The fallback is taken **only** for `not found` / HTTP 404 — a fact about the
-     * host's composition, not about the router. Any other failure from the status
-     * call is a verdict on the router and is reported as one: falling back there
-     * would replace a real "could not reach it" with a weaker answer and hide which
-     * call actually failed.
+     * Rung 3 is what keeps the reachability answer honest when rung 2 fails: the host
+     * performs it without needing a live agent, so a readout the app could not make is
+     * reported *beside* a reachability answer rather than instead of one.
      *
-     * [UiState.routerStatusOffered] latches the absence so the doomed call is made
-     * once per app run rather than on every visit to the tab. It is in-memory, so a
-     * host that gains the plugin is picked up by restarting the app — the same
+     * [UiState.routerStatusOffered] latches the absence of rung 1 so the doomed call
+     * is made once per app run rather than on every visit to the tab. It is in-memory,
+     * so a host that gains the plugin is picked up by restarting the app — the same
      * lifetime the drawer's content-search latch has, and for the same reason.
      *
      * `rpcRaw`, not `rpc`: `llm/discoverModels` answers a bare array of `{id, name}`,
      * which `rpc` would read as an object and hand back empty.
      *
-     * Nothing here starts, stops or reconfigures anything. The one plugin that could
-     * (`localLlm/getState`, `dsh-local-llm-controller`) runs its *own* llama-server
-     * and reports its own process — on this host it reads `stopped` while both
-     * routers are in fact serving — so its status is not the router's status and is
-     * deliberately not shown.
+     * Nothing here starts, stops or reconfigures anything: the readout issues three
+     * read-only `curl`s (`/props`, `/v1/models`, and `/slots` only for a model the
+     * router has already reported resident). The one plugin that could mutate anything
+     * (`localLlm/getState`, `dsh-local-llm-controller`) runs its *own* llama-server and
+     * reports its own process — on this host it reads `stopped` while both routers are
+     * in fact serving — so its status is not the router's status and is deliberately
+     * not shown.
      */
     fun checkRouter() {
         if (routerProbeJob?.isActive == true) return
@@ -2470,8 +2498,27 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * The status call, then the discovery call when — and only when — the host does
-     * not have the status call.
+     * The status call, then the terminal readout, then the discovery call.
+     *
+     * Three sources, and the ladder is a ladder rather than a fallback chain because
+     * each rung answers a *different* question when it fails:
+     *
+     *  1. **`localRouter/status`** — the host-side method specified in
+     *     `docs/HANDOFF.md`. No host offers it today, so this is a single call per app
+     *     run that latches itself off. A host that gains the plugin answers in one
+     *     round trip, and there is nothing cheaper.
+     *  2. **The terminal readout** — the route that needs no plugin at all: the app
+     *     opens a terminal in this session and runs `curl` on the host's own loopback.
+     *     It reads exactly the state the plugin would have, and its measured cost is
+     *     tens of milliseconds. This is the rung that actually answers on this host.
+     *     When it cannot be *made* — no live agent, a refused terminal, a stream that
+     *     will not open — the reason is carried into the answer below rather than
+     *     thrown away, because "we could not look" must not be drawn as "it said
+     *     nothing".
+     *  3. **`llm/discoverModels`** — the always-present reachability check, which the
+     *     host performs without needing an agent. It is what makes the reachability
+     *     answer independent of the readout: a readout that fails never downgrades
+     *     "the endpoint is reachable" into "not reachable".
      */
     private suspend fun readRouterStatus(target: RouterTarget): RouterProbeResult {
         if (_ui.value.routerStatusOffered) {
@@ -2499,12 +2546,27 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     _ui.value = _ui.value.copy(routerStatusOffered = false)
             }
         }
+
+        // The readout's own words for why it could not run, if it could not. Null when
+        // it ran — whether it then found a reachable router or an unreachable one.
+        var readoutIssue: String? = null
+        val sessionId = _ui.value.currentSessionId
+        if (sessionId == null) {
+            readoutIssue = ROUTER_READOUT_NO_SESSION
+        } else {
+            when (val attempt = routerReadout.read(target, sessionId)) {
+                is RouterReadoutAttempt.Measured -> return attempt.result
+                is RouterReadoutAttempt.Unavailable -> readoutIssue = attempt.reason
+            }
+        }
+
         val discovered = runCatching { client.rpcRaw("llm/discoverModels", discoverModelsArgs(target)) }
         return discovered.fold(
             onSuccess = { value ->
                 RouterProbeResult.Reachable(
                     modelIds = advertisedModelIds(value),
                     atMillis = System.currentTimeMillis(),
+                    readoutIssue = readoutIssue,
                 )
             },
             onFailure = { error ->
