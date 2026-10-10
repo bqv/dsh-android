@@ -165,8 +165,18 @@ class WidgetPublisherTest {
         // The mirror: a reading that was never confirmed is left exactly as it was, so a
         // count nobody ever had cannot be stamped with an age that suggests it was checked.
         val never = WidgetReading(known = false, value = 0, asOf = 0L)
-        assertEquals(never, stamped(never, known = false, value = 0, now = 61_000L))
-        assertEquals(never, stamped(never, known = true, value = 0, now = 61_000L).copy(asOf = 0L))
+        assertEquals(
+            "a reading that was never confirmed has no instant to keep",
+            never,
+            stamped(never, known = false, value = 0, now = 61_000L),
+        )
+        // A fresh CONFIRMATION is a different matter and does stamp: the app has just
+        // looked, so the age starts now even though nothing was ever confirmed before.
+        assertEquals(
+            "a fresh confirmation starts the age from now",
+            61_000L,
+            stamped(never, known = true, value = 0, now = 61_000L).asOf,
+        )
     }
 
     @Test

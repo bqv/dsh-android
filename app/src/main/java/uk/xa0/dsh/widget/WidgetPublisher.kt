@@ -186,7 +186,9 @@ class WidgetPublisher(
     /**
      * Stamps a reading with the instant its owner just spoke.
      *
-     * Internal so the rule can be tested directly with two instants: this harness cannot
+     * Public, not `internal`, because this repo's unit-test source set is not a friend of
+ * main (`internal` here is unresolved from the tests - the same wall another agent hit).
+ * It is reachable so the rule can be tested directly with two instants: this harness cannot
  * move the wall clock (`ShadowSystemClock` offers only `currentTimeMillis` and
  * `advanceBy`, and that moves the uptime clock), so a test that needs `now` to differ
  * must supply it rather than wait for it.
@@ -197,7 +199,7 @@ class WidgetPublisher(
      * such instant and is left exactly as it was — inventing one would put "checked
      * 0:01 ago" under a number nobody ever had.
      */
-    internal fun stamped(previous: WidgetReading, known: Boolean, value: Int, now: Long): WidgetReading =
+    fun stamped(previous: WidgetReading, known: Boolean, value: Int, now: Long): WidgetReading =
         when {
             known -> WidgetReading(known = true, value = value, asOf = now)
             previous.known -> WidgetReading(known = false, value = value, asOf = now)
