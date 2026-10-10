@@ -1,5 +1,7 @@
 package uk.xa0.dsh.term
 
+import uk.xa0.dsh.model.isRouterReadoutTerminal
+
 /**
  * The terminal RPC's own vocabulary, plus the attachment rules the web client
  * (`terminal-controller/src/client/model.ts`) enforces.
@@ -196,6 +198,36 @@ fun terminalToAdopt(retained: List<TerminalInfo>): TerminalInfo? =
 fun terminalReapList(retained: List<TerminalInfo>): List<TerminalInfo> =
     retained.filter {
         it.state == TerminalState.EXITED || it.state == TerminalState.FAILED
+    }
+
+// ---------------------------------------------------------- the router readout's own terminal
+
+/**
+ * The reserved router-readout terminal a read may adopt, or null.
+ *
+ * The readout owns one terminal per session under a reserved id
+ * (`uk.xa0.dsh.model.ROUTER_READOUT_TERMINAL_ID`), and this is how it finds it again
+ * instead of leaving a shell behind on every refresh. `RUNNING` only, for exactly the
+ * reason [terminalToAdopt] gives: the host answers a `follow` on a stopped shell with a
+ * snapshot of its last screen, which would read as a live readout.
+ */
+fun readoutTerminalToAdopt(retained: List<TerminalInfo>): TerminalInfo? =
+    retained.firstOrNull {
+        isRouterReadoutTerminal(it.id) && it.state == TerminalState.RUNNING
+    }
+
+/**
+ * The reserved readout terminals a read must retire before it can create one.
+ *
+ * Since the id is fixed rather than random, a stopped reserved terminal is a *blocker*
+ * rather than clutter: the host refuses to create an identity it still holds, so
+ * without this the readout could never come back after its shell died. It is not
+ * returned by [terminalReapList] for the panel, because the readout is filtered out of
+ * the panel's list entirely — this is its own reaper.
+ */
+fun readoutTerminalsToRetire(retained: List<TerminalInfo>): List<TerminalInfo> =
+    retained.filter {
+        isRouterReadoutTerminal(it.id) && it.state != TerminalState.RUNNING
     }
 
 /**

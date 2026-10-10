@@ -29,6 +29,10 @@ import uk.xa0.dsh.model.routerRootOf
 import uk.xa0.dsh.model.slotsContextSizeOf
 import uk.xa0.dsh.model.slotsForReadout
 import uk.xa0.dsh.model.slotsOf
+import uk.xa0.dsh.term.TerminalInfo
+import uk.xa0.dsh.term.TerminalState
+import uk.xa0.dsh.term.readoutTerminalToAdopt
+import uk.xa0.dsh.term.readoutTerminalsToRetire
 
 /**
  * The router readout's wire protocol and the honesty rules it exists to keep.
@@ -381,6 +385,29 @@ class RouterReadoutTest {
     }
 
     @Test
+    fun `the readout adopts only its own running terminal, and retires the dead one`() {
+        val mine = terminal(ROUTER_READOUT_TERMINAL_ID, TerminalState.RUNNING)
+        val mineDead = terminal(ROUTER_READOUT_TERMINAL_ID, TerminalState.EXITED)
+        val mineFailed = terminal(ROUTER_READOUT_TERMINAL_ID, TerminalState.FAILED)
+        val mineUnknown = terminal(ROUTER_READOUT_TERMINAL_ID, TerminalState.UNKNOWN)
+        val users = terminal("a-random-user-shell", TerminalState.RUNNING)
+
+        // The user's own shell is never adopted as the readout, and the readout's
+        // stopped shell is never adopted as anything.
+        assertNull(readoutTerminalToAdopt(listOf(users)))
+        assertNull(readoutTerminalToAdopt(listOf(mineDead, mineFailed, mineUnknown)))
+        assertEquals(mine, readoutTerminalToAdopt(listOf(users, mine, mineDead)))
+
+        // The blocker: a reserved id the host still holds must be closed before a new
+        // terminal can be created under it. Nothing of the user's is ever in this list.
+        assertEquals(
+            listOf(mineDead, mineFailed, mineUnknown),
+            readoutTerminalsToRetire(listOf(users, mine, mineDead, mineFailed, mineUnknown)),
+        )
+        assertTrue(readoutTerminalsToRetire(listOf(users, mine)).isEmpty())
+    }
+
+    @Test
     fun `model statuses read the launch args by name and skip unreadable entries`() {
         val array = JSONArray(
             "[{\"id\":\"a\",\"status\":{\"value\":\"loaded\"," +
@@ -439,5 +466,15 @@ class RouterReadoutTest {
         fun loading(id: String) = RouterModelStatus(id = id, status = "loading")
 
         fun unloaded(id: String) = RouterModelStatus(id = id, status = "unloaded")
+
+        fun terminal(id: String, state: TerminalState) = TerminalInfo(
+            id = id,
+            title = id,
+            shell = "/bin/bash",
+            cwd = "/",
+            cols = 200,
+            rows = 50,
+            state = state,
+        )
     }
 }
