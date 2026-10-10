@@ -39,7 +39,7 @@
     android:background="@drawable/widget_background"
     android:gravity="center_vertical"
     android:orientation="vertical"
-    android:padding="14dp">
+    android:padding="10dp">
 
     <TextView
         android:id="@+id/widget_headline"

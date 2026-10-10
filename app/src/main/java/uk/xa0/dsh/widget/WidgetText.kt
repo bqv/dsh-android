@@ -124,7 +124,15 @@ object WidgetCopy {
      * cut is assertable without a device — and the snapshot keeps the roster's own title,
      * so nothing downstream has to guess what was dropped.
      */
-    const val TITLE_MAX = 32
+    /**
+     * Effectively no cut. The row `TextView` already ellipsizes at the width the
+     * launcher actually gives it, so a character cap here truncated a second time and
+     * left only the short title occupying a wide card - which read as large margins on
+     * both sides. The cap stays as a sanity bound for a pathological title; the collapse
+     * of whitespace above it is the part that matters, since a newline would change the
+     * row's height and there is no room for a second line.
+     */
+    const val TITLE_MAX = 96
 
     /**
      * The most names the card can draw. The same number the snapshot will carry, because
