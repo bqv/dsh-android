@@ -3,6 +3,7 @@ package uk.xa0.dsh.widget
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.junit.Assert.assertTrue
 
 /**
  * The honesty table.
