@@ -1,4 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">DSH</string>
+
+    <!--
+      The widget's own labels. The copy it *draws* lives in
+      uk.xa0.dsh.widget.WidgetCopy instead, because every line it says is a rule about
+      what may be claimed rather than a translatable phrase, and that rule is tested
+      directly. These four are the platform's: what the picker calls the widget, and
+      what the card says in the instant before the app has spoken.
+    -->
+    <string name="widget_label">DSH status</string>
+    <string name="widget_description">Whether an agent needs you, and how much is running.</string>
+    <string name="widget_initial_headline">DSH</string>
+    <string name="widget_initial_stamp">Open the app</string>
 </resources>

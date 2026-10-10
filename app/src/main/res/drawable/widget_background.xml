@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The widget's card. Drawn in the app's own near-black rather than a theme surface,
+  because a widget has no theme of its own to borrow: it is composited over whatever
+  wallpaper the launcher is showing. The alpha keeps a little of that wallpaper
+  through it, which is the difference between a card on a homescreen and a hole in it.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/widget_background" />
+    <corners android:radius="18dp" />
+</shape>

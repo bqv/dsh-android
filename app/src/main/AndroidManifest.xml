@@ -61,6 +61,29 @@
             android:name=".DshConnectionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!--
+          The homescreen widget. `exported="true"` because the platform requires the
+          attribute to be explicit on any component with an intent-filter, and because
+          it is what every shipped widget provider on the test handset declares; the
+          only thing an outside caller can do with it is ask the card to draw itself
+          again from a file this app wrote.
+
+          No updatePeriodMillis timer and no WorkManager: see
+          res/xml/dsh_widget_info.xml and uk.xa0.dsh.widget.WidgetPublisher for why a
+          widget fed by a live socket has nothing to learn from a wake-up.
+        -->
+        <receiver
+            android:name=".widget.DshWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/dsh_widget_info" />
+        </receiver>
     </application>
 
 </manifest>

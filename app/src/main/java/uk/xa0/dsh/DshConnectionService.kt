@@ -53,6 +53,15 @@ class DshConnectionService : Service() {
         keepAlive = scope.launch {
             while (true) {
                 runCatching { app.client.mux().ensureConnected() }
+                // The homescreen widget's reading is *renewed* here, not polled. This
+                // loop is the one thing that runs whenever the app can see anything at
+                // all, so it is what keeps "checked 4 minutes ago" meaning "the app was
+                // still listening four minutes ago" rather than "the pending set has not
+                // changed since whenever". The publisher collapses the tick into at most
+                // one write per quarter hour, so this costs a boolean per fifteen
+                // seconds and a file write per fifteen minutes — and nothing at all once
+                // no widget is placed.
+                runCatching { app.attention.refreshWidget() }
                 delay(CONNECT_INTERVAL_MS)
             }
         }

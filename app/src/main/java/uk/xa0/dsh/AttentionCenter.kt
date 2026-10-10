@@ -19,6 +19,7 @@ import uk.xa0.dsh.model.bool
 import uk.xa0.dsh.model.obj
 import uk.xa0.dsh.model.str
 import uk.xa0.dsh.net.DshClient
+import uk.xa0.dsh.net.MuxState
 import uk.xa0.dsh.net.RemoteMux
 import uk.xa0.dsh.net.StreamEvent
 import java.util.concurrent.ConcurrentHashMap
@@ -181,9 +182,48 @@ class AttentionCenter(private val context: Context) {
 
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JSONObject>>()
     private var eventsJob: Job? = null
+
+    /** Follows the mux's four-state value so a connect or a drop re-publishes the widget. */
+    private var stateJob: Job? = null
     private var attachedMux: RemoteMux? = null
 
     fun isStarted(): Boolean = eventsJob?.isActive == true
+
+    /**
+     * Whether this client could actually be *told* about a waterfall right now: the
+     * `$events` registration is live and the socket carrying it is open.
+     *
+     * This is the one fact that separates "nothing is waiting" from "nobody is
+     * listening", and it is the reason the homescreen widget can say the first at all.
+     * It is not the same as [isStarted]: a registration on a dropped socket looks
+     * identical from here and would let the app promise to hear something it cannot.
+     */
+    fun isLive(): Boolean = eventsJob?.isActive == true && attachedMux?.state?.value == MuxState.OPEN
+
+    /**
+     * Publishes this centre's reading for the homescreen widget: how many sessions are
+     * parked on the human, the highest-precedence kind behind that count, and which
+     * session the tap should open.
+     *
+     * Called from every place the pending set can move, and again on the connection
+     * service's keep-alive loop — that second caller is what *renews* the reading, so
+     * "checked 0:20 ago" means the app was still able to listen twenty minutes ago
+     * rather than that nothing happened to be pending. The publisher throttles the
+     * actual write; this method is cheap enough to call as often as the loop ticks.
+     */
+    fun refreshWidget() {
+        val app = context.applicationContext as? DshApplication ?: return
+        val pending = _pendingBySession.value
+        // One kind per session at the web's cross-domain precedence is already folded
+        // into the map, so the top of it is the same answer the drawer's worst row shows.
+        val top = pending.entries.maxByOrNull { it.value.precedence }
+        app.widgets.needsYou(
+            count = pending.size,
+            kind = top?.value,
+            sessionId = top?.key,
+            known = isLive(),
+        )
+    }
 
     /**
      * Wires the client's event stream and keeps it open.
@@ -216,11 +256,22 @@ class AttentionCenter(private val context: Context) {
                 kotlinx.coroutines.delay(2_000)
             }
         }
+        // A socket that opens or drops changes what the widget's reading *means*, not
+        // just whether it is fresh: the same count of zero is a fact while connected and
+        // silence while not. Without this the published reading could lag a connect by as
+        // much as the keep-alive's fifteen-second tick, which is the difference between
+        // "nothing needs you" and "nobody is listening" during the one moment a user is
+        // most likely to be looking at their phone.
+        stateJob = scope.launch {
+            mux.state.collect { refreshWidget() }
+        }
     }
 
     fun stop() {
         eventsJob?.cancel()
         eventsJob = null
+        stateJob?.cancel()
+        stateJob = null
         attachedMux = null
         pending.clear()
         // Every pending item alerted under its own session id, so each must be
@@ -232,6 +283,11 @@ class AttentionCenter(private val context: Context) {
         _approval.value = null
         _questions.value = null
         _pendingBySession.value = emptyMap()
+        // The registration this reading was renewed from is gone, so the reading is no
+        // longer something the app can assert — a different statement from a count of
+        // zero, which is why the widget is told rather than left to infer it. The
+        // instant is recorded, so the card can still say when it last knew.
+        refreshWidget()
     }
 
     /** Re-created after a config change, so the new mux carries the stream. */
@@ -341,6 +397,10 @@ class AttentionCenter(private val context: Context) {
             )
         }
         _pendingBySession.value = perSession
+        // The widget is a second reader of this same fold, not a second fold. It is
+        // published here, at the one place the per-session map is rebuilt, so the card
+        // cannot disagree with the drawer's status dots.
+        refreshWidget()
     }
 
     private fun keyFor(sessionId: String?, eventId: String): String = sessionId ?: eventId

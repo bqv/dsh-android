@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The homescreen card, three lines and no furniture.
+
+  Two things about this file are load-bearing and easy to undo by accident:
+
+  * Nothing here resolves a theme attribute. A widget is inflated by the *launcher*,
+    against the launcher's theme, from this app's resources — so `?attr/colorSurface`
+    or `?android:textColorPrimary` would resolve to whatever the launcher happens to
+    be, and a light launcher would draw dark-on-dark. Every colour is a literal from
+    `values/colors.xml`, and the renderer sets the ones that carry state.
+
+  * The text in the `android:text` attributes is the `initialLayout`'s copy, shown in
+    the moment between the widget appearing and the first update. It must not claim
+    anything the app has not said, so it names the app and offers the way in. The
+    renderer overwrites all three on the first draw.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_background"
+    android:gravity="center_vertical"
+    android:orientation="vertical"
+    android:padding="14dp">
+
+    <TextView
+        android:id="@+id/widget_headline"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:text="@string/widget_initial_headline"
+        android:textColor="@color/widget_text_unknown"
+        android:textSize="16sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_detail"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/widget_text_detail"
+        android:textSize="13sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_stamp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/widget_initial_stamp"
+            android:textColor="@color/widget_text_stamp"
+            android:textSize="11sp" />
+
+        <!--
+          The age. A Chronometer rather than a string on purpose: it counts up in the
+          launcher's own process, so the age stays true with nothing of ours running,
+          and a force-stop cannot leave a stale "just now" behind. The format is
+          applied by the launcher, so "%s ago" there is not a typo.
+        -->
+        <Chronometer
+            android:id="@+id/widget_age"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:textColor="@color/widget_text_stamp"
+            android:textSize="11sp"
+            android:visibility="gone" />
+    </LinearLayout>
+</LinearLayout>

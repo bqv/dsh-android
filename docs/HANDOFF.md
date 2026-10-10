@@ -7,6 +7,7 @@
 | `app/src/main/java/uk/xa0/dsh/model/` | Pure folds over host records: `Transcript.kt` (the reducer), `TurnProcess.kt`, `ToolCallTree.kt`, `SessionFiles.kt`, `SessionStats.kt`, `Trajectory.kt`, `SessionSearch.kt` |
 | `app/src/main/java/uk/xa0/dsh/ui/` | Compose surfaces; `ui/components/` holds the row cards, `ui/composer/` the trigger derivation, `ui/markdown/` the parser and renderer |
 | `app/src/main/java/uk/xa0/dsh/net/` | `DshClient.kt` (RPC + auth), `RemoteMux.kt` (the `/api/remote.mux` stream mux) |
+| `app/src/main/java/uk/xa0/dsh/widget/` | The homescreen card: `WidgetPublisher.kt` is the only writer of `files/widget/snapshot.json`, `WidgetText.kt` is the copy rules, `WidgetRenderer.kt` the `RemoteViews`. Nothing is scheduled, so a reading stops being renewed when the app stops looking — see `docs/WIDGET.md` |
 | `app/src/main/java/uk/xa0/dsh/data/` | `ConfigStore.kt`, the Keystore-backed config |
 | `app/src/main/java/uk/xa0/dsh/DshViewModel.kt` | Every RPC call site, the mux wiring and the UI state |
 | `tools/` | What is actually this project's: `install.sh` (APK install), `dsh-api.mjs`, `gh-secrets.py`. The adb/emulator services and the device lease are **generic host infrastructure** and live outside this checkout — source in `~/bin/adb-wireless`, services in `~/etc/init.d` + `~/etc/conf.d` |

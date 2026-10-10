@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The provider declaration the platform reads.
+
+  `updatePeriodMillis` is 0 — the platform's way of saying "never wake me on a
+  timer". (The minimum it would honour is 30 minutes regardless.) Nothing a wake-up
+  could learn changes while the app is not running: every number this widget shows
+  arrives over the app's socket, so a periodic re-read could only draw the same bytes
+  again, or draw them older. The app updates the widget when it has something new,
+  and the age under the numbers keeps itself honest without being woken.
+
+  `initialLayout` is shown before the first update, so it says only what is true on a
+  phone where this app has not spoken yet.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_description"
+    android:initialLayout="@layout/widget_dsh"
+    android:minHeight="90dp"
+    android:minWidth="170dp"
+    android:previewImage="@drawable/ic_launcher_foreground"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellHeight="2"
+    android:targetCellWidth="3"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

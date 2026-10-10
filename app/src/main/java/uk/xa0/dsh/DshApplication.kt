@@ -4,6 +4,7 @@ import android.app.Application
 import uk.xa0.dsh.data.ConfigStore
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.net.DshClient
+import uk.xa0.dsh.widget.WidgetPublisher
 
 /** Process-wide singletons; the DSH client owns the cookie jar and the event socket. */
 class DshApplication : Application() {
@@ -23,6 +24,17 @@ class DshApplication : Application() {
      * human still reaches the phone after the UI is gone.
      */
     val attention by lazy { AttentionCenter(this) }
+
+    /**
+     * The homescreen widget's snapshot and its one writer.
+     *
+     * Process-scoped because the widget is not a screen: it has to be kept current
+     * with no Activity in existence, which is exactly the lifetime this object has.
+     * [AttentionCenter] and `DshViewModel` push their own reading into it and nothing
+     * else does — see [uk.xa0.dsh.widget.WidgetPublisher] for who renews what, and
+     * why a reading that stops being renewed is the honest outcome rather than a bug.
+     */
+    val widgets by lazy { WidgetPublisher(this) }
 
     override fun onCreate() {
         super.onCreate()

@@ -2,4 +2,19 @@
 <resources>
     <color name="ic_launcher_background">#0B0F14</color>
     <color name="dsh_window_bg">#0B0F14</color>
+
+    <!--
+      The widget's palette, which is the app's own dark theme (see
+      ui/theme/DshTheme.kt) rather than anything the launcher supplies: a widget is
+      inflated against the *launcher's* theme, so a theme attribute here would
+      resolve to whatever the launcher happens to be and a light launcher would draw
+      dark-on-dark. Kept as resources rather than literals in the renderer so a test
+      can assert what was drawn against the same palette the layout uses.
+    -->
+    <color name="widget_background">#F2151517</color>
+    <color name="widget_text_attention">#FFF59E0B</color>
+    <color name="widget_text_quiet">#FFF9FAFB</color>
+    <color name="widget_text_unknown">#FFADB2B8</color>
+    <color name="widget_text_detail">#FFCFD3D6</color>
+    <color name="widget_text_stamp">#FF81858C</color>
 </resources>

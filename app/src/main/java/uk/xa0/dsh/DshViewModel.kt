@@ -967,6 +967,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private var muxWired = false
     private var previousRunning: Set<String> = emptySet()
 
+    /**
+     * Whether a whole-world `session/list` has landed in this process run.
+     *
+     * The widget's "what is running" reading is only entitled to exist once one has: a
+     * live `api-session/status` frame is a *transition*, so a client that has only ever
+     * seen frames knows about the sessions something happened to and nothing about the
+     * rest. Counting those and calling it a total is the same shape of error as reading
+     * `subagentTiming.active` as liveness — see `docs/HANDOFF.md` trap 15.
+     */
+    @Volatile
+    private var rosterLanded = false
+
     /** Failed connect attempts since the last success, for [scheduleReconnect]. */
     private var connectRetries = 0
 
@@ -2073,6 +2085,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * a pull that was requested after them has already released them.
      */
     private fun mergeRoster(list: List<SessionItem>): List<SessionItem> {
+        // A whole-world pull has landed, which is the only thing that can establish the
+        // widget's "what is running" reading: a live `api-session/status` frame is a
+        // transition and says nothing about any session it did not name, so a client that
+        // has only seen frames is not entitled to a count. See [publishWidgetWorking].
+        rosterLanded = true
         val held = membershipHold.rows()
         val rows = if (held.isEmpty()) {
             list
@@ -2324,6 +2341,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 if (_ui.value.muxState != state) {
                     _ui.value = _ui.value.copy(muxState = state, socketConnected = open)
                 }
+                // The widget's reading of what is running is renewed from here for as long
+                // as this process can see the socket. A widget on a phone whose app has
+                // stopped simply stops being renewed, which is what makes the age it draws
+                // mean something. The publisher collapses the tick; see [publishWidgetWorking].
+                publishWidgetWorking()
                 delay(1000)
             }
         }
@@ -4779,6 +4801,32 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Publishes the homescreen widget's "what is running" reading.
+     *
+     * The counts are read off `SessionItem.running`, which is `RunningBook`'s answer and
+     * nothing else, so the card cannot disagree with the drawer's dots. [rosterLanded]
+     * is what makes the reading *known*: before a whole-world pull there is no count to
+     * publish, only a set of sessions something happened to, and the widget must be able
+     * to tell that apart from a confident zero.
+     *
+     * Called from [publishRosterRunning] when the roster moves, and from the socket loop
+     * in `ensureMuxWiring` once a second — the second caller is the renewal, not a
+     * poll: it says "the connection is still up, so this reading is still being
+     * confirmed", and `WidgetPublisher` turns that into at most one write per quarter
+     * hour. If this process stops running, the renewal stops with it and the age on the
+     * card starts counting, which is the whole design.
+     */
+    private fun publishWidgetWorking() {
+        val state = _ui.value
+        val sessions = state.sessions
+        app.widgets.working(
+            sessions = sessions.count { it.running },
+            subagents = sessions.count { it.running && it.isSubagent },
+            known = rosterLanded && state.muxState == MuxState.OPEN,
+        )
+    }
+
+    /**
      * Publishes everything that follows from a roster pull: the "finished while you
      * were not looking" dots, and the composer's own running flag.
      *
@@ -4794,6 +4842,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * "no" that races the host's own bookkeeping.
      */
     private fun publishRosterRunning() {
+        publishWidgetWorking()
         val sessions = _ui.value.sessions
         val nowRunning = sessions.filter { it.running }.map { it.id }.toSet()
 

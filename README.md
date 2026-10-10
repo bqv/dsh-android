@@ -388,6 +388,31 @@ socket resumes streaming instead of silently freezing the UI.
   exemption is offered, because an OEM battery manager otherwise reaps the
   process and the socket with it.
 
+### The homescreen widget
+
+- **DSH status**, a 3×2 card with three lines: what is waiting on you (an approval,
+  a question or a plan review, ranked the way the drawer's status dot is), how much
+  is running, and when the app last confirmed either. Tapping it opens the app on
+  the session that most needs you, through the same `Attention.EXTRA_SESSION` path a
+  notification uses.
+- Four things are deliberately **not** on it: the model/session a turn would run
+  (composer state, not a glance), background jobs (only known for the session the
+  app has *open*, so a count would be one session's jobs presented as the world's),
+  the account balance (not read until the usage panel is opened, and a money figure
+  ages worst of all), and per-session detail.
+- **"Not known" is never drawn as "nothing needs you."** Every reading is
+  `(known, value, asOf)`, so an app that cannot currently hear the host says so, and
+  a reading nobody ever confirmed has no age invented for it.
+- **The age maintains itself.** The stamp is a `Chronometer` based on the reading's
+  instant, ticking in the launcher's own process: it keeps counting with nothing of
+  ours running, so a force-stop cannot leave a stale "just now" behind.
+- **Nothing is scheduled.** `updatePeriodMillis` is 0 and there is no `WorkManager`;
+  the app writes the snapshot while it runs, and when it does not run nothing happens
+  and the age says so. No widget placed means no file write at all.
+
+  The design record — what was cut and why, and what is still unverified — is
+  `docs/WIDGET.md`.
+
 ### The account balance
 
 The token panel's cost row opens the DeepSeek account balance: `GET /user/balance`,
@@ -448,6 +473,12 @@ is left alone.
   every registered `$events` client and settles only once each has answered, so
   a Skip or an approval is decisive only while this app is the sole event client
   (an open browser tab keeps it pending).
+- The homescreen widget reports what the app knows, and the app only knows things
+  while it has a socket. An approval that arrives after the process is gone is never
+  on the card — it cannot be, because the host has already failed the waterfall by
+  then — and after a force-stop its alarms would be cancelled even if it tried to
+  schedule one, which is why the card carries a self-ticking age instead. See
+  `docs/WIDGET.md`.
 
 ## Repository map
 
@@ -457,6 +488,7 @@ app/src/main/java/uk/xa0/dsh/
   net/     DshClient (cookies + unary RPC), RemoteMux (the stream mux), TerminalClient (the terminal namespace), PersistentCookieJar
   term/    The VT core and the terminal's own rules: emulator, key encodings, seats, stream gates — no Android, so the JVM suite can drive it
   model/   Journal → renderable rows: transcript reducer, trajectory, files, search, stats, tool tree
+  widget/  The homescreen card: the one writer of its snapshot, the copy rules, the RemoteViews renderer and the provider
   ui/      Compose screens and components: chat, drawer, settings, setup, trajectory, terminal, theme, markdown
 app/src/test/java/uk/xa0/dsh/term/   JVM tests for the VT parser, the protocol gates and the key tables
 docs/      HANDOFF.md (working state), PARITY.md (parity ledger), research/ (reverse-engineered spec)
@@ -476,6 +508,9 @@ app/build.gradle.kts, settings.gradle.kts, gradle.properties, local.properties  
   every deliberate divergence and the reasoning behind it.
 - `docs/SCROLL-DIAG.md` — the latent scroll diagnostics: what they record, and
   how to read them back off a device.
+- `docs/WIDGET.md` — the homescreen widget: what it shows and what it deliberately
+  does not, how a reading stays honest when the app is not running, and what has not
+  been verified on a device.
 - `docs/JOBS.md` — the `job` Remote namespace as the running host actually
   serves it (`job/list`, `job/follow`, `job/kill`), with the probes that establish
   it. The shipped typert descriptors disagree with that host, and the roster is no
