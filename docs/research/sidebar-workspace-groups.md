@@ -199,6 +199,56 @@ checkbox labelled "Archived". Group/Order chips are untouched.
 * Switch: off then on moves the count 39 → 114 and reveals the archived rows
   (`.probe/sw-open.png`, `.probe/sw-on.png`).
 
+## Empty Workspaces, and the registry's own arrival (2026-10-10)
+
+Request: "sidebar should show workspaces, even if empty". The registry row already
+existed — `workspace/follow`'s baseline is the whole registry, and this drawer has
+always emitted a section for a Workspace whose `sessionIds` is empty (the Fix above:
+"a workspace with no members still shows"). What was missing was any statement of
+*which* emptiness it was, so an empty directory and a lagging `session/list` both
+drew a header with a `0` in it and nothing else.
+
+The list is authoritative, not inferred. Read from the running host (0.2.0-rc.2,
+`/usr/lib64/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai`), not from a
+descriptor:
+
+* `dsh-api-workspace-controller/lib/index.js` — `baseline()` is
+  `items: ctx.workspaceRegistry.list().map(workspaceView)`; each `workspaceView`
+  copies `workspace.sessionIds` verbatim. Nothing filters an empty one out, and
+  there is no `workspace/list` to have to fall back on.
+* `dsh-workspace/lib/index.js` — `list()` is every registered entity in durable
+  registry order; the `sessionIds` getter (line 102) derives membership by matching
+  sessions' canonical `cwd`, and `createCanonical` (line 649) writes `sessionIds: []`.
+  So an empty Workspace is durable registry state whose membership is derived *to
+  nothing*, not a group inferred from the sessions that happen to exist.
+* Live, read-only: `adb -s <daily phone> logcat -d -s DshSidebar:*` shows
+  `workspace baseline: 12 workspaces, 889 archived`, matching
+  `~/.dsh/storages/workspace.json` (12 rows, 889 archived ids) exactly.
+
+The rule now lives in `model/WorkspaceGroups.kt` (pure, JVM-testable) rather than
+inline in the drawer's `remember`: `workspaceGroupState(memberIds, visibleIds,
+knownIds)` is `Members` | `Empty` | `Loading` | `Filtered`, with the same show/hide
+behaviour as the old boolean. The two zero-row states differ twice on screen — the
+words under the header ("No sessions" vs "Sessions not loaded") and the count, which
+is withheld entirely when membership is not yet known (the web's `WorkspaceListPhase`
+`pending`/`ready` idea, per `dsh-api-workspace-controller/lib/types/client/model.d.ts`,
+where only `replaceBaseline` sets `ready`). `UiState.workspacesPhase` mirrors that bit;
+while it is `Pending` the grouped list draws one non-tappable "Workspaces unknown"
+row and the catch-all keeps the neutral title "Sessions" instead of "Ungrouped",
+which is a membership claim the client cannot yet back.
+
+Order is untouched: the host's registry order, and an empty Workspace keeps its own
+place in it. Recency is the roster's rule only — a Workspace's `updatedAt` moves when
+a session is adopted, so sorting groups by it would move the sidebar under a reader.
+A header tap still folds the group (the web's `onToggle`); nothing new became
+tappable, and the group holding the open session now tints its folder
+(`folderActive` / `GroupNode.containsCurrent`). New: `WorkspaceGroupTest`.
+
+Unverified as of writing: nothing here was compiled or run (no build, no test, no
+device was touched for this change), and the live registry currently holds no empty
+Workspace — the `Empty` branch rests on the host sources above plus the drawer rule
+that already drew such a group.
+
 ## Observed but out of scope
 
 The blank-"New Session" landing on `--es uk.xa0.dsh.session <id>` is fixed:
