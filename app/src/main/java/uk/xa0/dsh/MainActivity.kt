@@ -78,6 +78,7 @@ class MainActivity : ComponentActivity() {
                     provisioning.value = null
                     vm.saveSetup(
                         baseUrl = request.url,
+                        lanUrl = request.lan,
                         username = request.username,
                         password = request.password,
                         manualCookie = request.cookie,
@@ -144,6 +145,14 @@ class MainActivity : ComponentActivity() {
                                 busy = ui.busy,
                                 status = ui.status,
                                 onConnect = vm::saveSetup,
+                                initialLanUrl = ui.lanUrl,
+                                acceptedCerts = ui.acceptedCerts,
+                                readout = ui.certReadout,
+                                checking = ui.certChecking,
+                                certError = ui.certError,
+                                onCheckCertificate = vm::checkCertificate,
+                                onTrustCertificate = vm::trustCertificate,
+                                onForgetCertificate = vm::forgetCertificate,
                             )
                         }
 
@@ -204,6 +213,7 @@ class MainActivity : ComponentActivity() {
         val url = intent.getStringExtra("url")?.takeIf { it.isNotBlank() } ?: return
         provisioning.value = Provisioning(
             url = url,
+            lan = intent.getStringExtra("lan").orEmpty(),
             username = intent.getStringExtra("username").orEmpty(),
             password = intent.getStringExtra("password").orEmpty(),
             cookie = intent.getStringExtra("cookie").orEmpty(),
@@ -278,6 +288,8 @@ class MainActivity : ComponentActivity() {
  *   -e url http://10.0.2.2:8080 -e username me -e password hunter2
  * ```
  *
+ * `-e lan <address>` supplies the optional second, LAN-side door.
+ *
  * This exists because driving the Setup form through a slow emulator's IME is
  * unreliable — `input text` gets truncated or autocorrected mid-credential, and
  * a truncated cookie fails as an opaque login prompt. Nothing here is a bypass:
@@ -286,6 +298,7 @@ class MainActivity : ComponentActivity() {
  */
 data class Provisioning(
     val url: String,
+    val lan: String,
     val username: String,
     val password: String,
     val cookie: String,

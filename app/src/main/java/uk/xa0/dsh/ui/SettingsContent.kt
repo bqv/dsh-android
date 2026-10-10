@@ -64,6 +64,11 @@ import uk.xa0.dsh.ui.theme.DshType
  * sections stack vertically in that same order, each with its nav label as the
  * heading; the grouping inside a section follows the web's own row order.
  *
+ * This sheet is now exactly those five. The client's own **Connection** rows — the
+ * optional LAN address, the live route, and the certificate this host is pinned to —
+ * are facts about the host rather than settings, so they live on the About sheet
+ * with the host's other facts (`AboutScreen.kt`).
+ *
  * **General is the one section the shell owns, and the one this client can
  * actually edit.** Its five host-backed rows are the web's own feature-owned
  * settings — `permission.defaultPreset`, `ui-theme.preference`,
@@ -89,12 +94,12 @@ import uk.xa0.dsh.ui.theme.DshType
  * `docs/research/files-and-deliverables.md`'s sibling report and in the parent's
  * handoff.
  *
- * Settings carries only what the user can change. The meta that used to be
- * bolted on below it — the **Connection** block (server, account, sign-in,
- * cookie, status), the **Session** block, the app version and the sign-out
- * action — is not settable, so it moved to the About sheet (`AboutScreen.kt`),
- * which the drawer's footer opens beside Settings. Its credential rows still
- * read `ui/settings/SettingsLocalFacts.kt`.
+ * Settings carries only what the user can change. Everything the app can state but
+ * not set — the old **Connection** block (server, account, sign-in, cookie, status),
+ * the **Session** block, the app version, the sign-out action, and now the LAN
+ * address, the live route and the accepted certificate — is on the About sheet
+ * (`AboutScreen.kt`), which the drawer's footer opens beside Settings. Its
+ * credential rows read `ui/settings/SettingsLocalFacts.kt`.
  */
 @Composable
 fun SettingsContent(

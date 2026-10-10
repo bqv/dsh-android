@@ -40,7 +40,15 @@ class DshApplication : Application() {
         super.onCreate()
         configStore = ConfigStore(this)
         client = DshClient(this)
-        client.applyConfig(configStore.load())
+        val config = configStore.load()
+        // The accepted certificates are the app's trust anchors, and the client is
+        // what accepts one — so it is also what has to say when the set changed. The
+        // store is the only thing that knows where that state lives, hence the hook.
+        client.onTrustChanged = {
+            configStore.save(configStore.load().copy(acceptedCerts = client.trust.entries()))
+        }
+        client.setAcceptedCerts(config.acceptedCerts)
+        client.applyConfig(config)
         Attention.ensureChannel(this)
         registerActivityLifecycleCallbacks(foreground)
         // Latent scroll diagnostics: invisible, additive, and off the main

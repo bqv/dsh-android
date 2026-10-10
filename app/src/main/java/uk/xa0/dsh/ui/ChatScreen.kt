@@ -1549,6 +1549,22 @@ fun ChatScreen(vm: DshViewModel) {
             permissionOptions = ui.permissionOptions,
             selectedModel = ui.selectedModel,
             selectedEffort = ui.selectedEffort,
+            // Which door traffic is really using — not always `baseUrl`.
+            activeUrl = ui.activeUrl,
+            activeRouteLan = ui.activeRouteLan,
+            // The other door, and what this app accepts as the host's identity. Here
+            // rather than in Settings: a signed-in session has no way back to setup,
+            // and a certificate that can only be pinned before signing in is one
+            // nobody pins.
+            lanUrl = ui.lanUrl,
+            onLanUrl = vm::updateLanUrl,
+            acceptedCerts = ui.acceptedCerts,
+            certReadout = ui.certReadout,
+            certChecking = ui.certChecking,
+            certError = ui.certError,
+            onCheckCertificate = vm::checkCertificate,
+            onTrustCertificate = vm::trustCertificate,
+            onForgetCertificate = vm::forgetCertificate,
         )
     }
 

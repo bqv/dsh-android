@@ -53,7 +53,15 @@ enum class MuxState { IDLE, CONNECTING, OPEN, CLOSED }
  * the forwarding coroutine — which silently lost whole transcripts.
  */
 class RemoteMux(
-    private val client: OkHttpClient,
+    /**
+     * The client to dial with, asked for at dial time rather than captured.
+     *
+     * A client is rebuilt when the accepted certificates change — OkHttp takes its
+     * certificate pinner at construction — and a socket that captured the old one
+     * would keep dialling with the old pins, which is the one thing a pin must never
+     * do.
+     */
+    private val client: () -> OkHttpClient,
     private val url: HttpUrl,
 ) {
 
@@ -174,7 +182,7 @@ class RemoteMux(
             openSignal = signal
             _state.value = MuxState.CONNECTING
             val request = Request.Builder().url(url).build()
-            socket = client.newWebSocket(request, Listener())
+            socket = client().newWebSocket(request, Listener())
             val connected = withTimeoutOrNull(20_000) { signal.await() }
             if (connected == null) {
                 _state.value = MuxState.CLOSED

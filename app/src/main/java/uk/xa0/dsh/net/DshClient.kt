@@ -1,7 +1,12 @@
 package uk.xa0.dsh.net
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.HttpUrl
@@ -13,6 +18,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONObject
 import uk.xa0.dsh.data.DshConfig
+import java.io.IOException
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.security.cert.X509Certificate
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -35,6 +44,22 @@ class DshRpcException(
  */
 class DshUnreachableException(message: String = "Could not reach the host") : Exception(message)
 
+/**
+ * The host presented a certificate this app will not accept.
+ *
+ * Its own type because it is the one connect failure the user can act on: the chain
+ * that was offered travels with it, so the screen that reports it can show the
+ * fingerprint and offer to trust it — no second connection needed to find out what
+ * was there.
+ */
+class DshCertificateException(
+    message: String,
+    val host: String,
+    val chain: List<X509Certificate>,
+    /** The certificate accepted for this host before, when there was one. */
+    val accepted: AcceptedCert?,
+) : Exception(message)
+
 /** Outcome of a connectivity probe, used by the setup screen. */
 sealed interface ProbeResult {
     data class Ok(val serverName: String) : ProbeResult
@@ -45,6 +70,26 @@ sealed interface ProbeResult {
 
     /** No answer at all: the request never completed. */
     data class Unreachable(val message: String) : ProbeResult
+
+    /**
+     * The handshake was refused and this app has nothing accepted for the host — the
+     * first-use case, which becomes an acceptance rather than a failure.
+     */
+    data class CertificateUnknown(
+        val host: String,
+        val chain: List<X509Certificate>,
+    ) : ProbeResult
+
+    /**
+     * The handshake was refused and this host *does* have an accepted certificate, so
+     * either the host rotated its key or somebody is in the middle. The two are
+     * indistinguishable from here, which is exactly why the user is asked.
+     */
+    data class CertificateChanged(
+        val host: String,
+        val chain: List<X509Certificate>,
+        val accepted: AcceptedCert,
+    ) : ProbeResult
 }
 
 /**
@@ -61,43 +106,169 @@ sealed interface ProbeResult {
  */
 class DshClient(context: Context) {
 
-    val cookieJar = PersistentCookieJar(context)
-
-    private val base: OkHttpClient = OkHttpClient.Builder()
-        .cookieJar(cookieJar)
-        .connectTimeout(15, TimeUnit.SECONDS)
-        // Without an explicit read timeout OkHttp's 10s default applies, and a busy
-        // host — or the session-reference resolver, which walks every session — trips
-        // it constantly. `callTimeout` still bounds the whole call.
-        .readTimeout(60, TimeUnit.SECONDS)
-        .callTimeout(60, TimeUnit.SECONDS)
-        .build()
+    private val appContext = context.applicationContext
 
     /**
-     * Long-lived calls (the WebSocket mux) must not be subject to a read timeout.
-     *
-     * The mux handshake is also the one request whose *refusal* has nowhere else
-     * to surface: a browser-style redirect or an opaque socket failure leaves the
-     * socket re-dialling forever while every screen still looks READY. So the
-     * handshake is checked here and a 401/403 (or a redirect to the sign-in page)
-     * is reported through [onStreamAuthFailure], which the app routes through the
-     * same auth funnel as any unary call.
+     * Process-scoped, like the client itself: route refreshes are triggered by
+     * the OS's connectivity callbacks and by failed calls, neither of which has
+     * a coroutine of its own to run in.
      */
-    val streamClient: OkHttpClient = base.newBuilder()
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .callTimeout(0, TimeUnit.MILLISECONDS)
-        .pingInterval(20, TimeUnit.SECONDS)
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .addInterceptor { chain ->
-            val response = chain.proceed(chain.request())
-            if (response.code == 401 || response.code == 403 || isAuthRedirect(response)) {
-                onStreamAuthFailure?.invoke()
-            }
-            response
-        }
-        .build()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    val cookieJar = PersistentCookieJar(context)
+
+    /**
+     * What this app accepts, and therefore what its clients enforce.
+     *
+     * Owned here because this is the object that builds sockets; persisted through
+     * [uk.xa0.dsh.data.ConfigStore] by whoever listens to [onTrustChanged].
+     */
+    val trust = CertTrust()
+
+    /**
+     * The clients for one pin set.
+     *
+     * Only the pins force a rebuild: OkHttp takes its [okhttp3.CertificatePinner] at
+     * construction time, while the socket factory handed to it stays the same object
+     * for the life of the process — the trust manager behind it consults the anchors
+     * at every handshake (see [CertTrust]).
+     */
+    private class Clients(
+        val base: OkHttpClient,
+        val probe: OkHttpClient,
+        val stream: OkHttpClient,
+        val noRedirect: OkHttpClient,
+        val unary: OkHttpClient,
+    )
+
+    @Volatile
+    private var clients: Clients = buildClients()
+
+    private fun buildClients(): Clients {
+        val base = OkHttpClient.Builder()
+            .cookieJar(cookieJar)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            // Without an explicit read timeout OkHttp's 10s default applies, and a busy
+            // host — or the session-reference resolver, which walks every session — trips
+            // it constantly. `callTimeout` still bounds the whole call.
+            .readTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(60, TimeUnit.SECONDS)
+            // The app's own anchors are asked first and the system store second, which
+            // is what lets all three shapes of host work: a public certificate with no
+            // ceremony at all, a self-signed one once it has been accepted, and a host
+            // that has been accepted pinned to the key that was accepted.
+            .sslSocketFactory(trust.socketFactory(), trust.trustManager())
+            .certificatePinner(CertPins.pinner(trust.pins()))
+            .build()
+
+        /**
+         * The short-timeout client a *candidate* is tested with.
+         *
+         * Distinct from `base` (and `noRedirect`) because the resolver probes
+         * addresses that are expected to be absent most of the time — the LAN door
+         * on a phone that is out of the house. A 15s connect timeout there would
+         * stall every refresh for a quarter of a minute; a second is enough for a
+         * host on the same wire to answer and short enough that a miss is cheap.
+         */
+        val probe = base.newBuilder()
+            .connectTimeout(1, TimeUnit.SECONDS)
+            .readTimeout(1, TimeUnit.SECONDS)
+            .callTimeout(1, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+
+        /**
+         * Long-lived calls (the WebSocket mux) must not be subject to a read timeout.
+         *
+         * The mux handshake is also the one request whose *refusal* has nowhere else
+         * to surface: a browser-style redirect or an opaque socket failure leaves the
+         * socket re-dialling forever while every screen still looks READY. So the
+         * handshake is checked here and a 401/403 (or a redirect to the sign-in page)
+         * is reported through [onStreamAuthFailure], which the app routes through the
+         * same auth funnel as any unary call.
+         */
+        val stream = base.newBuilder()
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .callTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(20, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .addInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                if (response.code == 401 || response.code == 403 || isAuthRedirect(response)) {
+                    onStreamAuthFailure?.invoke()
+                }
+                response
+            }
+            .build()
+
+        val noRedirect = base.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+
+        /**
+         * The gateway calls' client: `base` plus a transport-failure hook.
+         *
+         * A call that fails at the transport is the one signal that the chosen
+         * endpoint stopped working — a stale LAN choice is exactly this — and it
+         * heals by re-probing. Only the unary gateway calls carry the hook: the
+         * stream client must not reroute on every socket blip (it re-dials on its
+         * own), and `httpClient` fetches internet pictures, whose failure says
+         * nothing about the host.
+         */
+        val unary = base.newBuilder()
+            .addInterceptor { chain ->
+                try {
+                    chain.proceed(chain.request())
+                } catch (e: IOException) {
+                    onTransportFailure()
+                    throw e
+                }
+            }
+            .build()
+
+        return Clients(base = base, probe = probe, stream = stream, noRedirect = noRedirect, unary = unary)
+    }
+
+    /**
+     * The app's choice of the LAN door or the public one. Re-seeded from each
+     * config; see [applyConfig] and [refreshRoute].
+     */
+    private val endpoint = EndpointResolver(
+        isDshHost = { url -> answersAsDshHost(url) },
+        localIpv4 = { localIpv4Address() },
+    )
+
+    /** Epoch millis of the last transport-failure invalidation; see [onTransportFailure]. */
+    @Volatile
+    private var lastTransportFailureAt = 0L
+
+    /**
+     * Called when a refresh moved traffic to a different endpoint.
+     *
+     * Mirrors [onStreamAuthFailure]: the client can see that the route changed,
+     * but only the app knows what to do about it — the socket it was holding
+     * belonged to the old address (this client has already dropped it), and the
+     * streams and session list want rebuilding against the new one. Null when no
+     * UI exists, in which case the mux simply redials on demand.
+     */
+    @Volatile
+    var onRouteChanged: (() -> Unit)? = null
+
+    init {
+        watchConnectivity()
+    }
+
+    /**
+     * The event socket's client, from the current family.
+     *
+     * Read through the family rather than captured, so a client rebuilt for a new
+     * pin set is the one the multiplexer dials with — see [RemoteMux], which asks for
+     * the client on every dial for the same reason.
+     */
+    private fun streamClient(): OkHttpClient = clients.stream
     /**
      * Called when the event socket's handshake was refused for auth reasons.
      * Set by the view model (the only place that can heal it); null when no UI
@@ -114,11 +285,6 @@ class DshClient(context: Context) {
         return location.contains("/auth/") || location.contains("login")
     }
 
-    private val noRedirect: OkHttpClient = base.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .build()
-
     @Volatile
     var config: DshConfig = DshConfig()
         private set
@@ -127,26 +293,180 @@ class DshClient(context: Context) {
     var mux: RemoteMux? = null
         private set
 
+    /**
+     * Called when the accepted certificates change, so the app can persist them.
+     *
+     * Set by the application, the only holder of [uk.xa0.dsh.data.ConfigStore]; null
+     * with no store attached, in which case the anchor set lives and dies with the
+     * process — still better than trusting nothing.
+     */
+    @Volatile
+    var onTrustChanged: (() -> Unit)? = null
+
+    /**
+     * Seed the anchor set from stored state, before the first request.
+     *
+     * The clients are rebuilt because the pins are derived from the anchors and OkHttp
+     * takes its pinner when the client itself is built.
+     */
+    fun setAcceptedCerts(entries: List<AcceptedCert>) {
+        trust.replace(entries)
+        clients = buildClients()
+    }
+
     fun applyConfig(config: DshConfig) {
         this.config = config
         mux?.shutdown()
         mux = null
+        endpoint.update(
+            primary = httpUrlOf(config.baseUrl),
+            lan = httpUrlOf(lanCandidate(config)),
+        )
+        // Prime the cache for whoever is listening, but do not reroute: the
+        // config change itself has already dropped the multiplexer, and the
+        // caller of applyConfig owns the reconnect that follows.
+        scope.launch { runCatching { resolveRoute(notify = false) } }
     }
+
+    /**
+     * The LAN address to try for this config: the explicit one, or — for an
+     * install that predates the field — the primary URL itself when it is
+     * already a private address, so a LAN-only setup keeps working untouched.
+     */
+    private fun lanCandidate(config: DshConfig): String =
+        config.lanUrl.ifBlank {
+            config.baseUrl.takeIf { isPrivateLanHost(hostOf(it)) }.orEmpty()
+        }
+
+    private fun httpUrlOf(raw: String): HttpUrl? =
+        raw.takeIf { it.isNotBlank() }?.let { normalizeBase(it).toHttpUrlOrNull() }
+
+    /**
+     * The address a setup field names, normalised exactly as this client normalises
+     * it — so the certificate the user is shown is the certificate of the host the
+     * app would actually dial, scheme defaulting and all.
+     */
+    fun endpointFor(raw: String): HttpUrl? = httpUrlOf(raw)
 
     /** The remote-event multiplexer for the active config, created on first use. */
     fun mux(): RemoteMux {
         mux?.let { return it }
         synchronized(this) {
             mux?.let { return it }
-            val created = RemoteMux(streamClient, apiEventsUrl())
+            val created = RemoteMux(client = { streamClient() }, url = apiEventsUrl())
             mux = created
             return created
         }
     }
 
-    fun baseUrl(): HttpUrl? = config.baseUrl.takeIf { it.isNotBlank() }?.let {
-        normalizeBase(it).toHttpUrlOrNull()
+    /**
+     * The address every other URL derives from — the *resolved* endpoint, not the
+     * configured one, so one unary call, the event socket, the probe and a pasted
+     * cookie all follow the route the resolver chose.
+     *
+     * Synchronous by contract: this runs while a request is being built, and
+     * [EndpointResolver.peek] answers from cache without ever probing.
+     */
+    fun baseUrl(): HttpUrl? = endpoint.peek()
+
+    /** True when [baseUrl] is the LAN door rather than the public one. */
+    fun isLanRoute(): Boolean = endpoint.isLan
+
+    /**
+     * Re-resolve the endpoint now and prime the cache. Suspends for the probes,
+     * so a caller with a connect to make can resolve first and dial the resolved
+     * door rather than dial the public one and reroute a moment later.
+     *
+     * Does **not** notify: this is the "a config just changed" path, and the
+     * caller is about to rebuild the wiring and dial anyway — [applyConfig] has
+     * already dropped the multiplexer, so a second nudge here would race the
+     * caller's own connect. The reactive paths ([requestRouteRefresh]) are the
+     * ones that notify.
+     */
+    suspend fun refreshRoute() {
+        resolveRoute(notify = false)
     }
+
+    /**
+     * Fire-and-forget re-resolution that *does* reroute: for the callers with no
+     * coroutine of their own — a connectivity callback, a failed call.
+     */
+    fun requestRouteRefresh() {
+        scope.launch { runCatching { resolveRoute(notify = true) } }
+    }
+
+    /**
+     * Probe and, for a move, drop the socket bound to the old address: shut the
+     * multiplexer down and null it so the next [mux] dials the new endpoint.
+     *
+     * A notifying caller also hears about it through [onRouteChanged]; a
+     * config-apply caller owns its own reconnect and only needs the stale socket
+     * gone. "Moved" comes from this resolution's own answer, so two refreshes
+     * racing the same probe cannot both act on it.
+     */
+    private suspend fun resolveRoute(notify: Boolean) {
+        val choice = endpoint.resolve()
+        if (!choice.changed) return
+        mux?.shutdown()
+        mux = null
+        if (notify) onRouteChanged?.invoke()
+    }
+
+    /**
+     * Re-resolve whenever the OS reports the default network moving — the moment
+     * a phone leaves the house, joins a hotspot, or comes back to the LAN. Both
+     * directions matter: onAvailable is the LAN returning, onLost is it going.
+     */
+    private fun watchConnectivity() {
+        val manager = appContext.getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                endpoint.invalidate()
+                requestRouteRefresh()
+            }
+
+            override fun onLost(network: Network) {
+                endpoint.invalidate()
+                requestRouteRefresh()
+            }
+        }
+        // A device with no connectivity service (or a test JVM) simply keeps the
+        // event-driven refresh paths; there is nothing to report.
+        runCatching { manager.registerDefaultNetworkCallback(callback) }
+    }
+
+    /**
+     * The phone's own IPv4, for the resolver's subnet rewrite. Site-local only:
+     * a carrier address says nothing about where the host might be.
+     */
+    private fun localIpv4Address(): String? = runCatching {
+        NetworkInterface.getNetworkInterfaces().toList()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { it.inetAddresses.toList() }
+            .filterIsInstance<Inet4Address>()
+            .firstOrNull { !it.isLoopbackAddress && it.isSiteLocalAddress }
+            ?.hostAddress
+    }.getOrNull()
+
+    /**
+     * "Is a DSH host here?" — the same answer [probe] gives, reduced to the two
+     * outcomes that prove a host is present. A host that *refuses* an
+     * unauthenticated `GET /` is still a host: the LAN door answers 401 before
+     * `/auth/login`, and a public door redirects to it. Requiring 200 would make
+     * the LAN candidate unwinnable and the whole feature a no-op.
+     */
+    private suspend fun answersAsDshHost(url: HttpUrl): Boolean =
+        when (probeAt(url, clients.probe)) {
+            is ProbeResult.Ok, ProbeResult.NeedsLogin -> true
+            // A host that answered with a certificate nobody has vouched for yet is
+            // still a host, and the LAN door is exactly where that happens: it is a
+            // private address with a private certificate, and the probe that follows
+            // is what accepts it. Counting it as absent would make such a door
+            // unreachable forever, because the only probe that trusts on first use
+            // runs against the winner the resolver has already picked.
+            is ProbeResult.CertificateUnknown -> true
+            else -> false
+        }
 
     private fun normalizeBase(raw: String): String {
         val trimmed = raw.trim()
@@ -176,22 +496,64 @@ class DshClient(context: Context) {
         cookieJar.setRawCookie(root, raw)
     }
 
-    suspend fun probe(): ProbeResult = withContext(Dispatchers.IO) {
-        val root = baseUrl() ?: return@withContext ProbeResult.Failed("No server URL configured")
-        try {
-            val request = Request.Builder().url(root).get().build()
-            noRedirect.newCall(request).execute().use { response ->
-                when (response.code) {
-                    200 -> ProbeResult.Ok(response.header("Server").orEmpty())
-                    401, 403 -> ProbeResult.NeedsLogin
-                    302, 303 -> ProbeResult.NeedsLogin
-                    else -> ProbeResult.Failed("Server answered HTTP ${response.code}")
+    suspend fun probe(): ProbeResult {
+        val root = baseUrl() ?: return ProbeResult.Failed("No server URL configured")
+        val first = probeAt(root)
+        if (first !is ProbeResult.CertificateUnknown) return first
+        // Trust on first use. The system store does not vouch for this chain and the
+        // app has nothing recorded for this host, so the certificate it has just
+        // offered becomes that host's anchor — and its pin. The acceptance is
+        // permanent through [onTrustChanged]; before that fires, only this process
+        // knows about it.
+        val leaf = first.chain.firstOrNull()
+            ?: return ProbeResult.Unreachable("The host offered no certificate")
+        trust.accept(first.host, leaf)
+        clients = buildClients()
+        onTrustChanged?.invoke()
+        return probeAt(root)
+    }
+
+    /** [probe] against a given address and client, for the resolver's candidates. */
+    private suspend fun probeAt(root: HttpUrl, client: OkHttpClient = clients.noRedirect): ProbeResult =
+        withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder().url(root).get().build()
+                client.newCall(request).execute().use { response ->
+                    when (response.code) {
+                        200 -> ProbeResult.Ok(response.header("Server").orEmpty())
+                        401, 403 -> ProbeResult.NeedsLogin
+                        302, 303 -> ProbeResult.NeedsLogin
+                        else -> ProbeResult.Failed("Server answered HTTP ${response.code}")
+                    }
+                }
+            } catch (e: Exception) {
+                // A refused handshake is not an unreachable host: it is a question for
+                // the user, and the chain that raised it travels out on the exception.
+                val chain = e.offeredChain()
+                if (!chain.isNullOrEmpty()) {
+                    return@withContext when (val accepted = trust.entryFor(root.host)) {
+                        null -> ProbeResult.CertificateUnknown(root.host, chain)
+                        else -> ProbeResult.CertificateChanged(root.host, chain, accepted)
+                    }
+                }
+                // A *pin* failure is the impostor case: the trust manager was satisfied
+                // — usually because a public CA vouched for the impostor's certificate
+                // — and only the pin refused it. That check carries no chain, so one is
+                // read to show. Only ever for a host that has something accepted: an
+                // unpinned host has no pin to fail.
+                val accepted = trust.entryFor(root.host)
+                val shown = if (accepted != null && CertPins.isPinFailure(e)) {
+                    CertProbe.probe(root).getOrNull()?.chain.orEmpty()
+                } else {
+                    emptyList()
+                }
+                if (!shown.isNullOrEmpty()) {
+                    ProbeResult.CertificateChanged(root.host, shown, accepted!!)
+                } else {
+                    ProbeResult.Unreachable(e.message ?: e.javaClass.simpleName)
                 }
             }
-        } catch (e: Exception) {
-            ProbeResult.Unreachable(e.message ?: e.javaClass.simpleName)
         }
-    }
 
     /**
      * Signs in through the auth proxy. On success the proxy answers 303 to `/`
@@ -210,7 +572,7 @@ class DshClient(context: Context) {
                 .url(root.newBuilder().addPathSegments("auth/login").build())
                 .post(body)
                 .build()
-            noRedirect.newCall(request).execute().use { response ->
+            clients.noRedirect.newCall(request).execute().use { response ->
                 val location = response.header("Location").orEmpty()
                 when {
                     location.contains("locked=1") ->
@@ -237,6 +599,28 @@ class DshClient(context: Context) {
             // caller keeps the user where they were.
             is ProbeResult.Failed -> Result.failure(DshUnreachableException(probe.message))
             is ProbeResult.Unreachable -> Result.failure(DshUnreachableException(probe.message))
+
+            // A certificate question is neither a sign-in problem nor a transient
+            // one, so it gets its own outcome: the setup screen is the only place it
+            // can be answered, and it is where this failure lands.
+            is ProbeResult.CertificateUnknown -> Result.failure(
+                DshCertificateException(
+                    message = "The host's certificate has not been accepted yet.",
+                    host = probe.host,
+                    chain = probe.chain,
+                    accepted = null,
+                ),
+            )
+
+            is ProbeResult.CertificateChanged -> Result.failure(
+                DshCertificateException(
+                    message = "The certificate for ${probe.host} is not the one accepted " +
+                        "for it. Check the new fingerprint before trusting it.",
+                    host = probe.host,
+                    chain = probe.chain,
+                    accepted = probe.accepted,
+                ),
+            )
 
             ProbeResult.NeedsLogin -> {
                 if (config.username.isBlank()) {
@@ -279,7 +663,7 @@ class DshClient(context: Context) {
                 .post(envelope.toString().toRequestBody(JSON))
                 .build()
 
-            base.newCall(request).execute().use { response ->
+            clients.unary.newCall(request).execute().use { response ->
                 val text = response.body?.string().orEmpty()
                 if (response.code == 401 || response.code == 403) {
                     throw DshAuthException("Session expired (HTTP ${response.code})")
@@ -330,7 +714,7 @@ class DshClient(context: Context) {
                 .post(envelope.toString().toRequestBody(JSON))
                 .build()
 
-            base.newCall(request).execute().use { response ->
+            clients.unary.newCall(request).execute().use { response ->
                 val type = response.header("content-type").orEmpty()
                 if (response.code == 401 || response.code == 403) {
                     throw DshAuthException("Session expired (HTTP ${response.code})")
@@ -354,13 +738,60 @@ class DshClient(context: Context) {
             }
         }
 
+    /**
+     * One call failed at the transport — a timeout, a dropped socket, no route.
+     *
+     * That is precisely what a stale LAN choice looks like: the address answered
+     * a minute ago and the phone has since left the network. Dropping the cache
+     * lets the next refresh move the app to whichever door answers now, so the
+     * route heals itself instead of waiting for a network callback that may
+     * never fire (a host that went away while the phone stayed put).
+     *
+     * Rate-limited: an unreachable host fails *every* call, and invalidating per
+     * failure would turn one outage into a probe round per request. The resolver
+     * caches its answer anyway; this only bounds how often the cache is thrown
+     * away while nothing answers.
+     */
+    private fun onTransportFailure() {
+        val now = System.currentTimeMillis()
+        if (now - lastTransportFailureAt < TRANSPORT_FAILURE_COOLDOWN_MS) return
+        lastTransportFailureAt = now
+        endpoint.invalidate()
+        requestRouteRefresh()
+    }
+
     /** The OkHttp client, for the one caller that fetches a picture from the internet. */
-    fun httpClient(): okhttp3.OkHttpClient = base
+    fun httpClient(): okhttp3.OkHttpClient = clients.base
 
     /** Convenience wrapper matching the host's `_request`-style parameter naming. */
     suspend fun listSessions(): JSONObject = rpc("session/list", JSONObject().put("_request", JSONObject()))
 
     companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
+
+        /** At most one transport-failure re-probe per this window; see [onTransportFailure]. */
+        private const val TRANSPORT_FAILURE_COOLDOWN_MS = 5_000L
     }
 }
+
+/**
+ * The chain a refused handshake offered, if this failure is one of ours.
+ *
+ * JSSE wraps the trust manager's `CertificateException` in an `SSLHandshakeException`
+ * and keeps it as the cause, so the chain reaches a caller three frames above the
+ * handshake that saw it. Walking the causes rather than remembering the last chain on
+ * the trust manager is deliberate: the resolver probes two addresses at once, and a
+ * field would let one host's certificates answer for the other's failure.
+ */
+private fun Throwable.offeredChain(): List<X509Certificate>? {
+    var current: Throwable? = this
+    var depth = 0
+    while (current != null && depth < MAX_CAUSE_DEPTH) {
+        if (current is CertTrustException) return current.chain
+        current = current.cause
+        depth++
+    }
+    return null
+}
+
+private const val MAX_CAUSE_DEPTH = 8

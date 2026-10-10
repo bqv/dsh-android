@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import uk.xa0.dsh.net.AcceptedCert
+import uk.xa0.dsh.net.CertTrust
 import uk.xa0.dsh.term.TerminalCellSize
 import uk.xa0.dsh.term.decodeHostShellSessions
 import uk.xa0.dsh.term.encodeHostShellSessions
@@ -17,6 +19,18 @@ import uk.xa0.dsh.term.encodeHostShellSessions
  */
 data class DshConfig(
     val baseUrl: String = "",
+    /**
+     * An optional second door to the same host, on the local network.
+     *
+     * The phone is often on the LAN the host lives on, where the host answers
+     * without a login and without a tunnel, and often on mobile data, where only
+     * [baseUrl] is reachable. The app probes both and prefers this one while it
+     * answers — so it is stored beside the public address rather than replacing
+     * it, and blank simply means "this install has no LAN address to try". An
+     * install whose [baseUrl] is *already* a private address needs nothing
+     * entered here; see [uk.xa0.dsh.net.isPrivateLanHost].
+     */
+    val lanUrl: String = "",
     val username: String = "",
     val password: String = "",
     val manualCookie: String = "",
@@ -105,6 +119,16 @@ data class DshConfig(
      * would only be a second spelling of the same number.
      */
     val terminalFontSp: Float = TerminalCellSize.DEFAULT_FONT_SP,
+    /**
+     * The certificates the app has been told to trust, one per host.
+     *
+     * The trust model is WeeChat-Android's: the accepted certificates are the trust
+     * anchors the client's handshakes are validated against, and a host with one is
+     * pinned to it. Stored here rather than in a keystore of their own because this
+     * is already the one encrypted place client-local state lives — see
+     * [uk.xa0.dsh.net.CertTrust] for the format and the reasoning.
+     */
+    val acceptedCerts: List<AcceptedCert> = emptyList(),
 ) {
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
@@ -151,6 +175,7 @@ class ConfigStore(context: Context) {
 
     fun load(): DshConfig = DshConfig(
         baseUrl = prefs.getString(KEY_BASE_URL, "").orEmpty(),
+        lanUrl = prefs.getString(KEY_LAN_URL, "").orEmpty(),
         username = prefs.getString(KEY_USERNAME, "").orEmpty(),
         password = prefs.getString(KEY_PASSWORD, "").orEmpty(),
         manualCookie = prefs.getString(KEY_COOKIE, "").orEmpty(),
@@ -174,11 +199,13 @@ class ConfigStore(context: Context) {
         terminalFontSp = TerminalCellSize.of(
             prefs.getFloat(KEY_TERMINAL_FONT_SP, TerminalCellSize.DEFAULT_FONT_SP),
         ).fontSp,
+        acceptedCerts = CertTrust.decode(prefs.getString(KEY_ACCEPTED_CERTS, null)),
     )
 
     fun save(config: DshConfig) {
         prefs.edit()
             .putString(KEY_BASE_URL, config.baseUrl)
+            .putString(KEY_LAN_URL, config.lanUrl)
             .putString(KEY_USERNAME, config.username)
             .putString(KEY_PASSWORD, config.password)
             .putString(KEY_COOKIE, config.manualCookie)
@@ -197,6 +224,7 @@ class ConfigStore(context: Context) {
             .putString(KEY_HOST_SHELLS, encodeHostShellSessions(config.hostShellSessions))
             .putString(KEY_DEEPSEEK_KEY, config.deepseekApiKey)
             .putFloat(KEY_TERMINAL_FONT_SP, config.terminalFontSp)
+            .putString(KEY_ACCEPTED_CERTS, CertTrust.encode(config.acceptedCerts))
             .apply()
     }
 
@@ -206,6 +234,7 @@ class ConfigStore(context: Context) {
 
     private companion object {
         const val KEY_BASE_URL = "base_url"
+        const val KEY_LAN_URL = "lan_url"
         const val KEY_USERNAME = "username"
         const val KEY_PASSWORD = "password"
         const val KEY_COOKIE = "cookie"
@@ -219,5 +248,6 @@ class ConfigStore(context: Context) {
         const val KEY_HOST_SHELLS = "host_shell_sessions"
         const val KEY_DEEPSEEK_KEY = "deepseek_api_key"
         const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
+        const val KEY_ACCEPTED_CERTS = "accepted_certs"
     }
 }

@@ -114,7 +114,11 @@ import uk.xa0.dsh.model.subagentTargetOf
 import uk.xa0.dsh.model.upsertSession
 import uk.xa0.dsh.net.BalanceFailure
 import uk.xa0.dsh.net.DeepSeekAccount
+import uk.xa0.dsh.net.AcceptedCert
+import uk.xa0.dsh.net.CertProbe
+import uk.xa0.dsh.net.CertReadout
 import uk.xa0.dsh.net.DshAuthException
+import uk.xa0.dsh.net.DshCertificateException
 import uk.xa0.dsh.net.DshRpcException
 import uk.xa0.dsh.net.multipartBytes
 import uk.xa0.dsh.net.boundaryOf
@@ -123,6 +127,7 @@ import uk.xa0.dsh.net.MuxState
 import uk.xa0.dsh.net.JobClient
 import uk.xa0.dsh.net.StreamEvent
 import uk.xa0.dsh.net.TerminalClient
+import java.security.cert.X509Certificate
 import uk.xa0.dsh.term.HostShellIssue
 import uk.xa0.dsh.term.HostShellProgress
 import uk.xa0.dsh.term.HostShellRoot
@@ -749,8 +754,47 @@ data class UiState(
      * silently rewrite the stored new-session default.
      */
     val currentAgentPreset: String = "",
+    /**
+     * The *configured* primary address — what Setup and sign-in edit and what
+     * About prints as "Host". Deliberately not the live endpoint: that is
+     * [activeUrl], and conflating the two would make the Setup field follow a
+     * route the user never typed.
+     */
     val baseUrl: String = "",
+    /**
+     * The optional LAN door, stored beside [baseUrl] and edited on the settings
+     * surface. Blank means the app tries only the primary address.
+     */
+    val lanUrl: String = "",
     val username: String = "",
+    /**
+     * The certificates the app has been told to trust, one per host.
+     *
+     * Published because the setup screen is where one is accepted or forgotten, and
+     * it has to be able to say which host is already pinned without asking the
+     * network anything.
+     */
+    val acceptedCerts: List<AcceptedCert> = emptyList(),
+    /**
+     * What a host presented the last time it was asked — from "check certificate", or
+     * from the refusal that brought the user back to setup. Null means nothing has
+     * been looked at yet.
+     */
+    val certReadout: CertReadout? = null,
+    /** A certificate read is in flight. */
+    val certChecking: Boolean = false,
+    /** Why the last certificate read failed, kept apart from a connect error. */
+    val certError: String? = null,
+    /**
+     * Where traffic is actually going right now, which is not always [baseUrl]:
+     * the resolver prefers the LAN address whenever the phone can reach it.
+     * Published separately rather than overwriting [baseUrl], because the Setup
+     * screen and the sign-in path edit the *configured* address and would fight a
+     * value that moves on its own.
+     */
+    val activeUrl: String = "",
+    /** True when [activeUrl] is the LAN door; false for the public one. */
+    val activeRouteLan: Boolean = false,
     val socketConnected: Boolean = false,
     /**
      * The mux's real four-state value, carried beside [socketConnected] so every
@@ -1061,6 +1105,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Same idea for the mux handshake hook on [DshClient]. */
     private val streamAuthHook: () -> Unit = { onAuthFailure("event socket", null) }
+
+    /**
+     * The endpoint moved under the client (LAN up or down). Held like the two
+     * above so [onCleared] can drop exactly this hook — the client is
+     * process-scoped and would otherwise keep a destroyed view model alive.
+     */
+    private val routeChangedHook: () -> Unit = { onRouteChanged() }
 
     private var historyJob: Job? = null
 
@@ -2268,7 +2319,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             drawerCollapsedSections = config.drawerCollapsedSections,
             hostShellSessions = config.hostShellSessions,
             baseUrl = config.baseUrl,
+            lanUrl = config.lanUrl,
             username = config.username,
+            acceptedCerts = config.acceptedCerts,
         )
 
         viewModelScope.launch {
@@ -2276,8 +2329,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (config.isConfigured) {
-            ensureMuxWiring()
-            connect()
+            viewModelScope.launch {
+                // Resolve the door before dialling, so the first connect already
+                // prefers the LAN rather than starting public and rerouting.
+                client.refreshRoute()
+                publishRoute()
+                ensureMuxWiring()
+                connect()
+            }
         } else {
             _ui.value = _ui.value.copy(phase = AppPhase.SETUP)
         }
@@ -2302,6 +2361,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // re-dials on a backoff while every screen still looks READY. Route it
         // through the same funnel as any other auth failure.
         client.onStreamAuthFailure = streamAuthHook
+        // The resolver can move the app between the LAN door and the public one
+        // while a session is open. The client drops the socket bound to the old
+        // address; rebuilding the wiring and re-dialling here is what turns that
+        // into a reconnect rather than a frozen transcript.
+        client.onRouteChanged = routeChangedHook
         // Coming back from the background is the one moment nobody else re-checks
         // whether the socket and the streams are actually alive: a frozen process
         // runs no coroutines, so a collector stays "active" while being dead.
@@ -2403,25 +2467,172 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
     // ------------------------------------------------------------------ setup
 
-    fun saveSetup(baseUrl: String, username: String, password: String, manualCookie: String) {
+    fun saveSetup(baseUrl: String, lanUrl: String, username: String, password: String, manualCookie: String) {
         val config = configStore.load().copy(
             baseUrl = baseUrl.trim().trimEnd('/'),
+            lanUrl = lanUrl.trim().trimEnd('/'),
             username = username.trim(),
             password = password,
             manualCookie = manualCookie.trim(),
         )
         configStore.save(config)
+        applySetupConfig(config)
+    }
+
+    /**
+     * Store a config, re-seed the client's route candidates, and dial.
+     *
+     * [DshClient.applyConfig] drops the multiplexer whatever the route turns out
+     * to be, so the rewire below is unconditional; the resolution runs first so
+     * both the mux's event URL and the unary calls use the door that actually
+     * answers. [DshClient.refreshRoute] deliberately does not notify here — this
+     * method owns the reconnect, and a second nudge from the route hook would
+     * race it.
+     */
+    private fun applySetupConfig(config: DshConfig) {
         client.applyConfig(config)
-        rewireMux()
         _ui.value = _ui.value.copy(
             baseUrl = config.baseUrl,
+            lanUrl = config.lanUrl,
             username = config.username,
             drawerGroupByWorkspace = config.drawerGroupByWorkspace,
             drawerOrderByUpdated = config.drawerOrderByUpdated,
             drawerCollapsedSections = config.drawerCollapsedSections,
             hostShellSessions = config.hostShellSessions,
+            acceptedCerts = config.acceptedCerts,
         )
-        connect()
+        viewModelScope.launch {
+            // Resolve *before* rebuilding the wiring: the mux's own URL comes
+            // from baseUrl(), so a mux built on the unresolved primary would keep
+            // the event socket on the public door while unary calls went over the
+            // LAN. connect() then dials the door the resolution chose.
+            client.refreshRoute()
+            publishRoute()
+            rewireMux()
+            connect()
+        }
+    }
+
+    /**
+     * The LAN address is a route preference, not a credential: changing it saves,
+     * re-resolves and redials through the same path Setup uses. Committed when
+     * the settings field is saved, not per keystroke — a redial per character
+     * would be absurd.
+     */
+    fun updateLanUrl(url: String) {
+        val config = configStore.load().copy(lanUrl = url.trim().trimEnd('/'))
+        configStore.save(config)
+        applySetupConfig(config)
+    }
+
+    // ------------------------------------------------------------- certificates
+
+    /**
+     * Read what the host at [url] presents, without trusting any of it.
+     *
+     * Nothing here consults the app's own trust decisions on purpose: the
+     * certificate most worth looking at is the one the app would refuse, and a
+     * validating read would fail on exactly that one.
+     */
+    fun checkCertificate(url: String) {
+        val target = client.endpointFor(url)
+        if (target == null) {
+            _ui.value = _ui.value.copy(
+                certReadout = null,
+                certError = "That is not an address this app can read.",
+            )
+            return
+        }
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(certChecking = true, certError = null)
+            val result = CertProbe.probe(target)
+            _ui.value = _ui.value.copy(
+                certChecking = false,
+                certReadout = result.getOrNull(),
+                certError = result.exceptionOrNull()?.message,
+            )
+        }
+    }
+
+    /**
+     * Trust [certificate] for [host] — first use, or a replacement after a rotation.
+     *
+     * Deliberately does not connect: the certificate is stored and the client's
+     * anchors are swapped, and the ordinary Connect (with the address the fields
+     * already hold) is what dials with it. One action, one effect — a connect hidden
+     * inside "trust" would redial an address the user may be halfway through editing.
+     */
+    fun trustCertificate(host: String, certificate: X509Certificate) {
+        client.trust.accept(host, certificate)
+        persistTrust()
+        _ui.value = _ui.value.copy(
+            error = null,
+            certError = null,
+            certReadout = null,
+            acceptedCerts = client.trust.entries(),
+        )
+    }
+
+    /** Stop trusting the certificate accepted for [host]. */
+    fun forgetCertificate(host: String) {
+        client.trust.forget(host)
+        persistTrust()
+        _ui.value = _ui.value.copy(acceptedCerts = client.trust.entries())
+    }
+
+    /**
+     * Write the anchor set to the store and swap the client's pins to match.
+     *
+     * The store write is what survives a restart; [uk.xa0.dsh.net.DshClient] is what
+     * survives this request, and it has to be told because it took its certificate
+     * pinner when it built its clients.
+     */
+    private fun persistTrust() {
+        val entries = client.trust.entries()
+        configStore.save(configStore.load().copy(acceptedCerts = entries))
+        client.setAcceptedCerts(entries)
+    }
+
+    /** Publish the endpoint the client is actually using, when it has moved. */
+    private fun publishRoute() {
+        val url = client.baseUrl()?.toString().orEmpty()
+        val lan = client.isLanRoute()
+        if (_ui.value.activeUrl == url && _ui.value.activeRouteLan == lan) return
+        _ui.value = _ui.value.copy(activeUrl = url, activeRouteLan = lan)
+    }
+
+    /**
+     * The endpoint moved under us: the phone joined the LAN, or left it.
+     * [DshClient] has already dropped the multiplexer that was dialling the old
+     * address, so rebuild the wiring and re-dial — the same shape as the
+     * auth-heal path, and for the same reason: the collectors were bound to a
+     * socket that no longer exists and would otherwise sit there looking alive.
+     */
+    private fun onRouteChanged() {
+        // Only a live session needs the nudge. During setup and the connect that
+        // follows it the route is resolved *before* dialling (see
+        // [applySetupConfig] and init), so a change here is already accounted for;
+        // reacting as well would race that connect with a second one.
+        if (_ui.value.phase != AppPhase.READY) return
+        if (!configStore.load().isConfigured) return
+        Log.d(TAG, "route changed: now ${client.baseUrl()}")
+        viewModelScope.launch {
+            publishRoute()
+            rewireMux()
+            runCatching { client.mux().ensureConnected() }
+            ensureWorkspaceStream()
+            ensureControlStream()
+            // The follow stream was bound to the old mux as well. Cancel it
+            // explicitly rather than trusting it to have unwound before
+            // reopenFollowIfStopped looks at `isActive` — shutdown() completes
+            // its flow asynchronously, so it may still look alive here.
+            followJob?.cancel()
+            followJob = null
+            reopenFollowIfStopped()
+            runCatching { fetchSessions() }.onSuccess { list ->
+                _ui.value = _ui.value.copy(sessions = mergeRoster(list))
+            }
+        }
     }
 
     fun updateTheme(mode: String) {
@@ -2818,6 +3029,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             error = AUTH_ERROR,
             errorNeedsSignIn = false,
             baseUrl = config.baseUrl,
+            lanUrl = config.lanUrl,
             username = config.username,
         )
     }
@@ -2869,6 +3081,26 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // tried the stored credentials, so no second login is attempted
             // here — a repeat within a second only risks the host's lockout.
             onAuthFailure("connect", error, allowHeal = false)
+            return
+        }
+        if (error is DshCertificateException) {
+            // The one failure with its own answer on screen: the chain travels with
+            // the exception, so the setup screen can show the fingerprint and offer
+            // to trust it without a second handshake. No reconnect is scheduled —
+            // nothing about the host is going to change until the user decides.
+            _ui.value = _ui.value.copy(
+                phase = AppPhase.SETUP,
+                busy = false,
+                status = null,
+                error = error.message,
+                errorNeedsSignIn = false,
+                certReadout = CertProbe.readoutOf(
+                    host = error.host,
+                    chain = error.chain,
+                    systemTrusted = CertProbe.systemTrusts(error.chain),
+                ),
+                certError = null,
+            )
             return
         }
         val message = when {
@@ -2996,6 +3228,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             error = message,
             errorNeedsSignIn = false,
             baseUrl = config.baseUrl,
+            lanUrl = config.lanUrl,
             username = config.username,
         )
         authHealSpent = true
@@ -6964,6 +7197,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // Both hooks live on process-scoped objects; only drop our own.
         if (app.foreground.onForeground === foregroundHook) app.foreground.onForeground = null
         if (client.onStreamAuthFailure === streamAuthHook) client.onStreamAuthFailure = null
+        if (client.onRouteChanged === routeChangedHook) client.onRouteChanged = null
     }
 
     private companion object {

@@ -55,11 +55,14 @@ import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
 import uk.xa0.dsh.model.HostSettings
 import uk.xa0.dsh.model.ModelChoice
+import uk.xa0.dsh.net.AcceptedCert
+import uk.xa0.dsh.net.CertReadout
 import uk.xa0.dsh.ui.components.DshTextField
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
+import java.security.cert.X509Certificate
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -162,6 +165,24 @@ fun AboutSheet(
     permissionOptions: List<PermissionOption> = emptyList(),
     selectedModel: ModelOption? = null,
     selectedEffort: String? = null,
+    /** The resolved endpoint and its door, which need not be [baseUrl]. */
+    activeUrl: String = "",
+    activeRouteLan: Boolean = false,
+    /**
+     * The other door's address, and the certificates this app has accepted — with the
+     * last thing a host presented when it was refused. All of it belongs on this page
+     * rather than in Settings: these are facts about the host, and the sign-out row
+     * already lives here because it acts on the credentials listed above.
+     */
+    lanUrl: String = "",
+    onLanUrl: ((String) -> Unit)? = null,
+    acceptedCerts: List<AcceptedCert> = emptyList(),
+    certReadout: CertReadout? = null,
+    certChecking: Boolean = false,
+    certError: String? = null,
+    onCheckCertificate: ((String) -> Unit)? = null,
+    onTrustCertificate: ((String, X509Certificate) -> Unit)? = null,
+    onForgetCertificate: ((String) -> Unit)? = null,
 ) {
     val colors = DshTheme.colors
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -184,6 +205,17 @@ fun AboutSheet(
             permissionOptions = permissionOptions,
             selectedModel = selectedModel,
             selectedEffort = selectedEffort,
+            activeUrl = activeUrl,
+            activeRouteLan = activeRouteLan,
+            lanUrl = lanUrl,
+            onLanUrl = onLanUrl,
+            acceptedCerts = acceptedCerts,
+            certReadout = certReadout,
+            certChecking = certChecking,
+            certError = certError,
+            onCheckCertificate = onCheckCertificate,
+            onTrustCertificate = onTrustCertificate,
+            onForgetCertificate = onForgetCertificate,
         )
     }
 }

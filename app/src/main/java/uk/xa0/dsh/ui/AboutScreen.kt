@@ -24,26 +24,42 @@ import androidx.compose.material.icons.rounded.LocalCafe
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import uk.xa0.dsh.BuildConfig
 import uk.xa0.dsh.ModelOption
 import uk.xa0.dsh.PermissionOption
+import uk.xa0.dsh.net.AcceptedCert
+import uk.xa0.dsh.net.CertReadout
+import uk.xa0.dsh.ui.components.CertificateSection
+import uk.xa0.dsh.ui.components.DshTextField
 import uk.xa0.dsh.ui.components.DshWordmark
 import uk.xa0.dsh.ui.settings.rememberSettingsLocalFacts
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
+import java.security.cert.X509Certificate
 
 /**
  * The app's own facts, split off the Settings sheet because not one of them is a
  * setting: what this client is, which host it is pointed at, how it is signed in,
  * what it is running on, and which session is open.
+ *
+ * It is also where the host's *changeable* connection rows live — the optional LAN
+ * address, and the certificate this host is pinned to. Changeable is not the test
+ * here; reachable is. A signed-in session has no route back to the setup screen, so
+ * a certificate that could only be pinned before signing in is one nobody pins, and
+ * the drawer's footer opens this page beside Settings.
  *
  * The credential rows read `ui/settings/SettingsLocalFacts.kt`, the same source
  * the Settings sheet's old Connection block used. The sign-in mode and whether
@@ -51,10 +67,11 @@ import uk.xa0.dsh.ui.theme.DshType
  * the `UiState` slice the sheets are handed, so the view model has no field for
  * either.
  *
- * Everything here is already local: no row on this page performs a host call,
- * which is also why it stays truthful with the socket down. Facts that would
- * need one — the host's own build, the machine it runs on — are deliberately
- * absent rather than guessed.
+ * Every row here is local, and every one stays truthful with the socket down. The
+ * one action that reaches the network is **Check certificate**, which reads what the
+ * host presents and is explicit about doing so. Facts that would need a host call to
+ * *print* — the host's own build, the machine it runs on — are deliberately absent
+ * rather than guessed.
  *
  * No row prints a bare dash. A value the host has not reported reads as
  * `Unknown`, and a state that has a name of its own (`Not configured`, `None`,
@@ -80,6 +97,35 @@ fun AboutContent(
     permissionOptions: List<PermissionOption> = emptyList(),
     selectedModel: ModelOption? = null,
     selectedEffort: String? = null,
+    /**
+     * The resolved endpoint and which door it is. All defaulted: a caller that
+     * passes neither sees the rows omitted rather than a guessed route.
+     */
+    activeUrl: String = "",
+    activeRouteLan: Boolean = false,
+    /**
+     * The LAN door's own address, and where an edit goes. Committed by the Save
+     * action rather than per keystroke: a new LAN address re-resolves the endpoint
+     * and redials, so committing on every character would reconnect the app once
+     * per letter.
+     */
+    lanUrl: String = "",
+    onLanUrl: ((String) -> Unit)? = null,
+    /**
+     * The certificates the app has been told to trust, one per host, and the last
+     * thing a host presented. See [uk.xa0.dsh.ui.components.CertificateSection].
+     *
+     * These live here, with the rest of the host's facts, rather than in Settings: a
+     * certificate that can only be pinned before signing in is one nobody pins, and
+     * this page is the surface a signed-in session can actually reach.
+     */
+    acceptedCerts: List<AcceptedCert> = emptyList(),
+    certReadout: CertReadout? = null,
+    certChecking: Boolean = false,
+    certError: String? = null,
+    onCheckCertificate: ((String) -> Unit)? = null,
+    onTrustCertificate: ((String, X509Certificate) -> Unit)? = null,
+    onForgetCertificate: ((String) -> Unit)? = null,
 ) {
     val colors = DshTheme.colors
     // Read once per sheet: both sources are disk-backed, so re-reading them per
@@ -134,6 +180,62 @@ fun AboutContent(
 
         SectionHeading("Connection")
         InfoRow("Host", baseUrl.ifBlank { "Not configured" })
+        // Which door is actually in use. Not the same as Host: the resolver
+        // prefers the LAN address whenever the phone can reach it, so Host can be
+        // the public URL while traffic goes over the LAN. When the two agree,
+        // "Active URL" would only repeat the row above, so it is omitted.
+        InfoRow(
+            "Route",
+            when {
+                activeUrl.isBlank() -> "Not connected"
+                activeRouteLan -> "LAN"
+                else -> "Public"
+            },
+        )
+        // Compared with the trailing slash folded away: the configured string is
+        // stored trimmed while the resolved one is a normalised URL.
+        if (activeUrl.isNotBlank() && activeUrl.trimEnd('/') != baseUrl.trimEnd('/')) {
+            InfoRow("Active URL", activeUrl)
+        }
+
+        // The second door, edited where the other connection facts are read. Bound to
+        // a stable local so the save lambda captures a non-null function rather than
+        // relying on a smart cast across a closure.
+        val saveLan = onLanUrl
+        var lanDraft by rememberSaveable(lanUrl) { mutableStateOf(lanUrl) }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = DshSpacing.xxl, vertical = DshSpacing.sm),
+        ) {
+            Text("LAN address", style = DshType.bodyMedium, color = colors.labelTertiary)
+            Spacer(Modifier.height(DshSpacing.sm))
+            DshTextField(
+                value = lanDraft,
+                onValueChange = { lanDraft = it },
+                placeholder = "http://192.168.1.110/",
+                keyboardType = KeyboardType.Uri,
+            )
+            Spacer(Modifier.height(DshSpacing.sm))
+            Text(
+                text = "Optional, for the same host: reachable only on your own network, " +
+                    "and tried first when it answers.",
+                style = DshType.micro,
+                color = colors.labelCaption,
+            )
+            // Compared in the form the store keeps, so saving `http://host/` does not
+            // leave the action showing for a value that is already stored.
+            if (saveLan != null && lanDraft.trim().trimEnd('/') != lanUrl.trimEnd('/')) {
+                Spacer(Modifier.height(DshSpacing.sm))
+                Text(
+                    text = "Save LAN address",
+                    style = DshType.bodyMedium,
+                    color = colors.link,
+                    modifier = Modifier.clickableNoRipple { saveLan(lanDraft) },
+                )
+            }
+        }
+
         // A blank account is what the Setup screen asks for on the carrier-port
         // cookie path ("Leave the account blank"), so it is named, not dashed.
         InfoRow("Account", username.ifBlank { "None" })
@@ -141,6 +243,30 @@ fun AboutContent(
         InfoRow("Session cookie", local.sessionCookie?.let { if (it) "Present" else "None" })
         // Web shell connection copy: connected / disconnected.
         InfoRow("Status", if (socketConnected) "Connected" else "Disconnected")
+
+        // What this host is pinned to, or what it presented when it was refused. Bound
+        // to locals because a nullable parameter does not smart-cast inside a lambda.
+        val check = onCheckCertificate
+        val trust = onTrustCertificate
+        val forget = onForgetCertificate
+        if (check != null && trust != null && forget != null &&
+            baseUrl.trim().startsWith("https://", ignoreCase = true)
+        ) {
+            SectionHeading("Certificate")
+            Column(Modifier.padding(horizontal = DshSpacing.xxl)) {
+                CertificateSection(
+                    url = baseUrl,
+                    acceptedCerts = acceptedCerts,
+                    readout = certReadout,
+                    checking = certChecking,
+                    certError = certError,
+                    onCheckCertificate = check,
+                    onTrustCertificate = trust,
+                    onForgetCertificate = forget,
+                    heading = null,
+                )
+            }
+        }
 
         SectionHeading("Session")
         InfoRow("Title", sessionTitle.ifBlank { "Untitled" })

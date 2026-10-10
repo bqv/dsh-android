@@ -22,12 +22,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import uk.xa0.dsh.net.AcceptedCert
+import uk.xa0.dsh.net.CertReadout
+import uk.xa0.dsh.ui.components.CertificateSection
 import uk.xa0.dsh.ui.components.DshMark
 import uk.xa0.dsh.ui.components.DshPrimaryButton
 import uk.xa0.dsh.ui.components.DshTextField
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 import uk.xa0.dsh.ui.theme.DshType
+import java.security.cert.X509Certificate
 
 /**
  * First-run / reconnect screen.
@@ -43,10 +47,27 @@ fun SetupScreen(
     error: String?,
     busy: Boolean,
     status: String?,
-    onConnect: (url: String, username: String, password: String, cookie: String) -> Unit,
+    onConnect: (url: String, lanUrl: String, username: String, password: String, cookie: String) -> Unit,
+    initialLanUrl: String = "",
+    /**
+     * The hosts this app already trusts, one certificate each.
+     *
+     * Passed in rather than fetched so the screen can say "pinned, since when, with
+     * which fingerprint" before anything is dialled — which is the moment at which
+     * the answer still matters.
+     */
+    acceptedCerts: List<AcceptedCert> = emptyList(),
+    /** What the last certificate read saw, from a check or from a refusal. */
+    readout: CertReadout? = null,
+    checking: Boolean = false,
+    certError: String? = null,
+    onCheckCertificate: (String) -> Unit = {},
+    onTrustCertificate: (String, X509Certificate) -> Unit = { _, _ -> },
+    onForgetCertificate: (String) -> Unit = {},
 ) {
     val colors = DshTheme.colors
     var url by rememberSaveable { mutableStateOf(initialUrl.ifBlank { "http://192.168.1.110/" }) }
+    var lanUrl by rememberSaveable { mutableStateOf(initialLanUrl) }
     var username by rememberSaveable { mutableStateOf(initialUsername) }
     var password by rememberSaveable { mutableStateOf("") }
     var cookie by rememberSaveable { mutableStateOf("") }
@@ -80,6 +101,16 @@ fun SetupScreen(
                 label = "Server",
                 keyboardType = KeyboardType.Uri,
             )
+            CertificateSection(
+                url = url,
+                acceptedCerts = acceptedCerts,
+                readout = readout,
+                checking = checking,
+                certError = certError,
+                onCheckCertificate = onCheckCertificate,
+                onTrustCertificate = onTrustCertificate,
+                onForgetCertificate = onForgetCertificate,
+            )
             DshTextField(
                 value = username,
                 onValueChange = { username = it },
@@ -105,6 +136,22 @@ fun SetupScreen(
 
             if (advanced) {
                 Column {
+                    DshTextField(
+                        value = lanUrl,
+                        onValueChange = { lanUrl = it },
+                        placeholder = "http://192.168.1.110/",
+                        label = "LAN address (optional)",
+                        keyboardType = KeyboardType.Uri,
+                    )
+                    Spacer(Modifier.height(DshSpacing.md))
+                    Text(
+                        text = "A second address for the same host, reachable only on your " +
+                            "own network. Tried first when it answers, so the app uses the " +
+                            "LAN at home and the server address everywhere else.",
+                        style = DshType.micro,
+                        color = colors.labelCaption,
+                    )
+                    Spacer(Modifier.height(DshSpacing.xl))
                     DshTextField(
                         value = cookie,
                         onValueChange = { cookie = it },
@@ -137,7 +184,7 @@ fun SetupScreen(
                     else -> "Connect"
                 },
                 enabled = !busy && url.isNotBlank(),
-                onClick = { onConnect(url, username, password, cookie) },
+                onClick = { onConnect(url, lanUrl, username, password, cookie) },
             )
 
             if (busy) {
@@ -159,3 +206,4 @@ fun SetupScreen(
         Spacer(Modifier.height(48.dp))
     }
 }
+

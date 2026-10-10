@@ -138,6 +138,63 @@ registers without carrying bytes, so do not rely on `127.0.0.1:8081` from inside
 it. Details and the measurement are in `docs/HANDOFF.md`.) Either way, paste the
 carrier cookie — the loopback carrier has no login form.
 
+## Certificates and trust
+
+The app does not take the platform's word for who the host is. It keeps its own
+set of accepted certificates and runs the platform's *path validation* against
+that set, falling back to the system store — the shape WeeChat-Android uses for
+its relay, adapted to a host that can be a private LAN address as easily as a
+public name. Three consequences, in the order they matter:
+
+1. **An ordinary public certificate needs no ceremony.** If the system store
+   already trusts the chain, the connection is made and nothing is recorded. The
+   app only asks a question when the answer is not already on the device.
+2. **A self-signed or private-CA host works, and is remembered.** The first
+   connection records the certificate the host presented (`Trust on first use`).
+   It is stored as a *trust anchor*, not as a fingerprint comparison, so the
+   platform still enforces validity dates, key usage and path length for it — a
+   pinned certificate that expires is still an expired certificate.
+3. **A host that has been accepted is pinned to the key that was accepted.** This
+   is the part that matters for a host reached through somebody else's edge: the
+   party that terminates the connection is also the party a certificate authority
+   will issue to for that name, so "a CA vouched for it" is not a defence. A pin
+   is: a certificate is only useful to an impostor who also holds the private key
+   the pin names. OkHttp checks the pin during the handshake, *before a single
+   byte of the request is written*.
+
+Where this is visible and reversible: a **Certificate** block appears on the setup
+form under the Server field, and — the one that matters once you are signed in,
+because a live session has no route back to setup — in **About**, under
+Connection, beside the host's other facts and the sign-out row. It shows the
+fingerprint already accepted for that host (and **Forget this certificate**),
+**Check certificate**, which reads what the host presents right now without
+trusting any of it, and a **Trust this certificate** action per link of the chain.
+Trusting the *CA* rather than the leaf is the choice that survives a leaf renewal —
+the chain shown is what makes that selectable. The optional LAN address is edited
+in the same place, for the same reason.
+
+A refusal is a first-class state, not a generic error: the presented chain
+travels out of the failed handshake with the exception, so the surface that
+reports it shows the new fingerprint and offers to trust it without a second
+connection. The message says "not the one accepted for it" rather than
+"unreachable", because the two need different answers and only one of them is
+about the network.
+
+```bash
+# What the app displays, computed on the host for comparison:
+openssl x509 -in cert.pem -pubkey -noout \
+  | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary | base64   # the pin
+```
+
+**What the app does not do.** It does not narrow the platform's trust anchors:
+`res/xml/network_security_config.xml` still trusts the system store and the
+user-installed roots, because a pin is consulted *after* the chain validates, so
+removing the anchor a private CA needs would break the case the pin is meant to
+cover. It does not verify fingerprints for you either: "Trust this certificate"
+records what was presented, and the reading that makes it a defence is the one
+you do against the host.
+
 ## Wire protocol
 
 Unary calls are `POST /api/<namespace>/<method>` carrying the harness envelope:
