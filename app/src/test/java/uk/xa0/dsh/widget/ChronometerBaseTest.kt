@@ -26,24 +26,27 @@ class ChronometerBaseTest {
     }
 
     @Test
-    fun `an instant in the future is clamped rather than counting backwards`() {
+    fun `an instant in the future is clamped, so the launcher cannot count backwards`() {
+        val uptime = 1_000L
         val base = chronometerBase(
             wallInstant = 1_700_000_060_000L,
             now = 1_700_000_000_000L,
-            uptime = 1_000L,
+            uptime = uptime,
         )
-        assertEquals("a future instant draws 0:00, never a negative age", 0L, base)
+        // The base itself is what must be bounded: the launcher computes `uptime - base`, so a
+        // base above the uptime is a negative age however small the overshoot.
+        assertEquals("a future instant is clamped to the uptime, giving an age of zero", uptime, base)
+        assertEquals("and the launcher's own arithmetic cannot go negative", 0L, uptime - base)
     }
 
     @Test
-    fun `an instant older than the uptime clamps too`() {
-        // The reading predates boot, which is what the real card hit: a wall instant from
-        // 2023 against minutes of uptime.
-        val base = chronometerBase(
-            wallInstant = 1_700_000_000_000L,
-            now = 1_700_000_000_000L,
-            uptime = 90_000L,
-        )
-        assertEquals(0L, base)
+    fun `a reading older than the boot clamps to zero rather than an impossible base`() {
+        // The snapshot predates a reboot: two minutes of wall age against ninety seconds of
+        // uptime. The unclamped base would be negative, and the launcher would draw an age
+        // larger than the uptime it is measuring against.
+        val uptime = 90_000L
+        val now = 1_700_000_000_000L
+        val base = chronometerBase(wallInstant = now - 120_000L, now = now, uptime = uptime)
+        assertEquals("clamped to zero", 0L, base)
     }
 }

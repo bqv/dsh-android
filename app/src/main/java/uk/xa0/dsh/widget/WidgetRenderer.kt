@@ -183,10 +183,12 @@ object WidgetRenderer {
  * `uptime - wallClock` — which drew `oldest reading -406865:16:56` on a real homescreen: a
  * negative age of roughly the forty-six years between 1970 and this machine's uptime. Both
  * clocks are parameters so the conversion is testable without a device, and the result is
- * clamped because an instant in the future would otherwise tick the same impossible way.
+ * clamped at BOTH ends: below zero a reading older than the boot would be counted from an
+ * impossible pun, and above the uptime a reading in the future would make the launcher's
+ * `elapsedRealtime() - base` negative in exactly the way this function exists to prevent.
  */
 internal fun chronometerBase(
     wallInstant: Long,
     now: Long = System.currentTimeMillis(),
     uptime: Long = SystemClock.elapsedRealtime(),
-): Long = (uptime - (now - wallInstant)).coerceAtLeast(0L)
+): Long = (uptime - (now - wallInstant)).coerceIn(0L, uptime)
