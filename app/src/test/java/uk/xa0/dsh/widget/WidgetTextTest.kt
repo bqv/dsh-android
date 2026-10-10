@@ -241,7 +241,12 @@ class WidgetTextTest {
             WidgetCopy.tileTitle("Fix\nthe   login bug"),
         )
 
-        val long = "Refactor the widget snapshot writer so it stops lying about jobs"
+        // Repeated so it exceeds TITLE_MAX by construction: a fixed literal that merely
+        // happened to be longer than the cap stopped testing the cut the moment the cap
+        // was raised, and the test failed for the right reason by then asserting the old
+        // length. Deriving it means raising the cap again cannot quietly retire this test.
+        val long = "Refactor the widget snapshot writer so it stops lying about jobs".repeat(2)
+        assertTrue("the fixture must exceed the cap, or there is no cut to assert", long.length > WidgetCopy.TITLE_MAX)
         val trimmed = WidgetCopy.tileTitle(long)
         assertEquals(WidgetCopy.TITLE_MAX, trimmed.length)
         assertEquals(WidgetCopy.ELLIPSIS, trimmed.takeLast(1))
