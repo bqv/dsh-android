@@ -154,7 +154,7 @@ class WidgetPublisherTest {
     fun `stamped stamps the instant the basis was lost, not the last one it was known`() {
         val confirmed = WidgetReading(known = true, value = 2, asOf = 1_000L)
 
-        val lost = stamped(confirmed, known = false, value = 0, now = 61_000L)
+        val lost = with(publisher) { stamped(confirmed, known = false, value = 0, now = 61_000L)
         assertTrue(lost.known == false)
         assertEquals(
             "the card counts from the moment the app could no longer confirm, not the last time it could",
@@ -168,14 +168,14 @@ class WidgetPublisherTest {
         assertEquals(
             "a reading that was never confirmed has no instant to keep",
             never,
-            stamped(never, known = false, value = 0, now = 61_000L),
+            with(publisher) { stamped(never, known = false, value = 0, now = 61_000L) },
         )
         // A fresh CONFIRMATION is a different matter and does stamp: the app has just
         // looked, so the age starts now even though nothing was ever confirmed before.
         assertEquals(
             "a fresh confirmation starts the age from now",
             61_000L,
-            stamped(never, known = true, value = 0, now = 61_000L).asOf,
+            with(publisher) { stamped(never, known = true, value = 0, now = 61_000L) }.asOf,
         )
     }
 
