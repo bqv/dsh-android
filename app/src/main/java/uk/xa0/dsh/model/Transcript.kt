@@ -45,6 +45,20 @@ class TranscriptReducer {
     private val turnEnds = mutableMapOf<Int, Long>()
 
     /**
+     * The `turn/end` seq of every closed turn, keyed by turn.
+     *
+     * `session/fork`'s `atSeq` is the **inclusive** event seq the child inherits
+     * through, and the web cuts at the turn rather than at the message: its
+     * `forkAt(data.seq)` passes the `turn/end` event's own seq, since `data` is the
+     * `turn-tail` node the host builds from that `turn/end`. The closing answer's
+     * seq is a *different* boundary — the message sits inside its turn — so a fork
+     * cut there would inherit a turn with no ending and the host would have to
+     * close it with synthetic `forked` events. Keeping the real boundary is what
+     * makes a mobile branch end on the same completed turn a web branch does.
+     */
+    private val turnEndSeqs = mutableMapOf<Int, Int>()
+
+    /**
      * Compaction attempts in flight, mapped to the seq of their
      * "Compacting context…" row.
      *
@@ -135,6 +149,7 @@ class TranscriptReducer {
         endedTurns.clear()
         turnStarts.clear()
         turnEnds.clear()
+        turnEndSeqs.clear()
         compactionRows.clear()
         compactionFacts.clear()
         compactionMarkers.clear()
@@ -201,11 +216,53 @@ class TranscriptReducer {
      * interrupted), so the footer needs to know exactly which row closes a turn.
      */
     fun closingAssistantSeqs(): Set<Int> = buildSet {
+        val answers = closingAssistants()
+        endedTurns.forEach { turn -> answers[turn]?.let { add(it.seq) } }
+    }
+
+    /**
+     * Where a branch hung on a closing answer must cut the source log, keyed by
+     * that answer's own seq.
+     *
+     * The value is the owning turn's `turn/end` seq: the same inclusive boundary the
+     * web hands `session/fork` as `atSeq`, and the only reason [turnEndSeqs] is
+     * kept. A turn whose closing answer the window has not loaded, or whose
+     * `turn/end` has not arrived, is **absent rather than mapped to a guess** — the
+     * host refuses an `atSeq` that names no event with `session/fork-unavailable`,
+     * and an `atSeq` that names the *wrong* event forks the wrong conversation with
+     * no error at all, so only a boundary this reducer actually saw is offered.
+     *
+     * Only closed turns appear, which is this client's form of the web's
+     * `branchUnavailable: closing === null`: a turn still running has no closing
+     * answer to branch from. The web's other half of that flag — a closing answer
+     * that is not the turn's last transcript row — is deliberately not reproduced:
+     * this cut is always the turn boundary, so the child is a clean completed-turn
+     * prefix however late in its turn the answer sits.
+     */
+    fun closingBranchSeqs(): Map<Int, Int> = buildMap {
+        val answers = closingAssistants()
         endedTurns.forEach { turn ->
-            entries.values
-                .filterIsInstance<ChatEntry.AssistantMessage>()
-                .lastOrNull { it.turn == turn && it.text.isNotBlank() }
-                ?.let { add(it.seq) }
+            val closing = answers[turn] ?: return@forEach
+            turnEndSeqs[turn]?.let { put(closing.seq, it) }
+        }
+    }
+
+    /**
+     * The last text-bearing assistant message of each turn, keyed by turn, which is
+     * the row the web's `turn-tail` action row hangs off (`tailData`'s `closing`).
+     *
+     * One pass over the kept rows rather than a scan per turn: both callers run on
+     * every transcript publish — 16 times a second while a turn streams — and the
+     * per-turn scan made that quadratic in a long session's turns. A turn whose
+     * answer is outside the loaded window is simply absent.
+     */
+    private fun closingAssistants(): Map<Int, ChatEntry.AssistantMessage> = buildMap {
+        // Ascending seq order, so the last write for a turn is its newest answer;
+        // a later answer with no text must not displace the prose that closed it.
+        entries.values.forEach { entry ->
+            if (entry is ChatEntry.AssistantMessage && entry.text.isNotBlank()) {
+                put(entry.turn, entry)
+            }
         }
     }
 
@@ -542,6 +599,9 @@ class TranscriptReducer {
             "turn/end" -> data.int("turn").takeIf { it > 0 }?.let { turn ->
                 endedTurns += turn
                 turnEnds[turn] = time
+                // The fork boundary for a branch hung on this turn's closing
+                // answer; see [turnEndSeqs].
+                turnEndSeqs[turn] = seq
                 // Why a turn stopped is worth a row: a reply cut off by the output
                 // budget and a reply that failed both otherwise look like the model
                 // simply trailing off mid-thought.

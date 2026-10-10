@@ -210,6 +210,11 @@ socket resumes streaming instead of silently freezing the UI.
 - Live token streaming with throttling so hundreds of deltas per second stay
   smooth; a per-turn process fold with a summary; a "Deep diving…" status with
   an elapsed clock; per-message clock and copy actions; a back-to-bottom button.
+- **Branch into a new conversation** from any earlier finished turn: the branch
+  action sits in the closing answer's footer, next to Copy, and `session/fork`
+  copies the conversation through that turn into a **new session**, which opens
+  while the one you were reading is left untouched. The confirmation says so
+  before the tap.
 - Chat / Trajectory / Shell view tabs: the second is the model's input/output
   ledger, the third the session's PTY (see *The Shell tab*, below). A fourth,
   **Router**, appears only for a local model (see *The Router tab*, below).

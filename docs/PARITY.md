@@ -167,9 +167,20 @@ of where the app stands against them.
       pending history page.
 - [x] Live token streaming with throttling + streaming dot; the live signal is the
       turn-scoped "Deep diving..." shimmer, not a caret — the web has no streaming caret
-- [x] Message footers: `[clock] [copy]` with a 1s icon swap and no toast
+- [x] Message footers: `[clock] [copy] [branch]` with a 1s copy icon swap and no toast
       (`ui/components/ChatRows.kt: MessageActions`). No retry/edit/quote exists in the web
       UI either
+- [+] **Branch from an earlier conclusion.** The web hangs its branch button on the
+      `turn-tail` node and cuts from there (`ui-chat/lib/client.js: forkAt(data.seq)`), so
+      the app puts the same button on the same row — the reducer's closing answer
+      (`model/Transcript.kt: closingBranchSeqs`) — and passes that turn's `turn/end` seq,
+      which is what `session/fork`'s `atSeq` wants. The host answers with a **new session
+      id** and never writes to the source, so the tap is confirmed first
+      (`ui/ChatScreen.kt: BranchFromMessageDialog`), which the web has no equivalent of.
+      **Divergence:** the web's `branchUnavailable` also hides the button when the closing
+      answer is no longer the turn's last transcript row (a tool call after the answer);
+      the app offers it there too, because its cut is always the turn boundary, so the
+      child is a clean completed-turn prefix either way
 - [x] Per-message timestamp on assistant rows
 - [x] Back-to-bottom (34dp floating circle)
 - [x] Turn navigator rail at the transcript's right edge — one tick per human message that

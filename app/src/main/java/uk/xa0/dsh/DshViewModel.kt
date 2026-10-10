@@ -54,6 +54,7 @@ import uk.xa0.dsh.model.warrantsIdleAlert
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
 import uk.xa0.dsh.model.SessionSearch
+import uk.xa0.dsh.model.sessionForkRequest
 import uk.xa0.dsh.model.sessionRowTitle
 import uk.xa0.dsh.model.SettingsApply
 import uk.xa0.dsh.model.SettingsWritePlan
@@ -949,6 +950,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     /** Seq of each completed turn's closing answer, which carries the action row. */
     private val _closingSeqs = MutableStateFlow<Set<Int>>(emptySet())
     val closingSeqs: StateFlow<Set<Int>> = _closingSeqs.asStateFlow()
+
+    /**
+     * The `session/fork` boundary for each closing answer, keyed by that answer's
+     * own seq, so the transcript can offer "branch from here" on exactly the rows
+     * the host can cut at. Built by
+     * [uk.xa0.dsh.model.TranscriptReducer.closingBranchSeqs]; a closing answer
+     * missing from this map is one the host would refuse.
+     */
+    private val _branchSeqs = MutableStateFlow<Map<Int, Int>>(emptyMap())
+    val branchSeqs: StateFlow<Map<Int, Int>> = _branchSeqs.asStateFlow()
     /** Elapsed ms per turn, for the "Ran for …" pill. */
     private val _turnDurations = MutableStateFlow<Map<Int, Long>>(emptyMap())
     val turnDurations: StateFlow<Map<Int, Long>> = _turnDurations.asStateFlow()
@@ -3830,18 +3841,40 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * user cannot see is indistinguishable from the button doing nothing, and the
      * new session is the only thing they wanted from the tap.
      */
-    fun forkSession(sessionId: String) {
+    fun forkSession(sessionId: String) = forkSessionAt(sessionId, atSeq = null)
+
+    /**
+     * Branches the open session from the conclusion the reader picked rather than
+     * from its newest turn — this client's half of the web's `forkAt(seq)`.
+     *
+     * [atSeq] is that turn's `turn/end` event seq, handed over by
+     * [uk.xa0.dsh.model.TranscriptReducer.closingBranchSeqs]. `session/fork` copies
+     * the source's events up to and including that seq into a **new** session and
+     * returns its id; the session on screen is read, never written, and keeps every
+     * row it had. The caller is responsible for telling the reader that before this
+     * runs.
+     */
+    fun branchFromConclusion(atSeq: Int) {
+        val sessionId = _ui.value.currentSessionId ?: return
+        forkSessionAt(sessionId, atSeq)
+    }
+
+    private fun forkSessionAt(sessionId: String, atSeq: Int?) {
         viewModelScope.launch {
             runCatching {
                 client.rpc(
                     "session/fork",
-                    JSONObject().put("request", JSONObject().put("sessionId", sessionId)),
+                    JSONObject().put("request", sessionForkRequest(sessionId, atSeq)),
                 ).str("sessionId")
             }.onSuccess { forked ->
                 refreshSessions()
                 if (forked.isNotEmpty()) openSession(forked)
             }.onFailure { error ->
-                showFailure(error, "session/fork", "Could not fork: ")
+                showFailure(
+                    error,
+                    "session/fork",
+                    if (atSeq == null) "Could not fork: " else "Could not branch: ",
+                )
             }
         }
     }
@@ -6689,6 +6722,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _header.value = reducer.header()
         _endedTurns.value = reducer.endedTurns()
         _closingSeqs.value = reducer.closingAssistantSeqs()
+        _branchSeqs.value = reducer.closingBranchSeqs()
         _turnDurations.value = reducer.turnDurations()
         // Prefer the host's `turn/start` time, but fall back to when this client
         // first saw the session running: the event scrolls out of the loaded

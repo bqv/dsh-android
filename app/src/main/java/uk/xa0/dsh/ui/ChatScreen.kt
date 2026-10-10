@@ -49,6 +49,7 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerState
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
@@ -56,6 +57,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -208,6 +210,7 @@ fun ChatScreen(vm: DshViewModel) {
         ?: "compact"
     val foldTurns = transcriptView != "normal"
     val closingSeqs by vm.closingSeqs.collectAsStateWithLifecycle()
+    val branchSeqs by vm.branchSeqs.collectAsStateWithLifecycle()
     val turnDurations by vm.turnDurations.collectAsStateWithLifecycle()
     val turnStartedAt by vm.turnStartedAt.collectAsStateWithLifecycle()
     val references by vm.references.collectAsStateWithLifecycle()
@@ -233,6 +236,17 @@ fun ChatScreen(vm: DshViewModel) {
 
     /** Turns whose process rows the user has opened; the rest stay folded. */
     var expandedTurns by remember { mutableStateOf(emptySet<Int>()) }
+
+    /**
+     * The `session/fork` boundary the reader has asked to branch at, while the
+     * confirmation is up; null when none is.
+     *
+     * Held here rather than acted on at the tap, because a branch creates a
+     * **new session**: the dialog is the one place the consequence is stated before
+     * it is paid for, and a confirmation that a rotation can drop costs nothing —
+     * the reader re-taps the row.
+     */
+    var branchAt by remember { mutableStateOf<Int?>(null) }
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -1123,11 +1137,22 @@ fun ChatScreen(vm: DshViewModel) {
                                 when (row) {
                                     is DisplayRow.Single -> when (val entry = row.entry) {
                                         is ChatEntry.UserMessage -> UserMessageRow(entry, vm::imageBitmap)
-                                        is ChatEntry.AssistantMessage -> AssistantMessageRow(
-                                            entry = entry,
-                                            showFooter = entry.seq in closingSeqs,
-                                            durationMs = turnDurations[entry.turn],
-                                        )
+                                        is ChatEntry.AssistantMessage -> {
+                                            // Offered only where the reducer could
+                                            // name the turn's `turn/end`, which is
+                                            // the boundary `session/fork` cuts at; a
+                                            // row without one gets no button rather
+                                            // than a dead one.
+                                            val branch: (() -> Unit)? =
+                                                branchSeqs[entry.seq]
+                                                    ?.let { atSeq -> { branchAt = atSeq } }
+                                            AssistantMessageRow(
+                                                entry = entry,
+                                                showFooter = entry.seq in closingSeqs,
+                                                durationMs = turnDurations[entry.turn],
+                                                onBranch = branch,
+                                            )
+                                        }
                                         is ChatEntry.ToolCall -> {
                                             // A PTC sub-call renders under the call
                                             // that dispatched it; every other call
@@ -1456,6 +1481,16 @@ fun ChatScreen(vm: DshViewModel) {
                 )
             }
         }
+    }
+
+    branchAt?.let { atSeq ->
+        BranchFromMessageDialog(
+            onDismiss = { branchAt = null },
+            onConfirm = {
+                branchAt = null
+                vm.branchFromConclusion(atSeq)
+            },
+        )
     }
 
     if (showSettings) {
@@ -2963,3 +2998,53 @@ private fun shortAccessLabel(current: String, options: List<uk.xa0.dsh.Permissio
 /** Last path segment, for the hero's workspace chip. */
 private fun shortenLastSegment(path: String): String =
     path.trimEnd('/').substringAfterLast('/').ifEmpty { path }
+
+/**
+ * The pre-flight notice for a branch, which the web client does not have.
+ *
+ * The web's branch button forks on the tap and opens the child as another session
+ * in its own chrome; a phone shows one session at a time, so the new session
+ * replaces the conversation on screen. Without this dialog the reader's own turn
+ * appears to have been undone, or the app appears to have duplicated the
+ * conversation by accident — and there is nothing to undo it with. So the
+ * consequence is stated here, before the tap: `session/fork` creates a **new
+ * session** holding the source's events up to and including the chosen turn, opens
+ * it, and leaves this session exactly as it was.
+ */
+@Composable
+private fun BranchFromMessageDialog(
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val colors = DshTheme.colors
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = colors.bgBase,
+        title = {
+            Text(
+                "Branch into a new conversation?",
+                color = colors.labelPrimary,
+                style = DshType.titleMedium,
+            )
+        },
+        text = {
+            Text(
+                text = "This starts a new session holding this conversation up to the " +
+                    "end of this turn, and opens it straight away. This session is left " +
+                    "alone: it keeps every message and stays in your list.",
+                style = DshType.bodyMedium,
+                color = colors.labelSecondary,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Branch", color = colors.accent)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = colors.labelSecondary)
+            }
+        },
+    )
+}

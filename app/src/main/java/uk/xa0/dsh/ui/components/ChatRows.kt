@@ -417,6 +417,11 @@ private fun MessageAttachmentChip(attachment: MessageAttachment) {
  *
  * Copy swaps to a check for 1000 ms with no toast, and repeat clicks inside that
  * window are ignored — both as in the web client.
+ *
+ * [onBranch] fills the web's `[branch]` slot, and is null on every row the host
+ * cannot cut a fork at — the web's `onBranch === undefined`, which draws no button
+ * rather than a dead one. Its label is the web's own `message.branch` string, so
+ * the screen reader says what the action does instead of naming an icon.
  */
 @Composable
 fun MessageActions(
@@ -425,6 +430,7 @@ fun MessageActions(
     modifier: Modifier = Modifier,
     clockFirst: Boolean = false,
     durationMs: Long? = null,
+    onBranch: (() -> Unit)? = null,
 ) {
     val colors = DshTheme.colors
     val clipboard = LocalClipboardManager.current
@@ -478,6 +484,26 @@ fun MessageActions(
                 tint = if (copied) colors.success else colors.labelTertiary,
                 modifier = Modifier.size(14.dp),
             )
+        }
+
+        if (onBranch != null) {
+            // Same 28dp target as Copy, and immediately after it: the web's action
+            // row is copy → branch → clock, and an affordance that moves between
+            // turns is one the reader has to hunt for each time.
+            Box(
+                Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .clickableNoRipple(onClick = onBranch),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = DshIconBranch16,
+                    contentDescription = "Branch into a new conversation",
+                    tint = colors.labelTertiary,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
         }
 
         if (!clockFirst && stamp.isNotEmpty()) {
@@ -596,12 +622,18 @@ fun TurnStatusRow(elapsedMs: Long?, modifier: Modifier = Modifier) {
  * [showFooter] marks the row that closes a completed turn: in the web UI the
  * assistant action row hangs off a separate `turn-tail` node and is omitted
  * entirely when a turn has no closing text answer.
+ *
+ * [onBranch] rides that same row, because it is the row the web's `turn-tail` puts
+ * its branch button on. It is null when the reducer could not name the fork
+ * boundary for this turn, which is the mobile form of the web's
+ * `branchUnavailable`.
  */
 @Composable
 fun AssistantMessageRow(
     entry: ChatEntry.AssistantMessage,
     showFooter: Boolean = false,
     durationMs: Long? = null,
+    onBranch: (() -> Unit)? = null,
 ) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(DshSpacing.xl)) {
         if (entry.reasoning.isNotBlank()) {
@@ -617,6 +649,7 @@ fun AssistantMessageRow(
                 text = entry.text,
                 time = entry.time,
                 durationMs = durationMs,
+                onBranch = onBranch,
                 modifier = Modifier.offset(x = (-6).dp),
             )
         }
