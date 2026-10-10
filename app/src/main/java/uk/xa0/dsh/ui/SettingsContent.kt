@@ -50,6 +50,7 @@ import uk.xa0.dsh.model.SettingsChoice
 import uk.xa0.dsh.model.SettingsField
 import uk.xa0.dsh.model.displayPresetName
 import uk.xa0.dsh.ui.components.DshTextField
+import uk.xa0.dsh.ui.search.SessionSearchCopy
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
@@ -638,6 +639,15 @@ private fun ArchivedSessionsSection(
         },
         placeholder = "Search archived sessions",
         modifier = Modifier.padding(horizontal = DshSpacing.xxl, vertical = DshSpacing.md),
+        // The same rule as the drawer's box: a blank query matches everything in
+        // the filter below, so clearing the text is the whole of restoring the
+        // list. The paging reset matches `onValueChange` — a page expanded under
+        // one query is not a view the reader chose for the next.
+        onClear = {
+            query = ""
+            expanded = false
+        },
+        clearContentDescription = SessionSearchCopy.CLEAR,
     )
 
     if (loading) {

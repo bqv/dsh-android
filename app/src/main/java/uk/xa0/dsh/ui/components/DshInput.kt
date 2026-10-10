@@ -13,11 +13,16 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -109,9 +114,25 @@ fun DshTextField(
     verticalPadding: Dp = DshSpacing.lg,
     /** When set, the caller drives focus — the directory browser auto-focuses its editors. */
     focusRequester: FocusRequester? = null,
+    /**
+     * When set, a trailing clear affordance is drawn while [value] is not empty,
+     * and this is called to clear it. Opt-in rather than automatic: a form field's
+     * value is not a query, and an "x" beside a password, a host URL or an API key
+     * would offer to throw away something the user may not be able to see.
+     */
+    onClear: (() -> Unit)? = null,
+    /** The clear affordance's accessibility label; callers pass the surface's own copy. */
+    clearContentDescription: String = "Clear",
 ) {
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(DshRadius.card)
+    // The text itself is the focus target clearing hands focus back to. The
+    // affordance is a clickable, which is focusable in its own right, so on a
+    // device that moves focus to whatever was tapped the caret would otherwise
+    // land on a control that is about to disappear from the tree. A caller's own
+    // requester is preferred because it names the same node.
+    val ownFocus = remember { FocusRequester() }
+    val fieldFocus = focusRequester ?: ownFocus
 
     Column(modifier) {
         if (label != null) {
@@ -130,24 +151,52 @@ fun DshTextField(
                 .border(0.5.dp, colors.borderL2, shape)
                 .padding(horizontal = 14.dp, vertical = verticalPadding),
         ) {
-            if (value.isEmpty()) {
-                Text(placeholder, style = DshType.messageBody, color = colors.labelCaption)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
+                    if (value.isEmpty()) {
+                        Text(placeholder, style = DshType.messageBody, color = colors.labelCaption)
+                    }
+                    BasicTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        singleLine = singleLine,
+                        textStyle = DshType.messageBody.copy(color = colors.labelPrimary),
+                        cursorBrush = SolidColor(colors.accent),
+                        visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
+                        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                        // Let the text drive its own height for single-line fields so a
+                        // larger font scale can never clip the value.
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(fieldFocus)
+                            .then(if (singleLine) Modifier else Modifier.heightIn(min = minHeight)),
+                    )
+                }
+                // Only while there is something to clear, which is also what takes
+                // it away again the moment the last character is backspaced out —
+                // there is no separate visibility state to fall out of step.
+                if (onClear != null && value.isNotEmpty()) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = clearContentDescription,
+                        tint = colors.labelTertiary,
+                        modifier = Modifier
+                            // One line of `messageBody` (14sp/24sp) at the default
+                            // font scale, so the affordance stays inside the height
+                            // the text already claims. A box taller than the line
+                            // would grow the field the moment the first character
+                            // was typed and shove everything below it down the
+                            // screen. The inset leaves a 16dp glyph in that target.
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .clickableNoRipple {
+                                fieldFocus.requestFocus()
+                                onClear()
+                            }
+                            .padding(DshSpacing.xs),
+                    )
+                }
             }
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                singleLine = singleLine,
-                textStyle = DshType.messageBody.copy(color = colors.labelPrimary),
-                cursorBrush = SolidColor(colors.accent),
-                visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
-                keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-                // Let the text drive its own height for single-line fields so a
-                // larger font scale can never clip the value.
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-                    .then(if (singleLine) Modifier else Modifier.heightIn(min = minHeight)),
-            )
         }
     }
 }

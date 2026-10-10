@@ -99,6 +99,7 @@ import uk.xa0.dsh.ui.components.DshMark
 import uk.xa0.dsh.ui.components.DshTextField
 import uk.xa0.dsh.ui.components.StateDot
 import uk.xa0.dsh.ui.components.LocalAnimatedDots
+import uk.xa0.dsh.ui.search.SessionSearchCopy
 import uk.xa0.dsh.ui.search.SessionSearchRow
 import uk.xa0.dsh.ui.search.SessionSearchRowItem
 import uk.xa0.dsh.ui.search.SessionSearchStatus
@@ -681,11 +682,19 @@ fun SessionsDrawer(
         DshTextField(
             value = query,
             onValueChange = { query = it },
-            placeholder = "Search sessions...",
+            placeholder = SessionSearchCopy.PLACEHOLDER,
             minHeight = 40.dp,
             // Tighter than a form field: the drawer's chrome above it is a 48dp
             // centred lockup, so its own inset is most of the remaining gap.
             verticalPadding = DshSpacing.md,
+            // Emptying the box is the whole of it. The list's own derivations key
+            // off a blank query — `matched` lets every session through and the
+            // `searchHits` arm comes back empty because `onSearch("")` clears the
+            // host page — so there is nothing else to undo. The drawer stays open
+            // and the field keeps focus, which is what "show me the list again"
+            // means: the reader is still searching, just from the start.
+            onClear = { query = "" },
+            clearContentDescription = SessionSearchCopy.CLEAR,
         )
 
         Spacer(Modifier.height(DshSpacing.md))
