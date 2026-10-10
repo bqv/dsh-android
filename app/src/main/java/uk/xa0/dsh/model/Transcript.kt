@@ -256,12 +256,18 @@ class TranscriptReducer {
      * per-turn scan made that quadratic in a long session's turns. A turn whose
      * answer is outside the loaded window is simply absent.
      */
-    private fun closingAssistants(): Map<Int, ChatEntry.AssistantMessage> = buildMap {
-        // Ascending seq order, so the last write for a turn is its newest answer;
-        // a later answer with no text must not displace the prose that closed it.
-        entries.values.forEach { entry ->
-            if (entry is ChatEntry.AssistantMessage && entry.text.isNotBlank()) {
-                put(entry.turn, entry)
+    private fun closingAssistants(): Map<Int, ChatEntry.AssistantMessage> {
+        // Captured outside `buildMap`: its receiver is a `MutableMap`, whose own `entries` is a
+        // `Set<Map.Entry>` and shadows the reducer's row map, so `entries.values` inside the
+        // lambda resolves to a Set that has no `values`.
+        val rows = entries
+        return buildMap {
+            // Ascending seq order, so the last write for a turn is its newest answer;
+            // a later answer with no text must not displace the prose that closed it.
+            rows.values.forEach { entry ->
+                if (entry is ChatEntry.AssistantMessage && entry.text.isNotBlank()) {
+                    put(entry.turn, entry)
+                }
             }
         }
     }
