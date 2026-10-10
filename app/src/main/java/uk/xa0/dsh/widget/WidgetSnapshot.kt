@@ -94,11 +94,24 @@ data class WidgetSnapshot(
 ) {
 
     /**
-     * The most conservative stamp any surface may print: the *oldest* instant a
-     * reading still on screen was confirmed. One instant rather than one per line,
-     * because `RemoteViews` gives a widget a single Chronometer and no way to stamp
-     * two lines differently — and the oldest is the honest one, since it bounds
-     * every claim above it.
+     * The instant the widget's footer is based on: the **oldest** instant at which any
+     * reading that has a line on the card was confirmed.
+     *
+     * It is a bound over the whole card, not a stamp on one line, and that is what the
+     * footer says in words (`WidgetCopy.STAMP_OLDEST`): the worst line was confirmed that
+     * long ago, so everything above it is at least that fresh. Taking the newest instead
+     * would put a fresh-looking age under a figure that may be hours old — which is
+     * exactly the shape of lie a stale model chip is.
+     *
+     * One instant rather than one per line because `RemoteViews` gives a widget a single
+     * Chronometer and no way to stamp two lines differently. The filter is
+     * [WidgetReading.everSeen] rather than `known` for the same reason that field exists:
+     * a withdrawn reading is still *drawn*, as "Needs you: unknown", so the instant it was
+     * withdrawn is genuinely the age of a line on the card and must be allowed to bound
+     * the others.
+     *
+     * `null` means nothing has ever been established on this phone, and the footer then
+     * carries the way in rather than an age.
      */
     val confirmedAt: Long?
         get() = listOf(needsYou, working, subagents)

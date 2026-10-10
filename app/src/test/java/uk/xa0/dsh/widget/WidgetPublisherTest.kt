@@ -14,9 +14,11 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowSystemClock
 import uk.xa0.dsh.PendingKind
 import uk.xa0.dsh.scroll.HarnessApplication
 import java.io.File
+import java.time.Duration
 
 /**
  * The one writer: what it writes, when it refuses to, and what it does when there is
@@ -109,22 +111,39 @@ class WidgetPublisherTest {
         )
     }
 
+    /**
+     * The instant a reading *lost its basis* is a different instant from the one it was
+     * last confirmed at, and the card counts from the first — so the clock is moved
+     * between the two publications and the assertion names the exact answer.
+     *
+     * The clock is real here rather than assumed. Robolectric intercepts
+     * `System.currentTimeMillis()` at the call site inside instrumented classes
+     * (`AndroidInterceptors$SystemTimeInterceptor`), and in the PAUSED looper mode this
+     * harness runs, that resolves through `ShadowPausedSystemClock.uptimeMillis()` —
+     * exactly the clock `ShadowSystemClock.advanceBy` advances. An implementation that
+     * kept the earlier instant instead of recording the loss would answer `confirmedAt`,
+     * and one that zeroed the field would answer `0`; only the rule under test produces
+     * `confirmedAt + 60_000`.
+     */
     @Test
-    fun `losing the basis records the instant it was lost`() {
+    fun `losing the basis records the instant it was lost, not the last one it was known`() {
         boundWidget()
         val publisher = publisher()
         publisher.needsYou(2, PendingKind.APPROVAL, "session-1", known = true)
-        val known = reading()?.needsYou?.asOf ?: 0L
-        assertTrue(known > 0L)
+        val confirmedAt = reading()?.needsYou?.asOf ?: 0L
+        assertTrue("nothing was ever confirmed, so the test would prove nothing", confirmedAt > 0L)
 
+        ShadowSystemClock.advanceBy(Duration.ofMinutes(1))
         publisher.needsYou(0, null, null, known = false)
+
         val withdrawn = reading()?.needsYou
         assertTrue(withdrawn?.known == false)
-        assertTrue(
-            "the last instant the reading was true is what the card counts from",
-            (withdrawn?.asOf ?: 0L) >= known,
+        assertEquals(
+            "the card counts from the moment the app could no longer confirm, not from the last time it could",
+            confirmedAt + 60_000L,
+            withdrawn?.asOf,
         )
-        // The name and the session go with the count: a tap that opened a session because
+        // The kind and the session go with the count: a tap that opened a session because
         // of a reading that has just been withdrawn would be pointing at nothing.
         assertEquals(null, reading()?.sessionId)
     }

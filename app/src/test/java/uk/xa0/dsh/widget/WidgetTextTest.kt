@@ -49,7 +49,12 @@ class WidgetTextTest {
         val text = WidgetCopy.of(snapshot())
         assertEquals("Nothing needs you", text.headline)
         assertEquals("Nothing running", text.detail)
-        assertEquals(WidgetCopy.STAMP_CHECKED, text.stampLabel)
+        assertEquals("oldest reading", text.stampLabel)
+        // Scope, stated rather than implied: this snapshot gives all three readings the
+        // same instant, so this assertion can fail if a confirmed card is left unstamped
+        // but it *cannot* tell the oldest reading from the newest. Which instant stamps
+        // is the subject of the two tests below, and they are given instants that
+        // discriminate.
         assertEquals(at, text.ageBase)
         assertEquals(WidgetLevel.QUIET, text.level)
     }
@@ -114,16 +119,80 @@ class WidgetTextTest {
         assertEquals("Nothing running", WidgetCopy.of(snapshot(working = 0, subagents = 0)).detail)
     }
 
+    /**
+     * The stamp's subject, and it is written so that only the oldest-reading rule can
+     * pass it. The headline's own reading is the *fresh* one here, and the two figures
+     * bracket the answer: taking the newest instant would give `at`, and stamping the
+     * headline's line would also give `at`. Neither can produce `at - 600_000`.
+     */
     @Test
-    fun `the stamp is the weakest reading on the card`() {
+    fun `the stamp is the oldest reading, not the newest and not the headline's`() {
         val text = WidgetCopy.of(
             WidgetSnapshot(
                 needsYou = WidgetReading(known = true, value = 1, asOf = at),
                 working = WidgetReading(known = true, value = 0, asOf = at - 600_000),
-                subagents = WidgetReading(known = true, value = 0, asOf = at),
+                subagents = WidgetReading(known = true, value = 0, asOf = at - 600_000),
             ),
         )
-        assertEquals("the running reading is the older of the two, so it stamps", at - 600_000, text.ageBase)
-        assertEquals("Approval waiting", text.headline)
+        assertEquals(
+            "the running reading is the older of the two, so it is the one that bounds the card",
+            at - 600_000,
+            text.ageBase,
+        )
+    }
+
+    /**
+     * The mirror image, because the first test alone would also be passed by an
+     * implementation that always stamps the running line. Here the *headline* is the old
+     * one, so the answer has to move with it.
+     */
+    @Test
+    fun `the mirror case moves the stamp with the other line`() {
+        val text = WidgetCopy.of(
+            WidgetSnapshot(
+                needsYou = WidgetReading(known = true, value = 2, asOf = at - 600_000),
+                working = WidgetReading(known = true, value = 3, asOf = at),
+                subagents = WidgetReading(known = true, value = 1, asOf = at),
+            ),
+        )
+        assertEquals(
+            "the reading that needs the user is the older one here, so it bounds the card",
+            at - 600_000,
+            text.ageBase,
+        )
+    }
+
+    /**
+     * A withdrawn reading is still a line on the card — "Needs you: unknown" — so the
+     * instant its basis ended is part of what the footer must bound. An implementation
+     * that stamped only the readings it could still assert would answer `at` here.
+     */
+    @Test
+    fun `a withdrawn line still bounds the card`() {
+        val text = WidgetCopy.of(
+            WidgetSnapshot(
+                needsYou = WidgetReading(known = false, value = 2, asOf = at - 600_000),
+                working = WidgetReading(known = true, value = 3, asOf = at),
+                subagents = WidgetReading(known = true, value = 1, asOf = at),
+            ),
+        )
+        assertEquals(at - 600_000, text.ageBase)
+        assertEquals("Needs you: unknown", text.headline)
+    }
+
+    /**
+     * The footer's word, pinned to the literal rather than to the constant, because the
+     * copy *is* the claim: "checked" says something about when the app last looked, while
+     * the number under it is the age of the oldest reading on the card.
+     */
+    @Test
+    fun `the footer names the bound rather than the app's activity`() {
+        assertEquals("oldest reading", WidgetCopy.STAMP_OLDEST)
+        assertEquals("oldest reading", WidgetCopy.of(snapshot()).stampLabel)
+        assertEquals(
+            "needs no age, so it carries the way in instead",
+            WidgetCopy.STAMP_OPEN,
+            WidgetCopy.of(null).stampLabel,
+        )
     }
 }

@@ -54,7 +54,7 @@ class WidgetRenderTest {
             WidgetText(
                 headline = "Approval waiting",
                 detail = "2 running · 1 subagent",
-                stampLabel = WidgetCopy.STAMP_CHECKED,
+                stampLabel = WidgetCopy.STAMP_OLDEST,
                 ageBase = at,
                 level = WidgetLevel.ATTENTION,
             ),
@@ -62,7 +62,8 @@ class WidgetRenderTest {
 
         assertEquals("Approval waiting", view.headline().text.toString())
         assertEquals("2 running · 1 subagent", view.detail().text.toString())
-        assertEquals(WidgetCopy.STAMP_CHECKED, view.stamp().text.toString())
+        // The literal, not the constant: the word on the card is the claim.
+        assertEquals("oldest reading", view.stamp().text.toString())
         assertEquals(View.VISIBLE, view.age().visibility)
         // The base is the reading's instant, not "now": the Chronometer's whole job is to
         // derive the age from it in the launcher's own process, with nothing of ours alive.
@@ -88,10 +89,10 @@ class WidgetRenderTest {
     @Test
     fun `the accent is the only way a widget can raise its voice`() {
         val quiet = draw(
-            WidgetText("Nothing needs you", "Nothing running", WidgetCopy.STAMP_CHECKED, 1L, WidgetLevel.QUIET),
+            WidgetText("Nothing needs you", "Nothing running", WidgetCopy.STAMP_OLDEST, 1L, WidgetLevel.QUIET),
         )
         val loud = draw(
-            WidgetText("Approval waiting", "1 running", WidgetCopy.STAMP_CHECKED, 1L, WidgetLevel.ATTENTION),
+            WidgetText("Approval waiting", "1 running", WidgetCopy.STAMP_OLDEST, 1L, WidgetLevel.ATTENTION),
         )
         val unknown = draw(
             WidgetText(WidgetCopy.NEEDS_UNKNOWN, null, WidgetCopy.STAMP_OPEN, null, WidgetLevel.UNKNOWN),
@@ -104,7 +105,7 @@ class WidgetRenderTest {
     @Test
     fun `a detail line that does not exist is hidden rather than left blank`() {
         val view = draw(
-            WidgetText("Nothing needs you", null, WidgetCopy.STAMP_CHECKED, 1L, WidgetLevel.QUIET),
+            WidgetText("Nothing needs you", null, WidgetCopy.STAMP_OLDEST, 1L, WidgetLevel.QUIET),
         )
         assertEquals(View.GONE, view.detail().visibility)
     }

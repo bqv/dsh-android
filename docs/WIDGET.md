@@ -15,12 +15,22 @@ Three lines.
 ```
 Approval waiting            <- headline: what is waiting on a human
 3 running · 1 subagent      <- detail: what is working
-checked 0:12 ago            <- stamp: when the app last confirmed either
+oldest reading 0:12 ago     <- stamp: a bound over both lines above
 ```
 
 and one tap target, the whole card, which opens the app on the session that most needs
 the user through the launch path a notification already uses
 (`Attention.EXTRA_SESSION`).
+
+The footer's word is load-bearing. It read `checked 0:12 ago` in the first draft, and that
+was the wrong sentence: it describes when the *app* last looked, which a reader takes as
+"the app is live and nothing is wrong", while the number under it is the age of the
+*oldest* reading on the card — the worst line, and the one that bounds how much any of
+them may be trusted. `oldest reading` says what the number is. The copy layer could name
+*which* line is the oldest, and deliberately does not: the two readings are renewed by two
+different owners on two different clocks, so in the app's idle state the answer flips
+between "needs you" and "running" every quarter hour for no reason a reader could act on,
+and a label that changes for no reason is one people stop reading.
 
 ### What earns a place, and what was cut
 
@@ -93,7 +103,7 @@ from rotting are not equal:
    `android.jar`, which is what the host inspects before it will inflate a view inside a
    widget (`javap -v` on the platform jar).
 
-This uses (3). `checked 0:12 ago` becomes `checked 3:41:07 ago` by itself, and the
+This uses (3). `oldest reading 0:12 ago` becomes `oldest reading 3:41:07 ago` by itself, and the
 headline above it is read against it. What the card never does is claim *now*: there is
 no "live" lamp and no "connected" badge, because both would need (2) to be withdrawn and
 (2) has a hole in it.

@@ -22,11 +22,13 @@ enum class WidgetLevel { QUIET, ATTENTION, UNKNOWN }
  *  * **"nothing is waiting" is only said when the app confirmed it.** A reading the app
  *    could not confirm draws [NEEDS_UNKNOWN], never "Nothing needs you". This is the
  *    Router tab's "not asked" rule, applied to a homescreen.
- *  * **Everything drawn is stamped.** [WidgetText.ageBase] is the oldest instant any
- *    drawn reading was confirmed, and the widget renders it as a Chronometer that
- *    counts up by itself. That is the only mechanism in `RemoteViews` that keeps an age
- *    true with no process of ours running — so a reading stops being renewed by simply
- *    getting older, out loud, instead of staying quietly wrong.
+ *  * **Everything drawn is stamped, and the stamp is a bound over the whole card.**
+ *    [WidgetText.ageBase] is the *oldest* instant any reading that has a line here was
+ *    confirmed, and [WidgetText.stampLabel] says so in words ([STAMP_OLDEST]) rather than
+ *    describing the app's own activity. The widget renders the instant as a Chronometer
+ *    that counts up by itself — the only mechanism in `RemoteViews` that keeps an age true
+ *    with no process of ours running, so a reading stops being renewed by simply getting
+ *    older, out loud, instead of staying quietly wrong.
  *  * **Nothing is ever claimed about *now*.** There is no "live" lamp and no "connected"
  *    badge: those would need a wake-up to withdraw, and a force-stopped app has no alarms
  *    left to withdraw them with. An age that ticks cannot be left behind.
@@ -35,7 +37,11 @@ data class WidgetText(
     val headline: String,
     /** Null when there is nothing honest to put on a second line. */
     val detail: String?,
-    /** The word before the ticking age, or the whole footer when there is no age. */
+    /**
+     * The word before the ticking age, or the whole footer when there is no age. When
+     * there is an age it is [WidgetCopy.STAMP_OLDEST], which names *what* the age bounds —
+     * the oldest reading on the card — rather than describing the app's own activity.
+     */
     val stampLabel: String,
     /** The Chronometer's base, or null when the footer is a static sentence. */
     val ageBase: Long?,
@@ -48,7 +54,28 @@ object WidgetCopy {
     const val NEEDS_NOTHING = "Nothing needs you"
     const val RUNNING_UNKNOWN = "Running: unknown"
     const val RUNNING_NOTHING = "Nothing running"
-    const val STAMP_CHECKED = "checked"
+
+    /**
+     * The footer's word, and it names the **bound** rather than the app's activity.
+     *
+     * "checked 12s ago" was the first draft, and it was the wrong sentence: it says
+     * something about when the app last looked, which a reader takes as "the app is live
+     * and nothing is wrong", while the number under it is the age of the *oldest* reading
+     * on the card — the worst line, and the one that bounds how much any of them may be
+     * trusted. A label that describes the wrong thing is a lie even when every number in
+     * it is right, which is the rule the model chip and the Router tab are both held to.
+     * So it says what the number is: the oldest reading was confirmed that long ago, and
+     * everything above it is at least that fresh.
+     *
+     * It deliberately does **not** name *which* line is the oldest, though this layer
+     * knows and could. The two readings are renewed by two different owners on two
+     * different clocks, so in the app's own idle state the answer flips between "needs
+     * you" and "running" every quarter hour for no reason a reader could act on — and a
+     * label that changes for no reason is one people stop reading. The bound is the
+     * stable, honest claim that a single `Chronometer` can carry. See `docs/WIDGET.md`.
+     */
+    const val STAMP_OLDEST = "oldest reading"
+
     const val STAMP_OPEN = "Open DSH to connect"
     const val TITLE = "DSH"
 
@@ -89,7 +116,7 @@ object WidgetCopy {
         return WidgetText(
             headline = headline,
             detail = detail,
-            stampLabel = if (stamp != null) STAMP_CHECKED else STAMP_OPEN,
+            stampLabel = if (stamp != null) STAMP_OLDEST else STAMP_OPEN,
             ageBase = stamp,
             level = when {
                 needs.known && needs.value > 0 -> WidgetLevel.ATTENTION
@@ -99,11 +126,21 @@ object WidgetCopy {
         )
     }
 
+    /**
+     * The kind word for a single waiting item.
+     *
+     * The `else` is unreachable from this app: its only caller is
+     * `AttentionCenter.refreshWidget`, which names a kind whenever it publishes a count
+     * above zero. It is here because this layer is total over a *persisted* type — a file
+     * written by a later build, or by a caller that does not exist yet, must still draw
+     * something that is true. "Someone needs you" says exactly what the snapshot supports
+     * (one item, unnamed) and claims no kind, which is why it is not a guess dressed as
+     * one.
+     */
     private fun singleHeadline(kind: String?): String = when (kind) {
         KIND_APPROVAL -> "Approval waiting"
         KIND_QUESTION -> "Question waiting"
         KIND_PLAN_REVIEW -> "Plan to review"
-        // A waterfall with no session id still counts; it just cannot be named.
         else -> "Someone needs you"
     }
 

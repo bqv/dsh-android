@@ -392,9 +392,11 @@ socket resumes streaming instead of silently freezing the UI.
 
 - **DSH status**, a 3×2 card with three lines: what is waiting on you (an approval,
   a question or a plan review, ranked the way the drawer's status dot is), how much
-  is running, and when the app last confirmed either. Tapping it opens the app on
-  the session that most needs you, through the same `Attention.EXTRA_SESSION` path a
-  notification uses.
+  is running, and the age of the **oldest** of those readings — the bound on how much
+  to trust the rest, labelled "oldest reading" rather than "checked", because a label
+  about the app's activity under a number about the lines above it describes the wrong
+  thing. Tapping it opens the app on the session that most needs you, through the same
+  `Attention.EXTRA_SESSION` path a notification uses.
 - Four things are deliberately **not** on it: the model/session a turn would run
   (composer state, not a glance), background jobs (only known for the session the
   app has *open*, so a count would be one session's jobs presented as the world's),

@@ -109,9 +109,25 @@ class WidgetSnapshotTest {
         )
     }
 
+    /**
+     * The on-disk version, pinned to a literal — which is the point, because bumping it is
+     * not an internal detail. A document whose `v` differs from [WidgetSnapshot.VERSION] is
+     * refused outright, so a bump silently drops **every widget already on a homescreen**
+     * to "not known" until the app runs again and rewrites the file. That is a deliberate
+     * act and it should cost an edit here; asserting `VERSION` against a document that
+     * `encode` wrote from `VERSION` would instead be the same number twice and could not
+     * fail for any reason.
+     */
     @Test
-    fun `the version in the document is the version this build reads`() {
-        val json = JSONObject(WidgetSnapshot.NEVER.encode())
-        assertEquals(WidgetSnapshot.VERSION, json.getInt("v"))
+    fun `the on-disk version is pinned, because a bump blanks every placed widget`() {
+        assertEquals(1, WidgetSnapshot.VERSION)
+        assertEquals(1, JSONObject(WidgetSnapshot.NEVER.encode()).getInt("v"))
+
+        val bumped = JSONObject(WidgetSnapshot.NEVER.encode()).put("v", 2)
+        assertNull("a document this build does not know must not be guessed at", WidgetSnapshot.decode(bumped.toString()))
+
+        val unversioned = JSONObject(WidgetSnapshot.NEVER.encode())
+        unversioned.remove("v")
+        assertNull(WidgetSnapshot.decode(unversioned.toString()))
     }
 }
