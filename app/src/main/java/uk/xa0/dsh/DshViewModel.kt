@@ -149,6 +149,7 @@ import uk.xa0.dsh.term.terminalReapList
 import uk.xa0.dsh.term.terminalSeats
 import uk.xa0.dsh.term.terminalToAdopt
 import uk.xa0.dsh.term.withHostShellSession
+import uk.xa0.dsh.widget.WidgetSession
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -4801,13 +4802,22 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Publishes the homescreen widget's "what is running" reading.
+     * Publishes the homescreen widget's "what is running" reading: every running session
+     * by name, plus how many of those are subagents.
      *
-     * The counts are read off `SessionItem.running`, which is `RunningBook`'s answer and
-     * nothing else, so the card cannot disagree with the drawer's dots. [rosterLanded]
-     * is what makes the reading *known*: before a whole-world pull there is no count to
-     * publish, only a set of sessions something happened to, and the widget must be able
-     * to tell that apart from a confident zero.
+     * Both readings are read off `SessionItem.running`, which is `RunningBook`'s answer
+     * and nothing else, so the card cannot disagree with the drawer's dots. The list is
+     * the roster's own order (`session/list` is sorted by `updatedAt` descending), so the
+     * widget cannot disagree with the drawer's order either; which names survive the cap
+     * is `WidgetPublisher`'s decision, not this caller's.
+     *
+     * Every running row is passed, including a subagent's and one whose title is still
+     * blank: the count is the list's own size, so a row this caller hid would come back as
+     * a "+N more" the reader cannot account for.
+     *
+     * [rosterLanded] is what makes the reading *known*: before a whole-world pull there is
+     * no count to publish, only a set of sessions something happened to, and the widget
+     * must be able to tell that apart from a confident zero.
      *
      * Called from [publishRosterRunning] when the roster moves, and from the socket loop
      * in `ensureMuxWiring` once a second — the second caller is the renewal, not a
@@ -4818,10 +4828,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun publishWidgetWorking() {
         val state = _ui.value
-        val sessions = state.sessions
+        val running = state.sessions.filter { it.running }
         app.widgets.working(
-            sessions = sessions.count { it.running },
-            subagents = sessions.count { it.running && it.isSubagent },
+            running = running.map { WidgetSession(id = it.id, title = it.title) },
+            subagents = running.count { it.isSubagent },
             known = rosterLanded && state.muxState == MuxState.OPEN,
         )
     }

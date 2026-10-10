@@ -47,6 +47,13 @@ class WidgetPublisherTest {
 
     private fun reading(): WidgetSnapshot? = WidgetSnapshotStore(file).read()
 
+    /**
+     * Running sessions with titles, in the order the roster would give them. The ids are
+     * positional so a test can name the row it means.
+     */
+    private fun named(vararg titles: String): List<WidgetSession> =
+        titles.mapIndexed { index, title -> WidgetSession("session-${index + 1}", title) }
+
     @Before
     fun clean() {
         file.delete()
@@ -56,7 +63,7 @@ class WidgetPublisherTest {
     fun `a user with no widget on their homescreen pays nothing`() {
         val publisher = publisher()
         publisher.needsYou(2, PendingKind.APPROVAL, "session-1", known = true)
-        publisher.working(3, 1, known = true)
+        publisher.working(named("Alpha", "Beta", "Gamma"), 1, known = true)
         publisher.onWidgetsChanged()
         assertFalse("no widget is placed, so nothing may be written", file.exists())
     }
@@ -66,7 +73,7 @@ class WidgetPublisherTest {
         boundWidget()
         val publisher = publisher()
         publisher.needsYou(2, PendingKind.QUESTION, "session-9", known = true)
-        publisher.working(3, 1, known = true)
+        publisher.working(named("Alpha", "Beta", "Gamma"), 1, known = true)
 
         val snapshot = reading()
         assertTrue(snapshot?.needsYou?.known == true)
@@ -75,6 +82,12 @@ class WidgetPublisherTest {
         assertEquals("the tap target has to survive the write", "session-9", snapshot?.sessionId)
         assertEquals(3, snapshot?.working?.value)
         assertEquals(1, snapshot?.subagents?.value)
+        assertEquals(
+            "the reader is told which work is in flight, not only how much",
+            listOf("Alpha", "Beta", "Gamma"),
+            snapshot?.running?.map { it.title },
+        )
+        assertEquals(listOf("session-1", "session-2", "session-3"), snapshot?.running?.map { it.id })
     }
 
     @Test
@@ -100,7 +113,7 @@ class WidgetPublisherTest {
     @Test
     fun `a reading nobody has ever confirmed is left as nothing, not stamped`() {
         boundWidget()
-        publisher().working(0, 0, known = false)
+        publisher().working(emptyList(), 0, known = false)
         val snapshot = reading()
         assertTrue(snapshot?.working?.known == false)
         assertEquals(
@@ -163,11 +176,77 @@ class WidgetPublisherTest {
 
         // The first thing this run does know is what it is running; the reading it has
         // not confirmed yet keeps the value and the age it came in with.
-        restarted.working(4, 0, known = true)
+        restarted.working(named("Alpha", "Beta", "Gamma", "Delta"), 0, known = true)
         val snapshot = reading()
         assertEquals(4, snapshot?.working?.value)
         assertEquals(2, snapshot?.needsYou?.value)
         assertTrue(snapshot?.needsYou?.known == true)
+        assertEquals(
+            "four are running and three fit; the fourth is the card's '+1 more', not a lost row",
+            listOf("Alpha", "Beta", "Gamma"),
+            snapshot?.running?.map { it.title },
+        )
+    }
+
+    /**
+     * A session whose title the roster has not delivered still *is* running, so it counts;
+     * it just cannot be a row. The card answers it with "+1 more" rather than an empty line
+     * — the difference between a name nobody has and no session at all.
+     */
+    @Test
+    fun `a running session with no title counts but cannot become a row`() {
+        boundWidget()
+        val publisher = publisher()
+        publisher.working(
+            listOf(WidgetSession("session-1", ""), WidgetSession("session-2", "Beta")),
+            subagents = 0,
+            known = true,
+        )
+
+        val snapshot = reading()
+        assertEquals("the total is every running session, named or not", 2, snapshot?.working?.value)
+        assertEquals(listOf("session-2"), snapshot?.running?.map { it.id })
+    }
+
+    /**
+     * The names are a claim about the world, so they cannot outlive the basis of that
+     * claim. The count is kept deliberately: it is what the age on the card is the age
+     * *of*, and the card draws it as "Running: unknown" rather than as a figure.
+     */
+    @Test
+    fun `a withdrawn roster takes the names with it and keeps the count`() {
+        boundWidget()
+        val publisher = publisher()
+        publisher.working(named("Alpha", "Beta"), 0, known = true)
+        assertEquals(listOf("Alpha", "Beta"), reading()?.running?.map { it.title })
+
+        publisher.working(named("Alpha", "Beta"), 0, known = false)
+
+        val snapshot = reading()
+        assertEquals(2, snapshot?.working?.value)
+        assertTrue(snapshot?.working?.known == false)
+        assertEquals(
+            "a list of names under a reading that can no longer assert it would be a claim nobody is making",
+            emptyList<WidgetSession>(),
+            snapshot?.running,
+        )
+    }
+
+    /**
+     * A rename is a change to what the card *draws*, so it has to reach the file. The
+     * file is deleted between the two publications so this cannot pass on a coincidence.
+     */
+    @Test
+    fun `a session renamed while it runs is written again`() {
+        boundWidget()
+        val publisher = publisher()
+        publisher.working(named("Alpha"), 0, known = true)
+
+        assertTrue(file.delete())
+        publisher.working(named("Alpha renamed"), 0, known = true)
+
+        assertTrue("a title the reader can see is a value that moved", file.isFile)
+        assertEquals(listOf("Alpha renamed"), reading()?.running?.map { it.title })
     }
 
     private companion object {

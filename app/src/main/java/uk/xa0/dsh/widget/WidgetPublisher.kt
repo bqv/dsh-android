@@ -72,6 +72,14 @@ class WidgetPublisher(
     private var needsYouReading = WidgetReading.NEVER
     private var workingReading = WidgetReading.NEVER
     private var subagentReading = WidgetReading.NEVER
+
+    /**
+     * The named running sessions behind [workingReading], already capped and already
+     * stripped of rows a card could not draw. Empty whenever the reading is withdrawn,
+     * because a name is a claim about a session being at work and a withdrawn reading
+     * cannot make one.
+     */
+    private var runningSessions: List<WidgetSession> = emptyList()
     private var kind: String? = null
     private var sessionId: String? = null
 
@@ -96,6 +104,7 @@ class WidgetPublisher(
             needsYouReading = previous.needsYou
             workingReading = previous.working
             subagentReading = previous.subagents
+            runningSessions = previous.running
             kind = previous.kind
             sessionId = previous.sessionId
             lastWritten = previous
@@ -123,15 +132,29 @@ class WidgetPublisher(
     }
 
     /**
-     * Publishes what is running: sessions with an agent working, and how many of those
-     * are subagents. The two move together, and so does their confidence — a roster
-     * read is what establishes either.
+     * Publishes what is running: every session with an agent working, in the app's own
+     * roster order, plus how many of those are subagents. The count is [running]'s own
+     * size rather than a second figure passed alongside it, because a count and a list
+     * that arrive separately can disagree, and a card that names three sessions while
+     * saying two are running is the kind of lie this widget exists to avoid.
+     *
+     * [running] carries **every** running session, not just the first few. This method
+     * decides what may be named ([namedSessions]) and what is withheld, so the "+N more"
+     * on the card is arithmetic over one list rather than a second opinion.
+     *
+     * The two readings move together, and so does their confidence — a roster read is
+     * what establishes either, so `known = false` withdraws the count and the names in
+     * the same breath.
      */
-    fun working(sessions: Int, subagents: Int, known: Boolean) {
+    fun working(running: List<WidgetSession>, subagents: Int, known: Boolean) {
         val now = System.currentTimeMillis()
         synchronized(lock) {
-            workingReading = stamped(workingReading, known, sessions, now)
+            workingReading = stamped(workingReading, known, running.size, now)
             subagentReading = stamped(subagentReading, known, subagents, now)
+            // Names go with the basis. A withdrawn reading is drawn as "Running: unknown"
+            // and must not leave a list of sessions in the file that a later run (or a
+            // later build) could read as still true.
+            runningSessions = if (known) namedSessions(running) else emptyList()
             everPublished = true
         }
         wake.trySend(Unit)
@@ -157,7 +180,14 @@ class WidgetPublisher(
 
     private fun publish() {
         val snapshot = synchronized(lock) {
-            WidgetSnapshot(needsYouReading, workingReading, subagentReading, kind, sessionId)
+            WidgetSnapshot(
+                needsYouReading,
+                workingReading,
+                subagentReading,
+                runningSessions,
+                kind,
+                sessionId,
+            )
         }
         val ids = placedWidgetIds()
         // No widget on any home screen: the reading is still held in memory, so adding
@@ -182,6 +212,36 @@ class WidgetPublisher(
 
     private fun placedWidgetIds(): IntArray =
         runCatching { manager?.getAppWidgetIds(component) ?: IntArray(0) }.getOrDefault(IntArray(0))
+
+    /**
+     * The running sessions the card may name, from the roster order it was given.
+     *
+     * Public, not `internal`, for the same wall [stamped] is: this repo's unit-test
+     * source set is not a friend of main, so a rule that must be tested has to be
+     * reachable.
+     *
+     * The order is the caller's, which is the app's own roster order — most recently
+     * updated first, the order the drawer lists them in. The widget must not invent a
+     * ranking of its own, because a card that reordered work would disagree with the
+     * screen the reader opens next.
+     *
+     * Two filters, and both are honesty rather than tidiness:
+     *
+     *  * **No id, no row.** A name the reader cannot tap is worse than no row: it looks
+     *    like something they can act on. (The decoder refuses such a row as well.)
+     *  * **No title, no row.** A blank title would draw as an empty line, which reads as
+     *    a session that has no name rather than one whose name the app has not been
+     *    given. That row still counts towards [working]'s total, so the card answers it
+     *    with "+N more" instead of silently pretending it is not running.
+     *
+     * Only the first [WidgetSnapshot.MAX_NAMED_SESSIONS] survive; the rest are what the
+     * "+N more" line is for.
+     */
+    fun namedSessions(running: List<WidgetSession>): List<WidgetSession> =
+        running.asSequence()
+            .filter { it.id.isNotBlank() && it.title.isNotBlank() }
+            .take(WidgetSnapshot.MAX_NAMED_SESSIONS)
+            .toList()
 
     /**
      * Stamps a reading with the instant its owner just spoke.

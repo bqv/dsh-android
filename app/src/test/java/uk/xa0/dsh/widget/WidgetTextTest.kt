@@ -13,7 +13,7 @@ import org.junit.Test
  * have drawn is worse than a line it forgot to draw.
  *
  * Pure JVM — no Context, no launcher, no clock. [WidgetCopy.of] takes a snapshot and
- * returns three strings, which is the whole point of separating it from the renderer.
+ * returns the lines, which is the whole point of separating it from the renderer.
  */
 class WidgetTextTest {
 
@@ -26,13 +26,18 @@ class WidgetTextTest {
         workingKnown: Boolean = true,
         working: Int = 0,
         subagents: Int = 0,
+        running: List<WidgetSession> = emptyList(),
         asOf: Long = at,
     ) = WidgetSnapshot(
         needsYou = WidgetReading(known = needsKnown, value = needs, asOf = asOf),
         working = WidgetReading(known = workingKnown, value = working, asOf = asOf),
         subagents = WidgetReading(known = workingKnown, value = subagents, asOf = asOf),
+        running = running,
         kind = kind,
     )
+
+    private fun sessions(vararg titles: String): List<WidgetSession> =
+        titles.mapIndexed { index, title -> WidgetSession("session-${index + 1}", title) }
 
     @Test
     fun `no file at all says so rather than claiming an empty world`() {
@@ -117,6 +122,149 @@ class WidgetTextTest {
         assertEquals("4 running · 2 subagents", WidgetCopy.of(snapshot(working = 4, subagents = 2)).detail)
         assertEquals("4 running", WidgetCopy.of(snapshot(working = 4, subagents = 0)).detail)
         assertEquals("Nothing running", WidgetCopy.of(snapshot(working = 0, subagents = 0)).detail)
+    }
+
+    /**
+     * The whole point of the change: a reader running several agents is told *which* work
+     * is in flight. When the names are there the count line is gone — the rows are the
+     * answer — and nothing is withheld, so there is no "+N more" either.
+     */
+    @Test
+    fun `running sessions are named, and the bare count is not drawn alongside them`() {
+        val text = WidgetCopy.of(
+            snapshot(working = 3, running = sessions("Fix the login bug", "Widget sessions", "Tidy up")),
+        )
+        assertNull("the names are the answer, so the count line is not also drawn", text.detail)
+        assertEquals(
+            listOf("· Fix the login bug", "· Widget sessions", "· Tidy up"),
+            text.rows.map { it.title },
+        )
+        assertEquals(
+            "the tap has to know which session it is for",
+            listOf("session-1", "session-2", "session-3"),
+            text.rows.map { it.id },
+        )
+        assertNull(text.moreLabel)
+    }
+
+    /**
+     * The cap, said out loud. A reader must be able to reconstruct the total from what is
+     * on the card: three names plus "+2 more" is five, which is the count the reading
+     * carries. An implementation that dropped the last two rows would draw three names and
+     * say nothing, which is the one thing a bounded list must never do.
+     */
+    @Test
+    fun `past the cap the card says how many it is not naming`() {
+        val text = WidgetCopy.of(
+            snapshot(working = 5, running = sessions("Alpha", "Beta", "Gamma")),
+        )
+        assertNull(text.detail)
+        assertEquals(listOf("· Alpha", "· Beta", "· Gamma"), text.rows.map { it.title })
+        assertEquals("+2 more", text.moreLabel)
+    }
+
+    /**
+     * The same rule where the withheld row is not merely past the cap: a running session
+     * the roster has no title for is still running, and is still counted.
+     */
+    @Test
+    fun `a row with no title is withheld out loud, not drawn as an empty line`() {
+        val text = WidgetCopy.of(
+            snapshot(
+                working = 3,
+                running = listOf(
+                    WidgetSession("session-1", "Alpha"),
+                    WidgetSession("session-2", "   "),
+                    WidgetSession("session-3", "Gamma"),
+                ),
+            ),
+        )
+        assertEquals(listOf("· Alpha", "· Gamma"), text.rows.map { it.title })
+        assertEquals("+1 more", text.moreLabel)
+    }
+
+    /**
+     * A document from the build before this change has a count and no names, and that is
+     * a third state: not unknown, not empty, and not a list. The count is still true, so
+     * it is still drawn — with the subagent qualifier it would otherwise have lost.
+     */
+    @Test
+    fun `a count with no names behind it is still drawn as the count`() {
+        val text = WidgetCopy.of(snapshot(working = 4, subagents = 1, running = emptyList()))
+        assertEquals("4 running · 1 subagent", text.detail)
+        assertEquals(emptyList<WidgetSession>(), text.rows)
+        assertNull("the count already says the total; a second figure would be the same number twice", text.moreLabel)
+    }
+
+    /**
+     * The distinction the whole feature is built on, at the new line: a roster nobody could
+     * read is not a roster that is empty. An empty list would be drawn as nothing running,
+     * which is a claim the app has not earned.
+     */
+    @Test
+    fun `an unknown roster is never drawn as an empty list`() {
+        val text = WidgetCopy.of(
+            snapshot(
+                workingKnown = false,
+                working = 3,
+                running = sessions("Alpha", "Beta", "Gamma"),
+            ),
+        )
+        assertEquals("Running: unknown", text.detail)
+        assertEquals(emptyList<WidgetSession>(), text.rows)
+        assertNull(text.moreLabel)
+    }
+
+    /**
+     * And the same snapshot written by the publisher when the basis is lost: the names are
+     * already gone from the document, so this is what a withdrawn reading looks like on
+     * disk. The card must not draw the empty list as an answer either way.
+     */
+    @Test
+    fun `a withdrawn reading with no names still says unknown rather than nothing`() {
+        val text = WidgetCopy.of(snapshot(workingKnown = false, working = 3, running = emptyList()))
+        assertEquals("Running: unknown", text.detail)
+        assertEquals(emptyList<WidgetSession>(), text.rows)
+    }
+
+    /**
+     * A title is a sentence, and a tile row is one line. Whitespace is collapsed and the
+     * cut is marked, so a reader can tell a short session name from a long one that was
+     * shortened for them.
+     */
+    @Test
+    fun `a long title is trimmed for a tile and the cut is visible`() {
+        assertEquals("Fix the login bug", WidgetCopy.tileTitle("  Fix the login bug  "))
+        assertEquals(
+            "a newline or a run of spaces would change the row height the layout was budgeted for",
+            "Fix the login bug",
+            WidgetCopy.tileTitle("Fix\nthe   login bug"),
+        )
+
+        val long = "Refactor the widget snapshot writer so it stops lying about jobs"
+        val trimmed = WidgetCopy.tileTitle(long)
+        assertEquals(WidgetCopy.TITLE_MAX, trimmed.length)
+        assertEquals(WidgetCopy.ELLIPSIS, trimmed.takeLast(1))
+        assertEquals(long.take(WidgetCopy.TITLE_MAX - 1), trimmed.dropLast(1))
+    }
+
+    /**
+     * The named rows add no instant of their own. The footer's bound is already the running
+     * *reading*'s instant, and that is the instant a name is confirmed at too — so an
+     * implementation that wanted a stamp per line would have to invent one here.
+     */
+    @Test
+    fun `the named rows are bounded by the running reading's own instant`() {
+        val text = WidgetCopy.of(
+            WidgetSnapshot(
+                needsYou = WidgetReading(known = true, value = 0, asOf = at),
+                working = WidgetReading(known = true, value = 2, asOf = at - 600_000),
+                subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                running = sessions("Alpha", "Beta"),
+            ),
+        )
+        assertEquals("· Alpha", text.rows.first().title)
+        assertEquals(at - 600_000, text.ageBase)
     }
 
     /**

@@ -72,11 +72,77 @@ class WidgetSnapshotTest {
             needsYou = WidgetReading(known = true, value = 2, asOf = at),
             working = WidgetReading(known = true, value = 3, asOf = at + 1),
             subagents = WidgetReading(known = true, value = 1, asOf = at + 2),
+            running = listOf(
+                WidgetSession("session-a771fb9b", "Fix the login bug"),
+                WidgetSession("session-b9b", "Widget sessions"),
+            ),
             kind = "PLAN_REVIEW",
             sessionId = "session-a771fb9b",
         )
         val decoded = WidgetSnapshot.decode(snapshot.encode())
         assertEquals(snapshot, decoded)
+    }
+
+    /**
+     * The document written by the build before this change has no `running` key at all.
+     * It must still decode: the readings are the whole of what it claims, and "no names
+     * were written down" is a state this build can draw honestly (the count alone).
+     * Refusing it would blank every widget already on a homescreen for no gain — which is
+     * exactly why [WidgetSnapshot.VERSION] was not bumped when the list was added.
+     */
+    @Test
+    fun `an older document with no running list still reads, with no names in it`() {
+        val older = JSONObject(
+            WidgetSnapshot(
+                needsYou = WidgetReading(known = true, value = 1, asOf = at),
+                working = WidgetReading(known = true, value = 3, asOf = at),
+                subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                kind = "APPROVAL",
+            ).encode(),
+        )
+        older.remove("running")
+
+        val decoded = WidgetSnapshot.decode(older.toString())
+        assertEquals(
+            "the readings are the whole of what the older document claims, and they still stand",
+            3,
+            decoded?.working?.value,
+        )
+        assertTrue(decoded?.working?.known == true)
+        assertTrue(decoded?.running?.isEmpty() == true)
+    }
+
+    @Test
+    fun `a document carrying more names than the card can draw is bounded on read`() {
+        val many = JSONObject(WidgetSnapshot.NEVER.encode())
+        many.put(
+            "running",
+            org.json.JSONArray().apply {
+                repeat(6) { put(WidgetSession("session-$it", "Session $it").toJson()) }
+            },
+        )
+
+        val decoded = WidgetSnapshot.decode(many.toString())
+        assertEquals(WidgetSnapshot.MAX_NAMED_SESSIONS, decoded?.running?.size)
+        assertEquals("session-0", decoded?.running?.first()?.id)
+    }
+
+    @Test
+    fun `a row that cannot be tapped is refused rather than drawn as a title`() {
+        val broken = JSONObject(WidgetSnapshot.NEVER.encode())
+        broken.put(
+            "running",
+            org.json.JSONArray().apply {
+                put(WidgetSession("", "No id").toJson())
+                put(JSONObject().put("title", "No id either"))
+                put(WidgetSession("session-ok", "Fine").toJson())
+            },
+        )
+
+        assertEquals(
+            listOf("session-ok"),
+            WidgetSnapshot.decode(broken.toString())?.running?.map { it.id },
+        )
     }
 
     @Test
@@ -117,6 +183,11 @@ class WidgetSnapshotTest {
      * act and it should cost an edit here; asserting `VERSION` against a document that
      * `encode` wrote from `VERSION` would instead be the same number twice and could not
      * fail for any reason.
+     *
+     * It is still 1 after `running` was added, on purpose: an optional key is readable in
+     * both directions (see the two tests above), so this change does not meet the bar for
+     * costing every placed widget its reading. A future change that makes an existing
+     * document *unreadable* is the one that has to pay an edit here.
      */
     @Test
     fun `the on-disk version is pinned, because a bump blanks every placed widget`() {

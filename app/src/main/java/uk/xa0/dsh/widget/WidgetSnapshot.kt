@@ -1,5 +1,6 @@
 package uk.xa0.dsh.widget
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -74,19 +75,68 @@ data class WidgetReading(
 }
 
 /**
+ * One session the card may name: an id for the tap and the title to draw.
+ *
+ * A row whose session cannot be named is a row the reader cannot act on, so the id is
+ * not optional here — a document whose row has none is refused rather than drawn as a
+ * title with nowhere to go.
+ *
+ * The title is the roster's own (`SessionItem.title`, which already carries a
+ * subagent's label when the catalog has landed). It is *not* trimmed here: this is the
+ * persisted shape, and trimming for a tile is a copy decision ([WidgetCopy.tileTitle]).
+ */
+data class WidgetSession(
+    val id: String,
+    val title: String,
+) {
+
+    fun toJson(): JSONObject = JSONObject()
+        .put(KEY_ID, id)
+        .put(KEY_TITLE, title)
+
+    companion object {
+        private const val KEY_ID = "id"
+        private const val KEY_TITLE = "title"
+
+        /** Null for anything that is not exactly the object [toJson] writes. */
+        fun fromJson(json: JSONObject?): WidgetSession? {
+            json ?: return null
+            val id = json.optString(KEY_ID).takeIf { it.isNotBlank() } ?: return null
+            return WidgetSession(id = id, title = json.optString(KEY_TITLE))
+        }
+    }
+}
+
+/**
  * Everything the homescreen widget can say, as one snapshot written at one instant.
  *
  * A handful of facts and no more, deliberately: what is waiting on the user
- * ([needsYou], ranked by the website's own cross-domain precedence), how much is
- * working ([working], of which [subagents]), and — for the tap — which session to
- * open ([sessionId]). What is *not* here is as much the design as what is: no
- * session list, no model chip, no jobs and no balance, each for a reason recorded in
- * `docs/WIDGET.md`.
+ * ([needsYou], ranked by the website's own cross-domain precedence), what is working
+ * ([working], of which [subagents], and *which* of it by name in [running]), and — for
+ * the tap — which session to open ([sessionId]). What is *not* here is as much the
+ * design as what is: no model chip, no jobs and no balance, each for a reason recorded
+ * in `docs/WIDGET.md`.
+ *
+ * ## Why the names are here and the jobs are not
+ *
+ * `job/list` is per-session, so a job figure would present one session's jobs as the
+ * world's — a count that is right for one session and wrong for every other. The
+ * session roster is app-wide: `session/list` is a whole-world pull, this app already
+ * fetches it, and each row already carries `running`. A list of running sessions is
+ * therefore a real fact about the whole system, which is exactly what a count of jobs
+ * could never be.
  */
 data class WidgetSnapshot(
     val needsYou: WidgetReading = WidgetReading.NEVER,
     val working: WidgetReading = WidgetReading.NEVER,
     val subagents: WidgetReading = WidgetReading.NEVER,
+    /**
+     * The running sessions the card may name, in the app's own roster order, at most
+     * [MAX_NAMED_SESSIONS] of them. See [WidgetPublisher.namedSessions] for which rows
+     * survive and what happens to the rest: the count in [working] is the total, so a
+     * card can always say how many it is not naming.
+     */
+    val running: List<WidgetSession> = emptyList(),
     /** The `PendingKind` name behind [needsYou], when more than nothing is waiting. */
     val kind: String? = null,
     /** The session that most needs the user, for the tap target. */
@@ -112,6 +162,11 @@ data class WidgetSnapshot(
      *
      * `null` means nothing has ever been established on this phone, and the footer then
      * carries the way in rather than an age.
+     *
+     * [running] adds no instant of its own: the named rows are the detail *of* [working]
+     * — the same roster pull, the same fold, the same instant — so the age that bounds
+     * the running line already bounds every name under it. A separate stamp for the list
+     * would only be a second thing to keep honest.
      */
     val confirmedAt: Long?
         get() = listOf(needsYou, working, subagents)
@@ -124,6 +179,9 @@ data class WidgetSnapshot(
             needsYou.sameValueAs(other.needsYou) &&
             working.sameValueAs(other.working) &&
             subagents.sameValueAs(other.subagents) &&
+            // A title is a fact the card draws, so a rename is a change worth a write —
+            // and the order is part of the statement, because the reader reads top-down.
+            running == other.running &&
             kind == other.kind &&
             sessionId == other.sessionId
 
@@ -132,22 +190,43 @@ data class WidgetSnapshot(
         .put(KEY_NEEDS_YOU, needsYou.toJson())
         .put(KEY_WORKING, working.toJson())
         .put(KEY_SUBAGENTS, subagents.toJson())
+        .put(KEY_RUNNING, JSONArray().apply { running.forEach { put(it.toJson()) } })
         .put(KEY_KIND, kind ?: JSONObject.NULL)
         .put(KEY_SESSION, sessionId ?: JSONObject.NULL)
         .toString()
 
     companion object {
         /**
-         * Bumped whenever the shape changes. A file this build cannot read is treated
-         * as no file at all, which is the safe direction: an unrecognised snapshot is
-         * one this build cannot honestly draw.
+         * The version of the document's *shape*, and it is deliberately still 1.
+         *
+         * `running` was added without a bump because a bump would blank **every widget
+         * already on a homescreen** until the app next ran and rewrote the file, and this
+         * change does not need that. The key is optional in both directions: this build
+         * reads a document without it and draws the honest thing it can (the count, with
+         * the names not known), and the previous build — whose decoder never inspects a
+         * key it does not know — reads a document with it and draws exactly what it drew
+         * before. The version exists for documents this build **cannot read**; an absent
+         * optional list is not one of those.
          */
         const val VERSION = 1
+
+        /**
+         * How many running sessions the document may carry. Past this the card says
+         * "+N more" rather than dropping a row in silence; see [WidgetCopy.of].
+         *
+         * Three, from a measurement rather than a guess: a placed 3x2 widget on the test
+         * handset's Kvaesitso grid occupies 1040x510 px at an override density of 408
+         * (2.55x) — 408x200 dp — and the whole card, headline, three names, the "+N more"
+         * line and the footer, comes to roughly 130 dp by arithmetic over Roboto's font
+         * metrics.
+         */
+        const val MAX_NAMED_SESSIONS = 3
 
         private const val KEY_VERSION = "v"
         private const val KEY_NEEDS_YOU = "needsYou"
         private const val KEY_WORKING = "working"
         private const val KEY_SUBAGENTS = "subagents"
+        private const val KEY_RUNNING = "running"
         private const val KEY_KIND = "kind"
         private const val KEY_SESSION = "sessionId"
 
@@ -158,6 +237,13 @@ data class WidgetSnapshot(
          * Reads one snapshot, or null for anything unexpected — a missing file, a
          * half-written one, a version this build does not know. Never throws: a widget
          * is drawn by a receiver that must not crash on a corrupt byte.
+         *
+         * An absent or unreadable `running` list is not an error: it reads as "no names
+         * were written down", which the copy layer draws as the count alone. That is what
+         * makes a document from the build before this change readable rather than blank.
+         * The list is read up to [MAX_NAMED_SESSIONS]: a longer one can only come from a
+         * file this app did not write, and the count in `working` still tells the reader
+         * how many sessions exist.
          */
         fun decode(text: String?): WidgetSnapshot? {
             if (text.isNullOrBlank()) return null
@@ -166,10 +252,15 @@ data class WidgetSnapshot(
             val needsYou = WidgetReading.fromJson(json.optJSONObject(KEY_NEEDS_YOU)) ?: return null
             val working = WidgetReading.fromJson(json.optJSONObject(KEY_WORKING)) ?: return null
             val subagents = WidgetReading.fromJson(json.optJSONObject(KEY_SUBAGENTS)) ?: return null
+            val running = json.optJSONArray(KEY_RUNNING)?.let { array ->
+                (0 until minOf(array.length(), MAX_NAMED_SESSIONS))
+                    .mapNotNull { WidgetSession.fromJson(array.optJSONObject(it)) }
+            }.orEmpty()
             return WidgetSnapshot(
                 needsYou = needsYou,
                 working = working,
                 subagents = subagents,
+                running = running,
                 // A JSON null reads back through `optString` as the text "null".
                 kind = json.optString(KEY_KIND).takeIf { it.isNotEmpty() && it != "null" },
                 sessionId = json.optString(KEY_SESSION).takeIf { it.isNotEmpty() && it != "null" },

@@ -47,6 +47,9 @@ class WidgetRenderTest {
     private fun View.stamp(): TextView = findViewById(R.id.widget_stamp)
     private fun View.age(): Chronometer = findViewById(R.id.widget_age)
 
+    private fun View.row(index: Int): TextView = findViewById(ROW_IDS[index])
+    private fun View.moreRows(): TextView = findViewById(R.id.widget_row_more)
+
     @Test
     fun `every line of the text lands in its own view`() {
         val at = 1_700_000_000_000L
@@ -111,6 +114,96 @@ class WidgetRenderTest {
     }
 
     @Test
+    fun `named sessions land in the fixed row views, and the count line gives way to them`() {
+        val view = draw(
+            WidgetCopy.of(
+                WidgetSnapshot(
+                    needsYou = WidgetReading(known = true, value = 0, asOf = 1L),
+                    working = WidgetReading(known = true, value = 2, asOf = 1L),
+                    subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                    running = listOf(
+                        WidgetSession("session-a", "Fix the login bug"),
+                        WidgetSession("session-b", "Widget sessions"),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(View.GONE, view.detail().visibility)
+        assertEquals(View.VISIBLE, view.row(0).visibility)
+        assertEquals("· Fix the login bug", view.row(0).text.toString())
+        assertEquals(View.VISIBLE, view.row(1).visibility)
+        assertEquals("· Widget sessions", view.row(1).text.toString())
+        assertEquals("a fixed layout draws no more rows than it was given", View.GONE, view.row(2).visibility)
+        assertEquals(View.GONE, view.moreRows().visibility)
+    }
+
+    @Test
+    fun `an overflow is drawn as its own line rather than dropped`() {
+        val view = draw(
+            WidgetCopy.of(
+                WidgetSnapshot(
+                    needsYou = WidgetReading(known = true, value = 0, asOf = 1L),
+                    working = WidgetReading(known = true, value = 5, asOf = 1L),
+                    subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                    running = listOf(
+                        WidgetSession("session-a", "Alpha"),
+                        WidgetSession("session-b", "Beta"),
+                        WidgetSession("session-c", "Gamma"),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(View.VISIBLE, view.moreRows().visibility)
+        assertEquals("+2 more", view.moreRows().text.toString())
+        assertEquals(View.VISIBLE, view.row(2).visibility)
+    }
+
+    @Test
+    fun `a card that cannot name anything draws no rows at all`() {
+        val view = draw(
+            WidgetCopy.of(
+                WidgetSnapshot(
+                    needsYou = WidgetReading(known = true, value = 0, asOf = 1L),
+                    working = WidgetReading(known = true, value = 4, asOf = 1L),
+                    subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                ),
+            ),
+        )
+
+        assertEquals("4 running", view.detail().text.toString())
+        assertEquals(View.VISIBLE, view.detail().visibility)
+        assertEquals(View.GONE, view.row(0).visibility)
+        assertEquals(View.GONE, view.moreRows().visibility)
+    }
+
+    /**
+     * Every row's tap has to be its own. `Intent.filterEquals` — which is what decides
+     * whether two `PendingIntent`s are the same one — compares everything *except* the
+     * extras, so three rows carrying three session ids would collapse into a single
+     * intent, and all three arrows would open whichever row was drawn last. That is why
+     * the row index is part of the request code, and this is the test that would fail if
+     * it were ever dropped.
+     */
+    @Test
+    fun `each named row keeps its own session in its own tap`() {
+        val saved = listOf("session-a", "session-b", "session-c").mapIndexed { index, id ->
+            shadowOf(WidgetRenderer.sessionIntent(context, id, index)).savedIntent
+        }
+
+        assertEquals(
+            listOf("session-a", "session-b", "session-c"),
+            saved.map { it.getStringExtra(Attention.EXTRA_SESSION) },
+        )
+        // The same path in as a notification: no second extra, no second activity.
+        assertEquals(
+            setOf(MainActivity::class.java.name),
+            saved.map { it.component?.className }.toSet(),
+        )
+    }
+
+    @Test
     fun `the tap carries the session that needs the user, through the existing launch path`() {
         val pending = WidgetRenderer.contentIntent(context, "session-a771fb9b")
         val saved = shadowOf(pending).savedIntent
@@ -131,5 +224,9 @@ class WidgetRenderTest {
     fun `a widget can be drawn with nothing known and no session at all`() {
         val view = draw(WidgetCopy.of(null), sessionId = null)
         assertEquals(WidgetCopy.NEEDS_UNKNOWN, view.headline().text.toString())
+    }
+
+    private companion object {
+        val ROW_IDS = intArrayOf(R.id.widget_row_0, R.id.widget_row_1, R.id.widget_row_2)
     }
 }

@@ -10,7 +10,7 @@
       what the card says in the instant before the app has spoken.
     -->
     <string name="widget_label">DSH status</string>
-    <string name="widget_description">Whether an agent needs you, and how much is running.</string>
+    <string name="widget_description">Whether an agent needs you, and which sessions are running.</string>
     <string name="widget_initial_headline">DSH</string>
     <string name="widget_initial_stamp">Open the app</string>
 </resources>
