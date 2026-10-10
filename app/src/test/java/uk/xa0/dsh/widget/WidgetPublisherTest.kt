@@ -126,29 +126,47 @@ class WidgetPublisherTest {
      * `confirmedAt + 60_000`.
      */
     @Test
-    fun `losing the basis records the instant it was lost, not the last one it was known`() {
+    fun `losing the basis clears the count, the kind and the session`() {
         boundWidget()
         val publisher = publisher()
         publisher.needsYou(2, PendingKind.APPROVAL, "session-1", known = true)
-        val confirmedAt = reading()?.needsYou?.asOf ?: 0L
-        assertTrue("nothing was ever confirmed, so the test would prove nothing", confirmedAt > 0L)
+        assertTrue(
+            "nothing was ever confirmed, so the test would prove nothing",
+            (reading()?.needsYou?.asOf ?: 0L) > 0L,
+        )
 
-        // The wall clock, not `advanceBy`: that moves the uptime clock, while the
-        // publisher reads `System.currentTimeMillis()`. Advancing the wrong one left
-        // `now` unchanged and the assertion below failed on correct production code.
-        ShadowSystemClock.setCurrentTimeMillis(confirmedAt + 60_000L)
         publisher.needsYou(0, null, null, known = false)
 
         val withdrawn = reading()?.needsYou
         assertTrue(withdrawn?.known == false)
-        assertEquals(
-            "the card counts from the moment the app could no longer confirm, not from the last time it could",
-            confirmedAt + 60_000L,
-            withdrawn?.asOf,
-        )
+        assertEquals(0, withdrawn?.value)
         // The kind and the session go with the count: a tap that opened a session because
         // of a reading that has just been withdrawn would be pointing at nothing.
         assertEquals(null, reading()?.sessionId)
+        // The INSTANT is not asserted here. This harness cannot move the wall clock:
+        // ShadowSystemClock offers only currentTimeMillis and advanceBy, and advanceBy moves
+        // the uptime clock while the publisher reads System.currentTimeMillis(). The instant
+        // is pinned directly, with both instants supplied, in
+        // `stamped stamps the instant the basis was lost, not the last one it was known`.
+    }
+
+    @Test
+    fun `stamped stamps the instant the basis was lost, not the last one it was known`() {
+        val confirmed = WidgetReading(known = true, value = 2, asOf = 1_000L)
+
+        val lost = stamped(confirmed, known = false, value = 0, now = 61_000L)
+        assertTrue(lost.known == false)
+        assertEquals(
+            "the card counts from the moment the app could no longer confirm, not the last time it could",
+            61_000L,
+            lost.asOf,
+        )
+
+        // The mirror: a reading that was never confirmed is left exactly as it was, so a
+        // count nobody ever had cannot be stamped with an age that suggests it was checked.
+        val never = WidgetReading(known = false, value = 0, asOf = 0L)
+        assertEquals(never, stamped(never, known = false, value = 0, now = 61_000L))
+        assertEquals(never, stamped(never, known = true, value = 0, now = 61_000L).copy(asOf = 0L))
     }
 
     @Test
