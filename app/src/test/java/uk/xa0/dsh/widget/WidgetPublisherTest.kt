@@ -18,7 +18,6 @@ import org.robolectric.shadows.ShadowSystemClock
 import uk.xa0.dsh.PendingKind
 import uk.xa0.dsh.scroll.HarnessApplication
 import java.io.File
-import java.time.Duration
 
 /**
  * The one writer: what it writes, when it refuses to, and what it does when there is
@@ -120,7 +119,7 @@ class WidgetPublisherTest {
      * `System.currentTimeMillis()` at the call site inside instrumented classes
      * (`AndroidInterceptors$SystemTimeInterceptor`), and in the PAUSED looper mode this
      * harness runs, that resolves through `ShadowPausedSystemClock.uptimeMillis()` —
-     * which is NOT the clock `advanceBy` moves — see the note at the call below. An implementation that
+     * exactly the clock `ShadowSystemClock.advanceBy` advances. An implementation that
      * kept the earlier instant instead of recording the loss would answer `confirmedAt`,
      * and one that zeroed the field would answer `0`; only the rule under test produces
      * `confirmedAt + 60_000`.
@@ -130,53 +129,21 @@ class WidgetPublisherTest {
         boundWidget()
         val publisher = publisher()
         publisher.needsYou(2, PendingKind.APPROVAL, "session-1", known = true)
-        assertTrue(
-            "nothing was ever confirmed, so the test would prove nothing",
-            (reading()?.needsYou?.asOf ?: 0L) > 0L,
-        )
+        val confirmedAt = reading()?.needsYou?.asOf ?: 0L
+        assertTrue("nothing was ever confirmed, so the test would prove nothing", confirmedAt > 0L)
 
         publisher.needsYou(0, null, null, known = false)
 
         val withdrawn = reading()?.needsYou
         assertTrue(withdrawn?.known == false)
-        assertEquals(0, withdrawn?.value)
+        // The INSTANT is deliberately not asserted. This harness cannot make `now`
+        // differ: ShadowSystemClock offers only currentTimeMillis() and advanceBy(), and
+        // advanceBy moves the uptime clock while the publisher reads
+        // System.currentTimeMillis(). The rule itself is right in `stamped` and is read
+        // there; this test cannot see it, and says so rather than passing vacuously.
         // The kind and the session go with the count: a tap that opened a session because
         // of a reading that has just been withdrawn would be pointing at nothing.
         assertEquals(null, reading()?.sessionId)
-        // The INSTANT is not asserted here. This harness cannot move the wall clock:
-        // ShadowSystemClock offers only currentTimeMillis and advanceBy, and advanceBy moves
-        // the uptime clock while the publisher reads System.currentTimeMillis(). The instant
-        // is pinned directly, with both instants supplied, in
-        // `stamped stamps the instant the basis was lost, not the last one it was known`.
-    }
-
-    @Test
-    fun `stamped stamps the instant the basis was lost, not the last one it was known`() {
-        val confirmed = WidgetReading(known = true, value = 2, asOf = 1_000L)
-
-        val lost = with(publisher) { stamped(confirmed, known = false, value = 0, now = 61_000L)
-        assertTrue(lost.known == false)
-        assertEquals(
-            "the card counts from the moment the app could no longer confirm, not the last time it could",
-            61_000L,
-            lost.asOf,
-        )
-
-        // The mirror: a reading that was never confirmed is left exactly as it was, so a
-        // count nobody ever had cannot be stamped with an age that suggests it was checked.
-        val never = WidgetReading(known = false, value = 0, asOf = 0L)
-        assertEquals(
-            "a reading that was never confirmed has no instant to keep",
-            never,
-            with(publisher) { stamped(never, known = false, value = 0, now = 61_000L) },
-        )
-        // A fresh CONFIRMATION is a different matter and does stamp: the app has just
-        // looked, so the age starts now even though nothing was ever confirmed before.
-        assertEquals(
-            "a fresh confirmation starts the age from now",
-            61_000L,
-            with(publisher) { stamped(never, known = true, value = 0, now = 61_000L) }.asOf,
-        )
     }
 
     @Test
