@@ -10,6 +10,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.Assert.assertTrue
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
@@ -68,9 +69,19 @@ class WidgetRenderTest {
         // The literal, not the constant: the word on the card is the claim.
         assertEquals("oldest reading", view.stamp().text.toString())
         assertEquals(View.VISIBLE, view.age().visibility)
-        // The base is the reading's instant, not "now": the Chronometer's whole job is to
-        // derive the age from it in the launcher's own process, with nothing of ours alive.
-        assertEquals(at, view.age().base)
+        // The base is the reading's instant CONVERTED to the clock a Chronometer counts on,
+        // not the instant itself. Asserting `at` here is what let a real launcher draw
+        // "oldest reading -406865:16:56": the wall clock is not the base's timebase, and
+        // this test agreed with the bug. The render call uses the machine's real clocks, so
+        // the converted value cannot be predicted from here - the conversion itself is
+        // pinned exactly, with both clocks supplied, in ChronometerBaseTest.
+        val base = view.age().base
+        assertTrue("the base must not be the wall-clock instant", base != at)
+        assertTrue("a reading in the past must not give a negative age", base >= 0L)
+        assertTrue(
+            "the base is an uptime instant, so it cannot exceed the uptime it is measured against",
+            base <= android.os.SystemClock.elapsedRealtime(),
+        )
     }
 
     @Test
