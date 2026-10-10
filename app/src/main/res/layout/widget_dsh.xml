@@ -43,6 +43,7 @@
 
     <TextView
         android:id="@+id/widget_headline"
+        android:gravity="start"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:ellipsize="end"
@@ -54,6 +55,7 @@
 
     <TextView
         android:id="@+id/widget_detail"
+        android:gravity="start"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="2dp"
@@ -77,6 +79,7 @@
 
         <TextView
             android:id="@+id/widget_row_0"
+            android:gravity="start"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:ellipsize="end"
@@ -88,6 +91,7 @@
 
         <TextView
             android:id="@+id/widget_row_1"
+            android:gravity="start"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="1dp"
@@ -100,6 +104,7 @@
 
         <TextView
             android:id="@+id/widget_row_2"
+            android:gravity="start"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="1dp"
@@ -116,6 +121,7 @@
         -->
         <TextView
             android:id="@+id/widget_row_more"
+            android:gravity="start"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="1dp"
@@ -135,6 +141,7 @@
 
         <TextView
             android:id="@+id/widget_stamp"
+            android:gravity="start"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/widget_initial_stamp"
