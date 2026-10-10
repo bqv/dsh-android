@@ -82,6 +82,14 @@ import uk.xa0.dsh.model.isAutomationSessionId
 import uk.xa0.dsh.model.partitionAutomations
 import uk.xa0.dsh.model.holdOrder
 import uk.xa0.dsh.model.SessionSearchHit
+import uk.xa0.dsh.model.WorkspaceCopy
+import uk.xa0.dsh.model.WorkspaceGroupState
+import uk.xa0.dsh.model.WorkspaceListPhase
+import uk.xa0.dsh.model.headerCount
+import uk.xa0.dsh.model.placeholder
+import uk.xa0.dsh.model.showsHeader
+import uk.xa0.dsh.model.ungroupedTitle
+import uk.xa0.dsh.model.workspaceGroupState
 import uk.xa0.dsh.diag.DiagLazyList
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.diag.diagDrag
@@ -128,6 +136,22 @@ private data class Section(
      * goes.
      */
     val createIn: String? = null,
+    /**
+     * Why a Workspace group draws the rows it does, or null for the groups that are not
+     * a Workspace (the flat list, the catch-all and Automations). Those three exist only
+     * when they have rows, so their count is always a fact.
+     *
+     * It is carried rather than recomputed at draw time because the two facts it decides
+     * belong *only* to Workspaces: what a zero-row group says, and whether it may print a
+     * count at all. See `model/WorkspaceGroups.kt`.
+     */
+    val state: WorkspaceGroupState? = null,
+    /**
+     * Whether this group holds the session on screen — the web's `containsCurrent`
+     * (`tree.d.ts`), which tints that Workspace's folder. A place is easier to find when
+     * the sidebar says which one you are in.
+     */
+    val containsCurrent: Boolean = false,
 )
 
 /** A session plus its nesting depth, so subagents indent under their parent. */
@@ -151,6 +175,12 @@ private data class TreeRow(val session: SessionItem, val depth: Int)
 fun SessionsDrawer(
     sessions: List<SessionItem>,
     workspaces: List<WorkspaceItem>,
+    /**
+     * Whether [workspaces] is the host's answer yet. The registry is streamed, so an
+     * empty list has two meanings — no Workspaces registered, or no baseline received —
+     * and this is what keeps them apart on screen.
+     */
+    workspacesPhase: WorkspaceListPhase,
     archivedSessionIds: Set<String>,
     completedSessionIds: Set<String>,
     /**
@@ -367,6 +397,8 @@ fun SessionsDrawer(
         matched,
         sessions,
         workspaces,
+        workspacesPhase,
+        currentId,
         groupByWorkspace,
         orderByUpdated,
         showArchived,
@@ -458,24 +490,39 @@ fun SessionsDrawer(
             // archived, subagents) stays hidden — but one whose members are
             // missing from the list itself does not, because that is a transient
             // the user cannot see or fix.
-            val everyMemberKnown = workspace.sessionIds.all { it in known }
-            if (items.isNotEmpty() || workspace.sessionIds.isEmpty() || !everyMemberKnown) {
+            //
+            // Those two zero-row cases are not the same claim, though, and the
+            // sidebar must not draw them alike: "this directory accounts for no
+            // session" is a fact the registry supplied, while "its sessions have not
+            // arrived" is not. [workspaceGroupState] keeps them apart and the group
+            // header plus its placeholder say which one it is; see
+            // `model/WorkspaceGroups.kt`.
+            val state = workspaceGroupState(
+                memberIds = workspace.sessionIds,
+                visibleIds = items.map { it.id },
+                knownIds = known.keys,
+            )
+            if (state.showsHeader) {
                 result += Section(
                     key = workspace.id,
                     title = workspace.title,
                     rows = items.flatMap { disclose(it) },
                     createIn = workspace.id,
+                    state = state,
+                    containsCurrent = currentId != null && currentId in workspace.sessionIds,
                 )
             }
         }
 
-        // Sessions outside every Workspace. The host labels this "Ungrouped"; it
-        // has no manual order of its own, so it is always newest-first.
+        // Sessions outside every Workspace. The host labels this "Ungrouped" — a claim
+        // that needs the registry, because until the baseline lands a session on this
+        // screen may well belong to a Workspace this client has not been told about.
+        // It has no manual order of its own, so it is always newest-first.
         val rest = holdOrder(conversations.filterNot { it.id in claimed }, heldOrder)
         if (rest.isNotEmpty()) {
             result += Section(
                 key = UNGROUPED,
-                title = "Ungrouped",
+                title = ungroupedTitle(workspacesPhase),
                 rows = rest.flatMap { disclose(it) },
                 // Sessions outside every Workspace are still *this* machine's — the host
                 // files them under a bucket rather than a directory, and the glyph says
@@ -596,6 +643,12 @@ fun SessionsDrawer(
         // there are no Workspace rows to hang it on, and a host with no Workspaces
         // registered has no group at all. Left visible in the grouped case it was
         // the button that created a blank first and asked "where?" second.
+        //
+        // It deliberately stays on an unanswered registry too, where its own reason is
+        // not yet known: it is the sidebar's only way to start a session, and a stream
+        // that never delivers a baseline would otherwise take it away. The target is
+        // only recorded until the seat is first used (`startSession`), by which time the
+        // registry has usually answered and the session lands in its Workspace.
         val newShape = RoundedCornerShape(DshRadius.card)
         // The button's own visibility gates the separator below it: in the common
         // case there is no button, so there is nothing to separate from the field.
@@ -760,6 +813,19 @@ fun SessionsDrawer(
                 )
                 return@LazyColumn
             }
+            // The registry's own arrival, when it is still unknown. Nothing below it
+            // can be read as the whole truth until the baseline lands — the group
+            // headers are missing, not the Workspaces — so the absence is named here
+            // rather than left to be inferred from headers that are not there.
+            //
+            // Only when there are sessions to group, because this row exists to qualify
+            // the sections under it; with an empty roster the drawer's own "Loading…"
+            // (below) is the whole story and a second one would be noise. Drawn only in
+            // the grouped view, and deliberately not tappable: there is no group to fold
+            // yet.
+            if (groupByWorkspace && workspacesPhase == WorkspaceListPhase.Pending && sessions.isNotEmpty()) {
+                item(key = "workspaces-pending") { PendingWorkspaceRow() }
+            }
             sections.forEach { section ->
                 val isCollapsed = section.key in collapsedSections
                 val isExpanded = section.key in expandedSections
@@ -768,6 +834,14 @@ fun SessionsDrawer(
                     else -> section.rows.take(PAGE_SIZE)
                 }
                 val hidden = section.rows.size - shown.size
+                // Top-level sessions only: a disclosed subagent belongs to its
+                // parent's row, it is not another session in the group.
+                val topLevel = section.rows.count { it.depth == 0 }
+                // A group is only allowed to print a count that is a fact: a Workspace
+                // whose members have not reached the roster does not know its own
+                // figure, and "0" beside "Sessions not loaded" would be that lie.
+                val state = section.state
+                val count = if (state == null) topLevel else state.headerCount(topLevel)
 
                 // Sticky so the workspace a session belongs to stays named while
                 // you scroll its rows.
@@ -778,11 +852,10 @@ fun SessionsDrawer(
                     ProjectRow(
                         modifier = Modifier.background(colors.sidebarFill),
                         title = section.title,
-                        // Top-level sessions only: a disclosed subagent belongs to
-                        // its parent's row, it is not another session in the group.
-                        count = section.rows.count { it.depth == 0 },
+                        count = count,
                         collapsed = isCollapsed,
                         icon = section.icon,
+                        containsCurrent = section.containsCurrent,
                         onClick = {
                             onCollapsedSections(
                                 if (isCollapsed) {
@@ -825,6 +898,15 @@ fun SessionsDrawer(
                             onArchive = { onArchive(row.session.id) },
                             onUnarchive = { onUnarchive(row.session.id) },
                         )
+                    }
+
+                    // What a group with nothing in it means, in words. This is the row
+                    // that keeps "this Workspace has no sessions" apart from "its
+                    // sessions have not been loaded": those two states draw differently
+                    // here and in the header's count, and nowhere else on screen are
+                    // they distinguishable at all.
+                    section.state?.placeholder?.let { note ->
+                        item(key = "note-${section.key}") { GroupNoteRow(note) }
                     }
 
                     if (hidden > 0 || isExpanded) {
@@ -967,7 +1049,12 @@ private fun LazyListScope.searchResults(
 @Composable
 private fun ProjectRow(
     title: String,
-    count: Int,
+    /**
+     * How many top-level sessions the group holds, or null when that is not yet a fact
+     * — a Workspace whose members the roster has not delivered. A null draws nothing
+     * where the number would be, rather than a zero the group cannot support.
+     */
+    count: Int?,
     collapsed: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -980,6 +1067,13 @@ private fun ProjectRow(
     icon: ImageVector? = null,
     /** Null for the buckets with no Workspace behind them: the flat list and Ungrouped. */
     onCreate: (() -> Unit)? = null,
+    /**
+     * Whether the open session lives in this group. The web tints the folder of the
+     * Workspace that contains the selection (`folderActive`,
+     * `state-business-primary`), which is how a reader finds their place in a list of
+     * directories without opening each one.
+     */
+    containsCurrent: Boolean = false,
 ) {
     val colors = DshTheme.colors
     Row(
@@ -999,7 +1093,7 @@ private fun ProjectRow(
                 collapsed -> "Expand workspace"
                 else -> "Collapse workspace"
             },
-            tint = colors.labelTertiary,
+            tint = if (containsCurrent) colors.accent else colors.labelTertiary,
             modifier = Modifier.size(16.dp),
         )
         Spacer(Modifier.width(DshSpacing.sm))
@@ -1012,7 +1106,7 @@ private fun ProjectRow(
             modifier = Modifier.weight(1f),
         )
         Text(
-            text = count.toString(),
+            text = count?.toString().orEmpty(),
             style = DshType.micro,
             color = colors.labelCaption,
         )
@@ -1050,6 +1144,78 @@ private fun ShowMoreRow(label: String, onClick: () -> Unit) {
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(label, style = DshType.bodySmall, color = colors.labelTertiary)
+    }
+}
+
+/**
+ * The one line a Workspace group draws when it has no rows: what that absence *means*.
+ *
+ * "No sessions" and "Sessions not loaded" are different claims about a directory, and
+ * this row is where they are told apart — the header above it cannot carry the difference
+ * alone, because a count of zero looks the same whether the registry said the directory is
+ * empty or the roster has simply not delivered its members.
+ *
+ * Deliberately not clickable: there is no session behind it and nothing a tap could
+ * open. It sits where `ShowMoreRow` sits, in the same type, so a group with nothing in
+ * it and a group with more to show read as the same kind of footnote rather than one of
+ * them looking like a broken session row.
+ */
+@Composable
+private fun GroupNoteRow(label: String) {
+    val colors = DshTheme.colors
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(28.dp)
+            .padding(start = DshSpacing.lg + DshSpacing.xl),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(label, style = DshType.bodySmall, color = colors.labelTertiary)
+    }
+}
+
+/**
+ * The grouped list's placeholder while `workspace/follow` has not yet delivered its
+ * baseline.
+ *
+ * What is missing is the *registry*, not any session's rows, so this is drawn once above
+ * the groups rather than being folded into the catch-all section: with no Workspaces
+ * known, every session is in that bucket, and the bucket's own label would be the drawer
+ * making a claim about membership it has not been told. It borrows [ProjectRow]'s shape —
+ * folder glyph, name, figure on the right — so it reads as a group that is not yet here
+ * rather than as a fifth kind of row, and it is **not** tappable: there is nothing to
+ * fold, and a dead disclosure would be worse than no row at all.
+ */
+@Composable
+private fun PendingWorkspaceRow() {
+    val colors = DshTheme.colors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(34.dp)
+            .padding(end = DshSpacing.md),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Rounded.Folder,
+            contentDescription = null,
+            tint = colors.labelTertiary,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(DshSpacing.sm))
+        Text(
+            text = WorkspaceCopy.WORKSPACES,
+            style = DshType.bodyMedium.copy(fontWeight = FontWeight.Medium),
+            color = colors.labelSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = WorkspaceCopy.UNKNOWN,
+            style = DshType.micro,
+            color = colors.labelCaption,
+        )
     }
 }
 

@@ -91,6 +91,7 @@ import uk.xa0.dsh.model.SubagentTarget
 import uk.xa0.dsh.model.TodoItem
 import uk.xa0.dsh.model.PreviewFormat
 import uk.xa0.dsh.model.WorkspaceFileLoader
+import uk.xa0.dsh.model.WorkspaceListPhase
 import uk.xa0.dsh.model.previewFormatOf
 import uk.xa0.dsh.model.TranscriptReducer
 import uk.xa0.dsh.model.arr
@@ -566,7 +567,25 @@ data class UiState(
     val errorNeedsSignIn: Boolean = false,
     val sessions: List<SessionItem> = emptyList(),
     val sessionsLoading: Boolean = false,
+    /**
+     * The host's Workspace registry, in the registry's own order.
+     *
+     * Authoritative, not inferred from `cwd`: the list is exactly what
+     * `workspace/follow`'s baseline reported, which is why a registered directory
+     * with **no sessions** is here at all. Nothing in this client invents a group
+     * for a `cwd` no Workspace claims.
+     */
     val workspaces: List<WorkspaceItem> = emptyList(),
+    /**
+     * Whether [workspaces] is the host's answer yet.
+     *
+     * An empty [workspaces] means one of two different things — a host with no
+     * Workspaces registered, or a stream that has not delivered its `baseline` — and
+     * the sidebar is not allowed to draw them the same. Monotone: a later generation
+     * replaces the projection with another complete baseline, so this never returns
+     * to [WorkspaceListPhase.Pending].
+     */
+    val workspacesPhase: WorkspaceListPhase = WorkspaceListPhase.Pending,
     val archivedSessionIds: Set<String> = emptySet(),
     /**
      * Host content-search hits for the drawer's query (`session/search`), already
@@ -4162,6 +4181,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                         _ui.value = _ui.value.copy(
                             workspaces = (0 until items.length())
                                 .mapNotNull { items.optJSONObject(it)?.let(::toWorkspace) },
+                            // The registry has now answered, whatever it answered:
+                            // a baseline of zero items is a host with no Workspaces,
+                            // which the sidebar may say — an *absent* baseline is not.
+                            workspacesPhase = WorkspaceListPhase.Ready,
                             archivedSessionIds = archived,
                         )
                     }
