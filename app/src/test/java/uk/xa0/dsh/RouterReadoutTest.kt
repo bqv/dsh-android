@@ -90,11 +90,18 @@ class RouterReadoutTest {
     }
 
     @Test
-    fun `a base URL and a model id are quoted so nothing in them can run`() {
+    fun `a base URL is quoted so nothing in it can run`() {
         val line = routerReadoutReadLine("http://127.0.0.1:55555")
         assertTrue(line.contains("'/props'"))
-        val hostile = routerReadoutSlotsLine("http://127.0.0.1:55555", "x'y")
-        assertTrue("a quote in a value must be closed and re-opened", hostile.contains("x'\\''y"))
+        // Every URL is a single-quoted shell word, and a quote inside one is closed and
+        // re-opened rather than left to end the word early.
+        val hostile = routerReadoutReadLine("http://127.0.0.1:55555'x")
+        assertTrue(hostile.contains("'http://127.0.0.1:55555'\\''x'/props"))
+        // The model id is percent-encoded *before* it is quoted, so a quote in it never
+        // reaches the shell as a quote at all — belt and braces, and the reason the
+        // encoding is written out rather than borrowed from form encoding.
+        val encoded = routerReadoutSlotsLine("http://127.0.0.1:55555", "x'y")
+        assertTrue(encoded.contains("slots?model=x%27y"))
     }
 
     @Test
