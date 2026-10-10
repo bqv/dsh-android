@@ -8,6 +8,7 @@ import android.widget.RemoteViews
 import uk.xa0.dsh.Attention
 import uk.xa0.dsh.MainActivity
 import uk.xa0.dsh.R
+import android.os.SystemClock
 
 /**
  * Turns [WidgetText] into the `RemoteViews` a launcher draws.
@@ -90,7 +91,12 @@ object WidgetRenderer {
             // Chronometer keeps counting with no process of ours alive, so the age
             // cannot be left behind by a force-stop, an OEM kill or a reboot — the
             // three cases where a scheduled "mark it stale" wake-up never arrives.
-            views.setChronometer(R.id.widget_age, base, "%s ago", true)
+            views.setChronometer(
+                R.id.widget_age,
+                chronometerBase(base),
+                "%s ago",
+                true,
+            )
         }
 
         views.setOnClickPendingIntent(R.id.widget_root, contentIntent(context, sessionId))
@@ -168,3 +174,19 @@ object WidgetRenderer {
         WidgetLevel.UNKNOWN -> R.color.widget_text_unknown
     }
 }
+
+/**
+ * The base `RemoteViews.setChronometer` needs, from the wall-clock instant a reading carries.
+ *
+ * A [android.widget.Chronometer] counts from a `SystemClock.elapsedRealtime()` base, not from a
+ * wall-clock one, so handing it `System.currentTimeMillis()` makes the launcher compute
+ * `uptime - wallClock` — which drew `oldest reading -406865:16:56` on a real homescreen: a
+ * negative age of roughly the forty-six years between 1970 and this machine's uptime. Both
+ * clocks are parameters so the conversion is testable without a device, and the result is
+ * clamped because an instant in the future would otherwise tick the same impossible way.
+ */
+internal fun chronometerBase(
+    wallInstant: Long,
+    now: Long = System.currentTimeMillis(),
+    uptime: Long = SystemClock.elapsedRealtime(),
+): Long = (uptime - (now - wallInstant)).coerceAtLeast(0L)
