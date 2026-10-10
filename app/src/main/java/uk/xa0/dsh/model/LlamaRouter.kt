@@ -668,6 +668,10 @@ fun parseRouterStatus(value: Any?): RouterLoad? {
         slots = parseSlots(root.obj("slots")),
         slotsModel = root.obj("slots")?.str("model")?.takeIf { it.isNotEmpty() },
         slotsContextSize = root.obj("slots")?.intOrNull("nCtx"),
+        // A plugin that withheld the /slots request can say so, and then the tab says
+        // that rather than "the router reported no slots" — the same distinction the
+        // terminal readout keeps with the same field.
+        slotsUnread = root.obj("slots")?.str("unread")?.takeIf { it.isNotEmpty() },
     )
 }
 

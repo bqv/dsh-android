@@ -30,7 +30,8 @@ import uk.xa0.dsh.model.routerRootOf
 import uk.xa0.dsh.model.slotsContextSizeOf
 import uk.xa0.dsh.model.slotsOf
 import uk.xa0.dsh.term.TerminalInfo
-import uk.xa0.dsh.term.TerminalState
+import uk.xa0.dsh.term.readoutTerminalToAdopt
+import uk.xa0.dsh.term.readoutTerminalsToRetire
 import java.util.UUID
 
 /** What one attempt at the terminal readout produced. */
@@ -300,9 +301,17 @@ class RouterReadoutTransport(
      */
     private suspend fun ensureTerminal(agentId: String): TerminalInfo {
         val existing = runCatching { terminals.list(agentId) }.getOrDefault(emptyList())
-        existing.firstOrNull {
-            it.id == ROUTER_READOUT_TERMINAL_ID && it.state == TerminalState.RUNNING
-        }?.let { return it }
+        readoutTerminalToAdopt(existing)?.let { return it }
+        // A reserved terminal that is not running can never be adopted again, and
+        // because the id is fixed rather than random it is also a blocker: the host
+        // refuses to create an identity it still holds. It has to be retired first or
+        // the readout could never come back after its shell died. `terminal/close` is
+        // accepted on an exited terminal and drops it from `terminal/list`; a failure
+        // here is not fatal, because `create` is then simply refused and the tab
+        // reports that in its own words.
+        for (stale in readoutTerminalsToRetire(existing)) {
+            runCatching { terminals.close(agentId, stale.id) }
+        }
         return terminals.create(
             agentId = agentId,
             id = ROUTER_READOUT_TERMINAL_ID,

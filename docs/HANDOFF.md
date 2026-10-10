@@ -384,15 +384,108 @@ reports `models_autoload: true`. One such request did not answer within 8 s
 read `unloaded`, so nothing was loaded — but *why* it hung is inference, not
 measurement. Read `/v1/models` first and ask for slots only for the resident model.
 
-### What this client can reach: none of it
+### What this client can reach directly: none of it
 
 Re-verified 2026-10-10 rather than inherited. On `127.0.0.1:8080` and
 `127.0.0.1:8081` — the two ports the phone can reach — `/health`, `/v1/models`,
 `/props`, `/slots` and `/metrics` all answer **404**; `:80` answers **302** (nginx's
 primer redirect). `nginx -T` still shows a single
 `location / { proxy_pass http://127.0.0.1:8080; }` per server block and nothing
-else. So loaded-model / slots / VRAM / throughput are not obtainable directly and
-**must never be invented**.
+else. So none of it is obtainable *directly*, and none of it may be invented.
+
+### The route that works: run `curl` on the host through a terminal
+
+**Measured 2026-10-10.** `terminal/*` is a host-side one-shot executor, and it is
+already the machinery the Shell tab uses. Opening a terminal in a session, writing one
+command to it and reading the `terminal/follow` output stream returns the router's own
+JSON. No plugin, no ssh, no tunnel, no listener, no LAN exposure, **and nothing for the
+user to configure on the host** — the command travels over the Remote connection the
+app already has, which is already authenticated and already encrypted.
+
+The probe was run from a throwaway session created for it
+(`session-3fa279d4-ae08-4934-a021-4fc41feccc2f`, cwd `/home/user/tmp/routerprobe/scratch`):
+
+```
+# curl -s http://127.0.0.1:55555/props
+{"role":"router","max_instances":1,"models_autoload":true,"model_alias":"llama-server",
+ "model_path":"none","default_generation_settings":{"params":null,"n_ctx":0},
+ "ui_settings":{},"build_info":"b0-unknown","cors_proxy_enabled":false}
+
+# curl -s http://127.0.0.1:55555/v1/models | head -c 400
+{"data":[{"id":"Qwen3.5-35B-A3B-UD-IQ4_XS",...,"status":{"value":"unloaded","args":[...]}}...
+
+# the same protocol against llamb (:55556), which had one model actually resident
+props HTTP 200 role=router max_instances=2 autoload=true
+models HTTP 200 count=6 resident=[Qwen3-Embedding-0.6B-Q8_0:loaded]
+slots: is_processing=false n_prompt_tokens=36 processed=0 cache=0 n_ctx=4096 decoded=0
+```
+
+The third block is the important one: **the `/slots` leg is verified against a real
+resident model**, which is the one query the autoload trap forbids for a non-resident
+one. Nothing was loaded, started or stopped to get it — `llamb` already held the
+embedding model. It is *not* verified against a large model mid-prefill.
+
+**Latency**, measured with a websocket client against the live host:
+
+| Step | Cost |
+| --- | --- |
+| `terminal/create` (fresh, cold bash) | ~110 ms |
+| `terminal/follow` open → `snapshot` (attach) | 6–46 ms |
+| `/props` + `/v1/models`, one write | **24 ms** |
+| `+ /slots` (resident model) | **42 ms total** |
+
+So the attachment is opened once and reused, and a refresh is one write. `create` is
+the expensive step, which is why the terminal is never closed between reads.
+
+**Confinement is not an obstacle.** DSH's bwrap argv for `workspace-write` is
+`--ro-bind / /`, `--bind <workspace>`, `--dev /dev`, `--proc /proc`, `--tmpfs /tmp`,
+`--unshare-pid` — **there is no `--unshare-net`**, so a confined shell keeps the host's
+network namespace and reaches loopback: measured inside the default-preset shell,
+`props HTTP 200 in 0.000649s`. A `danger-full-access` session behaves the same.
+
+**Four things make the stream trustworthy**, and all four are in
+`model/RouterReadout.kt`:
+
+1. **Echo is turned off and the prompt is silenced** by a sync line
+   (`stty -echo; PROMPT_COMMAND=(); PS1=''`). The echo matters for framing — the
+   echoed line contains the same markers the command prints — and the prompt matters
+   for latency: this box's interactive bash runs liquidprompt, whose git/load/temp
+   segments cost **~200–700 ms per prompt**, and that cost lands between one read and
+   the next. With the prompt silenced, steady-state reads fell to 15–34 ms.
+2. **The sync sentinel is built with `printf '…%s…'` so the typed text cannot contain
+   the resolved marker.** That line runs while echo is still on, and echo is the only
+   source of literal duplicates.
+3. **Every marker must occur exactly once** (`parseReadoutChunk`). A doubled marker
+   means the terminal echoed the line or replayed a previous screen, and the honest
+   answer is then "this read could not be trusted" — never a number picked out of an
+   ambiguous stream.
+4. **`/slots` is asked for only when a parsed `/v1/models` reply names exactly one
+   resident model** (`residentModelForSlots`), bound by `-m 5` and an 8 s client wait.
+   When it is not asked, `RouterLoad.slotsUnread` carries the reason, so "not asked"
+   can never be drawn as "the router reported no slots".
+
+**How the readout stays invisible.** It owns one terminal per session under the
+reserved id `dsh-router-readout`, and `DshViewModel.startTerminal` filters that id out
+of `terminal/list` before the Shell tab adopts, reaps or lists anything — without that
+filter the Shell tab's `terminalToAdopt` (`firstOrNull { RUNNING }`) could take the
+readout's seat. The cost it does carry is one extra live bash per session, held for
+reuse and never closed. What it does not replace: it needs a **live agent**, so a
+session that is cold cannot host it, and the tab reports that as "the readout could not
+be made" rather than as an unreachable router.
+
+**Rejected on the way, and why** (recorded so they are not re-litigated):
+
+- **`adb reverse tcp:55555 tcp:55555`** was the user's first idea and it *would* work —
+  the host half is a one-line command and it exposes nothing to the LAN. It was
+  rejected because it needs a debugging-enabled device attached to the host's adb,
+  which makes it a developer affordance rather than an answer.
+- **An nginx location for the routers behind authentication.** Reachable — the phone
+  does reach the host's nginx over the LAN (measured from the handset: TCP+HTTP to
+  `192.168.1.110:80` answers, RTT 7–19 ms) — but it puts local inference on the
+  network, needs a host config edit and a reload, and needs a cookie or `auth_basic`
+  decision. Strictly worse than a route that needs no configuration at all.
+- **An SSH port-forward from the host to itself** is pointless; the terminal is
+  already on the host.
 
 ### `llm/discoverModels` is the one host-performed probe — and it drops the answer
 
@@ -414,7 +507,8 @@ that carries the load state and then declines to return it.
 
 ### Why no existing method reports load or prefill
 
-Swept on 2026-10-10, all negative:
+Swept on 2026-10-10, all negative, plus the four namespaces re-swept on 2026-10-10
+when the terminal route was found:
 
 - **`llm/discoverModels` cannot be bent into a general GET.** `listingUrl` is a bare
   `` `${base}/models` `` string concatenation and `readListing` accepts only a `data`
@@ -424,6 +518,22 @@ Swept on 2026-10-10, all negative:
   descriptors installed, only `dsh-llm`'s has a URL-bearing parameter
   (`settingsNs` + `request`). `web/fetch`, `webFetch/fetch`, `fetch/url`, `http/get`,
   `httpProxy/get`, `web/fetchUrl` and `proxy/fetch` all answer `not found`.
+- **There is no one-shot exec, and no client-startable job.** The complete `job`
+  namespace is `job/list`, `job/follow`, `job/kill` — there is no start — and
+  `dsh-jobs-local` refuses to make one for anything but a live agent
+  (`"background job owner must be live"`), so a client cannot start one.
+  `commands/list` and `commands/execute` address a **human-command registry**
+  (`compact`, `export`, `feedback`, `goal`, `permission`, `plan` on this host), so a
+  command that curled the router would have to be registered by a plugin — the plugin
+  route wearing a different hat. `schedule/*` can schedule a prompt, not a command,
+  and reading state on a timer through it would be absurd overkill.
+- **`terminal/*` is the executor** — see the section above. Its full surface is
+  `list`, `create`, `follow`, `write`, `resize`, `rename`, `close`, `retain`,
+  `environment`, `shells`. `list`/`environment`/`shells` are read-only; `retain` is a
+  `{type:'retained'}` stream and is not needed. `terminal/create` takes
+  `{shellPath?, id, cols, rows}` and always runs the shell **interactive**
+  (`["-i"]` for bash/zsh, `terminal-controller` line 32), so the rc-file prompt cannot
+  be avoided at creation — only silenced from inside, which is what the sync line does.
 - **The Web-fetch plugins are not a door.** `dsh-web-fetch-http` is loaded but
   registers into the `web` service, not a Remote namespace (it has no
   `typert.host.js`), and it is built to *refuse* private addresses. `dsh-http-proxy`
@@ -435,25 +545,19 @@ Swept on 2026-10-10, all negative:
   `getSlots`, `getMetrics`, `getHealth`, `getProps` and `getRouterStatus` all
   answering `not found`. `getState` reports that plugin's **own child process**; its
   `config` still carries the Windows default `serverExe: "llama-server.exe"` and an
-  empty `llamaDir`, so on this box it reads `status:"stopped"`, `pid:null` — its
-  `pid` is `this.proc ? (this.serverPid ?? null) : null`, so it is null whenever the
-  plugin owns no child, even though `resolveServerPid()` does ask the OS which
-  process LISTENs on the configured port. It cannot adopt the OpenRC routers either:
-  `startSlot` calls `probeHealth()` (`curl -s -m 3 http://127.0.0.1:<port>/health`)
-  and refuses when `"ok"` comes back — `端口 … 已有服务在运行（/health 返回 ok）`.
+  empty `llamaDir`, so on this box it reads `status:"stopped"`, `pid:null`. It cannot
+  adopt the OpenRC routers either: `startSlot` calls `probeHealth()`
+  (`curl -s -m 3 http://127.0.0.1:<port>/health`) and refuses when `"ok"` comes back
+  — `端口 … 已有服务在运行（/health 返回 ok）`.
   **It can only spawn its own child, and it will not start beside one.**
-  It does prove the shape of the answer, though: the host *can* run `curl` at the
-  router's `/health`; it just exposes no method that returns the result.
 
-### The method that would close the gap: `localRouter/status`
+### The optional cheaper route: `localRouter/status`
 
-**Not implemented.** This is a spec for a small plugin, so the user can decide
-whether to write it. The app's client half is already written against it
-(`ROUTER_STATUS_METHOD`, `routerStatusArgs`, `parseRouterStatus`,
-`classifyRouterStatus` in `app/src/main/java/uk/xa0/dsh/model/LlamaRouter.kt`), so a
-plugin that answers this shape lights the tab up with no app change. Until then the
-host answers `not found`, the client latches that off, and the tab says the readout
-is not offered.
+**Not implemented, and no longer needed.** The terminal readout above supplies the
+same state on this host today. This spec is kept because a host that composes the
+method answers in one round trip and never needs a terminal, and the app already
+prefers it: `readRouterStatus` tries `localRouter/status` first, then the terminal
+readout, then `llm/discoverModels`.
 
 It is a sibling of `llm/discoverModels`, not an extension of it: same argument
 shape, same "the host does the HTTP", but a namespace a standalone plugin can own
@@ -539,11 +643,11 @@ router. It should reject an unknown `provider` rather than ignore it.
 | `models[].contextSize` | `status.args` `--ctx-size` | Omit when the model is not loaded, or the flag is absent. |
 | `models[].childPort` | `status.args` `--port` | The **child instance's** port, not the router's. |
 | `slots.model` | — | The id whose `/slots` these are. |
+| `slots.unread` | — | **Optional, and the client now honours it.** A sentence saying why no slot reading is included, for a plugin that withheld the request. Without it an omitted `slots` reads as "the router reported no slots", which is a different fact — the terminal readout always sets it (it becomes `RouterLoad.slotsUnread`). |
 | `slots.nCtx` | `/slots[0].n_ctx` | |
 | `slots.entries[]` | `/slots[]` | `id`, `is_processing`, `n_prompt_tokens` → `promptTokens`, `n_prompt_tokens_processed` → `promptTokensProcessed`, `n_prompt_tokens_cache` → `promptTokensCache`, `next_token[0].n_decoded` → `decoded`, `next_token[0].n_remain` → `remaining`. |
 
 **Failure** — one shape, and the message must name the URL that failed:
-
 ```json
 { "ok": false, "error": { "code": "local-router/unreachable",
   "message": "could not reach http://127.0.0.1:55599/v1/models" } }
@@ -565,6 +669,22 @@ asked for, and adding them would mean inventing fields from a router that does n
 report them in this document.
 
 ## Open items
+
+- **The terminal readout is proven on the host and unproven on the phone.** The
+  protocol was measured against both live routers with a websocket client
+  (`~/tmp/routerprobe/readout.mjs`), the numbers are in the section above, and the app
+  half was written from them — but **no Android build had run at the time of writing**,
+  so nothing in `RouterReadoutTransport`, the Shell tab's reserved-id filter or the
+  tab's new `LOAD`/`PREFILL` rendering has executed. What is still unmeasured:
+  the end-to-end per-refresh cost *from the app* (the host-side numbers do not include
+  the phone's hop), and whether a second terminal per session is comfortable on a
+  session the user is also using the Shell tab in.
+- **`/slots` is proven only against a small resident model.** `llamb`'s
+  `Qwen3-Embedding-0.6B-Q8_0` was already resident and returned real slot state; no
+  large model was loaded to test the mid-prefill case, and none should be.
+- **The readout needs a live agent.** A cold session cannot host a terminal, so the
+  tab shows the readout as not made rather than as a router that said nothing. That is
+  deliberate, and it is the one state this feature cannot avoid.
 
 - **Scrolling is being rebuilt from evidence, not from an account of it.** The
   latent recorder in `uk.xa0.dsh.diag.ScrollDiag` is attached to every scroll
