@@ -109,8 +109,11 @@ class ApprovalCardTest {
         return answer
     }
 
+    // `getUnclippedBoundsInRoot()` returns a DpRect: corners, not a rect with a `height`.
+    // The same mistake was made twice on the widget tests today.
     private fun heightOf(tag: String): Float =
-        rule.onNodeWithTag(tag, useUnmergedTree = true).getUnclippedBoundsInRoot().height.value
+        rule.onNodeWithTag(tag, useUnmergedTree = true).getUnclippedBoundsInRoot()
+            .let { (it.bottom - it.top).value }
 
     @Test
     fun `a waiting card offers both answers`() {
