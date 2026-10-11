@@ -5,6 +5,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uk.xa0.dsh.SessionItem
 
 /**
  * What the sidebar's Workspace groups are allowed to say.
@@ -159,5 +160,111 @@ class WorkspaceGroupTest {
         // will be, and "0 Workspaces" would be the one thing the pending phase denies.
         assertEquals("unknown", WorkspaceCopy.UNKNOWN)
         assertNotEquals(WorkspaceCopy.UNKNOWN, WorkspaceGroupState.Empty.placeholder)
+    }
+
+    // ------------------------------------------------------------------- live work in a group
+
+    @Test
+    fun `a group holding a member that is working is running`() {
+        val state = workspaceRunState(
+            memberIds = listOf("a", "b"),
+            liveIds = setOf("a"),
+            knownIds = setOf("a", "b"),
+        )
+        assertEquals(WorkspaceRunState.Running, state)
+    }
+
+    @Test
+    fun `a group whose members have all arrived and none is working is idle`() {
+        val state = workspaceRunState(
+            memberIds = listOf("a", "b"),
+            liveIds = emptySet(),
+            knownIds = setOf("a", "b", "elsewhere"),
+        )
+        assertEquals(WorkspaceRunState.Idle, state)
+    }
+
+    @Test
+    fun `a group holding a member the roster never delivered is unknown, not idle`() {
+        // The one that matters: "nothing is running in here" is not a fact while a member is
+        // missing, so the header must not be drawn as the confirmed-nothing it is not. The
+        // drawer reads this state as the untinted title plus the spoken `RUNNING_UNKNOWN`.
+        val state = workspaceRunState(
+            memberIds = listOf("a", "b"),
+            liveIds = emptySet(),
+            knownIds = setOf("a"),
+        )
+        assertEquals(WorkspaceRunState.Unknown, state)
+        assertNotEquals(
+            "an undelivered member must not be drawn as a quieter idle",
+            WorkspaceRunState.Idle,
+            state,
+        )
+        assertNotEquals(WorkspaceRunState.Running, state)
+    }
+
+    @Test
+    fun `work already seen outranks the members that have not arrived`() {
+        // "Something is running" stays true however much of the membership is still in flight —
+        // only the negative needs the whole list. A header that went quiet while a pull lagged
+        // would hide the one live row it had just been told about.
+        val state = workspaceRunState(
+            memberIds = listOf("a", "b"),
+            liveIds = setOf("a"),
+            knownIds = setOf("a"),
+        )
+        assertEquals(WorkspaceRunState.Running, state)
+    }
+
+    @Test
+    fun `a workspace the registry accounts no member is idle rather than unknown`() {
+        // Nothing is missing, because nothing was named: an empty directory is a fact the
+        // registry supplied, and its header is not "Running: unknown".
+        assertEquals(
+            WorkspaceRunState.Idle,
+            workspaceRunState(memberIds = emptyList(), liveIds = emptySet(), knownIds = emptySet()),
+        )
+    }
+
+    @Test
+    fun `a running descendant makes its ancestor's group live`() {
+        // A subagent is never a Workspace member (measured on the running host), so the group
+        // holds the parent and the parent is not itself working. Without the rollup half this
+        // group would read idle and a collapsed folder would hide a delegated run entirely.
+        val sessions = listOf(
+            SessionItem("parent", "Parent", "/w", 3L, running = false, isSubagent = false),
+            SessionItem(
+                "child",
+                "Child",
+                "/w",
+                2L,
+                running = true,
+                isSubagent = true,
+                parentSessionId = "parent",
+            ),
+            SessionItem("other", "Other", "/w", 1L, running = false, isSubagent = false),
+        )
+        val rollupRunningParents = setOf("parent")
+        val live = liveWorkIds(sessions, rollupRunningParents)
+
+        assertEquals(
+            "the working child and the ancestor it is credited to are both live",
+            setOf("child", "parent"),
+            live,
+        )
+        assertEquals(
+            WorkspaceRunState.Running,
+            workspaceRunState(listOf("parent", "other"), live, sessions.map { it.id }.toSet()),
+        )
+    }
+
+    @Test
+    fun `the header speaks its run state, and idle says nothing`() {
+        // The blue is invisible to a screen reader, so the same fact is spoken. Idle has no
+        // sentence on purpose: the drawer's rows draw no "not running" either, and a header that
+        // announced it would be making the claim the whole rule exists to refuse.
+        assertEquals("Running", WorkspaceCopy.RUNNING)
+        assertEquals("Running: unknown", WorkspaceCopy.RUNNING_UNKNOWN)
+        assertNotEquals(WorkspaceCopy.RUNNING, WorkspaceCopy.RUNNING_UNKNOWN)
     }
 }

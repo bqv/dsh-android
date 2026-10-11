@@ -71,6 +71,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -85,10 +86,13 @@ import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.WorkspaceCopy
 import uk.xa0.dsh.model.WorkspaceGroupState
 import uk.xa0.dsh.model.WorkspaceListPhase
+import uk.xa0.dsh.model.WorkspaceRunState
 import uk.xa0.dsh.model.headerCount
+import uk.xa0.dsh.model.liveWorkIds
 import uk.xa0.dsh.model.placeholder
 import uk.xa0.dsh.model.ungroupedTitle
 import uk.xa0.dsh.model.workspaceGroupState
+import uk.xa0.dsh.model.workspaceRunState
 import uk.xa0.dsh.diag.DiagLazyList
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.diag.diagDrag
@@ -152,6 +156,18 @@ private data class Section(
      * the sidebar says which one you are in.
      */
     val containsCurrent: Boolean = false,
+    /**
+     * Whether this group holds live work, or whether that cannot be told yet.
+     *
+     * A second, independent fact from [containsCurrent], and deliberately drawn on a second
+     * element: the folder glyph carries "the open session is in here" and the title carries
+     * "something here is running", so all four combinations of the two are distinguishable on
+     * screen. See `model/WorkspaceGroups.kt` for the rule and for why an undelivered member
+     * makes "nothing is running" not a fact.
+     *
+     * Required rather than defaulted, so a group added later cannot quietly claim [WorkspaceRunState.Idle].
+     */
+    val run: WorkspaceRunState,
 )
 
 /** A session plus its nesting depth, so subagents indent under their parent. */
@@ -404,6 +420,9 @@ fun SessionsDrawer(
         showArchived,
         expandedSessions,
         heldOrder,
+        // Derived from `sessions` like the rest, and named so a group's run state cannot be
+        // read from a rollup computed against a different roster.
+        rollups,
     ) {
         val byId = matched.associateBy { it.id }
         // Membership is checked against the *unfiltered* list: a group is only
@@ -413,6 +432,15 @@ fun SessionsDrawer(
         // nothing re-emitted the section.
         val known = sessions.associateBy { it.id }
         val automationIds = matched.filter { isAutomationSessionId(it.id) }.map { it.id }.toSet()
+
+        // Every id the roster reports as live work, which is what a group header's blue is
+        // read from. `SessionItem.running` is `RunningBook`'s answer and the only liveness
+        // source; the journal fold `subagentTiming.active` is deliberately not consulted
+        // (`model/LiveRunning.kt`). The rollup half is what keeps a *delegated* run visible:
+        // a subagent is never a Workspace member, so a folder whose only live work is a
+        // child would otherwise have no running member to tint on. The row already draws
+        // that same fact as its descendant count, in the same accent.
+        val live = liveWorkIds(sessions, rollups.filterValues { it.running > 0 }.keys)
 
         /** One top-level row plus the subagents its caret has disclosed. */
         fun disclose(session: SessionItem): List<TreeRow> {
@@ -451,23 +479,26 @@ fun SessionsDrawer(
         val (automationRuns, conversations) = partitionAutomations(matched) { it.id }
         val automationSection = holdOrder(automationRuns, heldOrder)
             .takeIf { it.isNotEmpty() }
-            ?.let {
+            ?.let { runs ->
                 Section(
                     key = AUTOMATIONS,
                     title = "Automations",
-                    rows = it.flatMap { run -> disclose(run) },
+                    rows = runs.flatMap { run -> disclose(run) },
                     // A schedule, not a folder: this group is a kind of session
                     // rather than a place one lives.
                     icon = Icons.Rounded.Schedule,
+                    run = workspaceRunState(runs.map { it.id }, live, known.keys),
                 )
             }
 
         if (!groupByWorkspace) {
+            val ordered = holdOrder(conversations, heldOrder)
             val sections = arrayListOf(
                 Section(
-                    FLAT,
-                    "Sessions",
-                    holdOrder(conversations, heldOrder).flatMap { disclose(it) },
+                    key = FLAT,
+                    title = "Sessions",
+                    rows = ordered.flatMap { disclose(it) },
+                    run = workspaceRunState(ordered.map { it.id }, live, known.keys),
                 ),
             )
             automationSection?.let { sections += it }
@@ -517,6 +548,11 @@ fun SessionsDrawer(
                 createIn = workspace.id,
                 state = state,
                 containsCurrent = currentId != null && currentId in workspace.sessionIds,
+                // Read from the members the *section* accounts for, so a run the drawer lifted
+                // into the Automations section does not tint two headers at once. Unfiltered on
+                // purpose: a running member the Archived switch has hidden still makes this
+                // directory a place where work is happening.
+                run = workspaceRunState(claimedIds, live, known.keys),
             )
         }
 
@@ -534,6 +570,7 @@ fun SessionsDrawer(
                 // files them under a bucket rather than a directory, and the glyph says
                 // so instead of showing a folder that names nothing.
                 icon = Icons.Rounded.Inbox,
+                run = workspaceRunState(rest.map { it.id }, live, known.keys),
             )
         }
         // Last, after the live work: a run's session is history the moment it ends.
@@ -870,6 +907,7 @@ fun SessionsDrawer(
                         collapsed = isCollapsed,
                         icon = section.icon,
                         containsCurrent = section.containsCurrent,
+                        run = section.run,
                         onClick = {
                             onCollapsedSections(
                                 if (isCollapsed) {
@@ -1060,14 +1098,40 @@ private fun LazyListScope.searchResults(
  * Workspace header: 34dp row. The web row is **folder + title** — the disclosure
  * chevron and create button are hover-revealed there, so the open/closed folder is
  * the resting affordance, and tapping anywhere on the row toggles the group.
+ *
+ * The two facts a header carries are painted on two different elements, so they cannot be
+ * confused for one another:
+ *
+ *  * **The folder glyph** is [containsCurrent] — "the session you have open lives here" (the
+ *    web's `folderActive`). Unchanged.
+ *  * **The title** is [run] — "something in here is running". `Running` is the accent blue, so a
+ *    folded folder with live work inside it cannot be missed; `Unknown` is the caption tint,
+ *    because a blue the client cannot back would be a lie and an ordinary title would read as a
+ *    confirmed nothing. `Idle` is the title's normal colour.
+ *
+ * All four combinations of the two therefore draw differently: neither (grey folder, ordinary
+ * title), current only (blue folder, ordinary title), running only (grey folder, blue title),
+ * both (blue folder, blue title). The blue is one token used on one element per meaning.
+ *
+ * The title is tinted whether the group is folded or open, not only when collapsed. Folded is
+ * the case that prompted this, but an open group is capped at six rows until "Show N more", and
+ * the drawer holds the roster's order still while it is open, so the running row can be below
+ * the fold of an expanded group too — and the header is sticky, so the tint is the one part of
+ * the group that stays on screen while its rows are scrolled through.
+ *
+ * [run] is also *spoken* (`stateDescription`), because the blue is invisible to a screen
+ * reader: "Running", or "Running: unknown" when membership has not arrived.
  */
 @Composable
 private fun ProjectRow(
     title: String,
     /**
      * How many top-level sessions the group holds, or null when that is not yet a fact
-     * — a Workspace whose members the roster has not delivered. A null draws nothing
-     * where the number would be, rather than a zero the group cannot support.
+     * — a Workspace whose members the roster has not delivered. A null draws the word the
+     * widget uses for a reading it could not confirm ([WorkspaceCopy.UNKNOWN]) where the number
+     * would be, rather than nothing and rather than a zero the group cannot support: the note
+     * that says the same thing in words only draws when the group is open, and a folded
+     * Workspace whose members are missing must not look like one that has none.
      */
     count: Int?,
     collapsed: Boolean,
@@ -1089,6 +1153,8 @@ private fun ProjectRow(
      * directories without opening each one.
      */
     containsCurrent: Boolean = false,
+    /** Whether this group holds live work; see `WorkspaceRunState` and the class KDoc. */
+    run: WorkspaceRunState,
 ) {
     val colors = DshTheme.colors
     Row(
@@ -1097,7 +1163,14 @@ private fun ProjectRow(
             .height(34.dp)
             .clip(RoundedCornerShape(DshRadius.md))
             .clickableNoRipple(onClick = onClick)
-            .padding(end = DshSpacing.md),
+            .padding(end = DshSpacing.md)
+            .semantics {
+                when (run) {
+                    WorkspaceRunState.Running -> stateDescription = WorkspaceCopy.RUNNING
+                    WorkspaceRunState.Unknown -> stateDescription = WorkspaceCopy.RUNNING_UNKNOWN
+                    WorkspaceRunState.Idle -> Unit
+                }
+            },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
@@ -1115,13 +1188,17 @@ private fun ProjectRow(
         Text(
             text = title,
             style = DshType.bodyMedium.copy(fontWeight = FontWeight.Medium),
-            color = colors.labelSecondary,
+            color = when (run) {
+                WorkspaceRunState.Running -> colors.accent
+                WorkspaceRunState.Unknown -> colors.labelCaption
+                WorkspaceRunState.Idle -> colors.labelSecondary
+            },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
         Text(
-            text = count?.toString().orEmpty(),
+            text = count?.toString() ?: WorkspaceCopy.UNKNOWN,
             style = DshType.micro,
             color = colors.labelCaption,
         )
