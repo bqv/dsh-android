@@ -99,6 +99,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import uk.xa0.dsh.GoalState
+import uk.xa0.dsh.model.ApprovalAnswer
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.DisplayRow
 import uk.xa0.dsh.model.JobObservation
@@ -1379,17 +1380,34 @@ fun NoticeRow(
  *
  * This is a hard requirement for a usable client: while a waterfall is pending
  * the agent is blocked, so the answer has to come from a human tap.
+ *
+ * The tap does not answer the card away. [answer] carries what has actually
+ * happened since: nothing ([ApprovalAnswer.Waiting]), an answer on its way, an
+ * answer the host took, or an answer that did not get through. Only the host's own
+ * `cancel` takes the card away, so every state here has to be legible on its own —
+ * and the buttons are inert for the two that have nothing left for a tap to do.
  */
 @Composable
 fun ApprovalCard(
     toolName: String,
     reason: String?,
+    answer: ApprovalAnswer,
     onAllow: () -> Unit,
     onReject: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(20.dp)
+    val tappable = answer is ApprovalAnswer.Waiting || answer is ApprovalAnswer.Unsent
+    val status: String? = when (answer) {
+        ApprovalAnswer.Waiting -> null
+        is ApprovalAnswer.Answering -> "Sending your answer…"
+        is ApprovalAnswer.Sent ->
+            if (answer.allow) "Allowed once — waiting for the host to confirm."
+            else "Rejected — waiting for the host to confirm."
+
+        is ApprovalAnswer.Unsent -> "Not sent: ${answer.message}."
+    }
     Column(
         modifier
             .fillMaxWidth()
@@ -1411,7 +1429,11 @@ fun ApprovalCard(
                 modifier = Modifier.size(15.dp),
             )
             Spacer(Modifier.width(DshSpacing.md))
-            Text("Approval required", style = DshType.meta, color = colors.warn)
+            Text(
+                if (answer is ApprovalAnswer.Sent) "Approval sent" else "Approval required",
+                style = DshType.meta,
+                color = colors.warn,
+            )
         }
 
         Column(Modifier.padding(DshSpacing.xl)) {
@@ -1424,17 +1446,30 @@ fun ApprovalCard(
                 Spacer(Modifier.height(DshSpacing.sm))
                 Text(reason, style = DshType.meta, color = colors.labelSecondary)
             }
+            if (status != null) {
+                Spacer(Modifier.height(DshSpacing.sm))
+                Text(
+                    text = status,
+                    style = DshType.meta,
+                    color = if (tappable) colors.warn else colors.labelSecondary,
+                )
+            }
             Spacer(Modifier.height(DshSpacing.xl))
             Row(horizontalArrangement = Arrangement.spacedBy(DshSpacing.lg)) {
-                PillButton("Reject", primary = false, onClick = onReject)
-                PillButton("Allow once", primary = true, onClick = onAllow)
+                PillButton("Reject", primary = false, enabled = tappable, onClick = onReject)
+                PillButton("Allow once", primary = true, enabled = tappable, onClick = onAllow)
             }
         }
     }
 }
 
 @Composable
-private fun PillButton(label: String, primary: Boolean, onClick: () -> Unit) {
+private fun PillButton(
+    label: String,
+    primary: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(DshRadius.pill)
     Box(
@@ -1442,7 +1477,8 @@ private fun PillButton(label: String, primary: Boolean, onClick: () -> Unit) {
             .clip(shape)
             .background(if (primary) colors.sendFill else colors.tip)
             .border(0.5.dp, if (primary) colors.sendFill else colors.borderL3, shape)
-            .clickableNoRipple(onClick = onClick)
+            .clickableNoRipple(enabled = enabled, onClick = onClick)
+            .alpha(if (enabled) 1f else 0.45f)
             .padding(horizontal = DshSpacing.xxl, vertical = DshSpacing.md),
     ) {
         Text(

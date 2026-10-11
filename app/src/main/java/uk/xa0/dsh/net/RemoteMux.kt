@@ -1,6 +1,7 @@
 package uk.xa0.dsh.net
 
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,8 +24,19 @@ import okhttp3.Request
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import uk.xa0.dsh.model.AnswerDelivery
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Posts one outcome for the waterfall the call belongs to, and answers with what the
+ * host did with it.
+ *
+ * A waterfall can be answered more than once — an approval whose post was refused
+ * stays on screen and is answered again — so this is a call the handler makes, not a
+ * value it returns.
+ */
+typealias AnswerSink = suspend (outcome: JSONObject) -> AnswerDelivery
 
 /** One frame delivered by a logical remote stream. */
 sealed interface StreamEvent {
@@ -180,11 +192,20 @@ class RemoteMux(
 
     /**
      * Called for host→client waterfalls with the whole frame, so the handler can
-     * see `event`, `eventId`, `agentId` and the projected `request`. Return an
-     * outcome, or null to delegate to the host's own chain.
+     * see `event`, `eventId`, `agentId` and the projected `request`.
+     *
+     * It is also handed [AnswerSink], and that is a deliberate widening of what used
+     * to be "return one outcome": an approval whose answer the host refuses has to
+     * stay on screen and be answerable again, so the handler needs to post more than
+     * once, and to be told what the host did with each post. Returning the outcome to
+     * be posted here could not express either — the post happened once, after the
+     * handler had already given up its answer, and its reply was discarded.
+     *
+     * A handler that never calls [AnswerSink] leaves the host waiting; one that calls
+     * it and ignores the result is free to, but an approval is not.
      */
     @Volatile
-    var onWaterfall: (suspend (frame: JSONObject) -> JSONObject?)? = null
+    var onWaterfall: (suspend (frame: JSONObject, send: AnswerSink) -> Unit)? = null
 
     /**
      * Called when the host withdraws a waterfall it already sent — its own
@@ -398,6 +419,11 @@ class RemoteMux(
      * A waterfall is a host round-trip that *must* be answered or the agent stalls.
      * Approvals are answered by the user; anything else delegates back to the
      * host's own chain, which is the safe default for this client.
+     *
+     * The handler owns *what* to send and *when*; this method owns the delivery and
+     * reports back what happened, so a handler can retry. It does not retire the
+     * waterfall: the host's `cancel` is what says a waterfall is settled, and it is
+     * the only thing that does.
      */
     private fun handleWaterfall(value: JSONObject) {
         val eventId = value.optString("eventId")
@@ -405,17 +431,49 @@ class RemoteMux(
         val event = value.optString("event")
         val post = postEventResult ?: return
         scope.launch {
-            val outcome = runCatching {
-                onWaterfall?.invoke(value) ?: JSONObject().put("kind", "next")
-            }.getOrElse { JSONObject().put("kind", "next") }
-            val payload = JSONObject()
-                .put("clientId", clientId)
-                .put("eventId", eventId)
-                .put("outcome", outcome)
-            runCatching { post(payload) }
-                .onFailure { log("Failed to answer $event: ${it.message}") }
+            val send: AnswerSink = { outcome ->
+                val payload = JSONObject()
+                    .put("clientId", clientId)
+                    .put("eventId", eventId)
+                    .put("outcome", outcome)
+                try {
+                    post(payload)
+                    AnswerDelivery.Accepted
+                } catch (e: CancellationException) {
+                    // A dead scope is not a host that refused: the handler must not be
+                    // told to retry into a coroutine that is being torn down.
+                    throw e
+                } catch (e: DshRpcException) {
+                    // The host understood the call and declined it. Long bodies are
+                    // truncated: this text ends up on a card the reader is looking at.
+                    log("Host refused the answer to $event: ${e.code} ${e.message}")
+                    AnswerDelivery.Refused(e.message.take(160))
+                } catch (e: Throwable) {
+                    log("Failed to answer $event: ${e.message}")
+                    AnswerDelivery.Unreachable(e.message?.take(160) ?: e.javaClass.simpleName)
+                }
+            }
+            val handler = onWaterfall
+            runCatching {
+                if (handler == null) {
+                    // Nothing claimed this waterfall, so it cannot be answered here.
+                    // Delegating is the only safe default: the host's own chain
+                    // settles it rather than leaving the agent blocked on silence.
+                    send(delegated())
+                } else {
+                    handler(value, send)
+                }
+            }.onFailure { failure ->
+                log("Waterfall handler failed for $event: ${failure.message}")
+                // The handler gave up without settling anything. Delegate, so a bug in
+                // it is a refused request rather than an agent blocked on silence; a
+                // duplicate outcome for an already-settled waterfall is a no-op there.
+                runCatching { send(delegated()) }
+            }
         }
     }
+
+    private fun delegated(): JSONObject = JSONObject().put("kind", "next")
 
     private companion object {
         const val TAG = "DshMux"

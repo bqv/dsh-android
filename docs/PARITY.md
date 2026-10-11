@@ -17,7 +17,15 @@ of where the app stands against them.
 - [x] Waterfall answering (`$events/result`): approvals with allow/reject and
       `ask_user_question` with `{answers:[{id,selected,custom?}]}`. One `$events`
       registration process-wide, owned by `AttentionCenter.kt`; it relays
-      `api-session/status` to the ViewModel
+      `api-session/status` to the ViewModel.
+      An approval answer is **not** optimistic any more: a tap moves the card into an
+      answering state (`model/ApprovalAnswer.kt`, `ApprovalGate`), the post is
+      inspected, a refusal or an unreachable host leaves the item tappable with the
+      reason on the card, and only the host's own `cancel` clears it.
+      `RemoteMux.onWaterfall` hands the handler a send sink instead of taking one
+      returned outcome, because an answer can now be posted more than once. The
+      **question** path is unchanged and still clears on submit without inspecting the
+      reply — the same defect, left in place deliberately (`docs/HANDOFF.md`)
 - [x] Dark + light themes from DSH tokens (`ui/theme/DshTheme.kt`)
 - [x] `workspace/follow` registry stream (`DshViewModel.ensureMuxWiring`)
 - [x] `commands/*`, `goal/*`, `permissionPresets/*`, `subagents/*`, `session/page`,
@@ -246,7 +254,10 @@ of where the app stands against them.
 - [x] Caret-accurate `/` and `@` triggers — the token under the caret decides, so a tap back
       into an earlier line opens or retargets the menu instead of reading the draft's end
       (`ui/composer/ComposerTriggers.kt: detectTriggerToken`)
-- [x] Approval card above the card
+- [x] Approval card above the card, in four presentations: waiting (both buttons live),
+      answering, sent and awaiting the host's confirmation, and not sent with the
+      reason and both buttons live again (`ui/components/ChatRows.kt: ApprovalCard`).
+      The buttons are inert in the middle two, and a tap never clears the card
 - [x] Todo card above the card
 - [x] Queue dock (`session/updateQueue`: edit / remove / steer, long-press send mode,
       "Send behavior while busy") at dock order 20

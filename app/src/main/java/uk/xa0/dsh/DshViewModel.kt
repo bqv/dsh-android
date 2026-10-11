@@ -29,6 +29,7 @@ import uk.xa0.dsh.data.DshConfig
 import uk.xa0.dsh.data.DraftStore
 import uk.xa0.dsh.data.ThemeMode
 import uk.xa0.dsh.model.AccountBalance
+import uk.xa0.dsh.model.ApprovalAnswer
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.JobsMarker
@@ -516,6 +517,13 @@ data class PendingApproval(
     val reason: String?,
     /** Which session raised it; null when the host sent no session id. */
     val sessionId: String? = null,
+    /**
+     * How far this item's answer has got: waiting to be answered, on its way,
+     * taken by the host, or refused and tappable again. The card reads it, so the
+     * three states a reader has to tell apart are one value rather than three
+     * booleans that could disagree.
+     */
+    val answer: ApprovalAnswer = ApprovalAnswer.Waiting,
 )
 
 /** One selectable answer the host offered. */

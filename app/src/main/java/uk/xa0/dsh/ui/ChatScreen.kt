@@ -1283,6 +1283,7 @@ fun ChatScreen(vm: DshViewModel) {
                     ApprovalCard(
                         toolName = ui.approval!!.toolName,
                         reason = ui.approval!!.reason,
+                        answer = ui.approval!!.answer,
                         onAllow = { vm.resolveApproval(true) },
                         onReject = { vm.resolveApproval(false) },
                         modifier = Modifier.padding(horizontal = DshSpacing.xl, vertical = DshSpacing.sm),

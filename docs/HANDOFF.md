@@ -563,6 +563,29 @@ one.
 
 ## Open items
 
+- **The confirmed approval answer is unit-tested and has never been answered on a
+  device.** The state machine (`model/ApprovalAnswer.kt`, `model/ApprovalGateTest.kt`)
+  and the card's four presentations (`ui/ApprovalCardTest.kt`) are covered on the JVM.
+  What no test here can produce is the host's own `cancel`, which is the *only* thing
+  that takes an accepted answer off the screen: that a `POST /api/$events/result` is
+  answered `ok` and followed by a `{type:"cancel", eventId}` item from
+  `finishRemoteEvent` is read from the gateway and the wire notes
+  (`docs/research/protocol.md`), not exercised. So the happy path — tap, "sent", card
+  clears on the host's cancel — rests on that contract. A live check has to be made on
+  a throwaway session, and answering a waterfall is a real authorisation, so it must
+  not be made against anything the user is running.
+- **If the host's cancellation never arrives, a `Sent` card stays up.** That is
+  deliberate — the answer *was* sent, and the honest thing is to say so — but a socket
+  that dies in the milliseconds between an accepted post and the host's cancel leaves
+  the card and its notification until the next `stop()`/`restart()` or the reader
+  opening the session. No test covers that window, and re-arming the answer after an
+  accepted post cannot help: answering a settled `eventId` is a swallowed no-op at the
+  host.
+- **The question path is still optimistic.** `answerQuestions` / `skipQuestions` clear
+  the question card and its notification on submit and never inspect the reply — the
+  same defect this change fixes for approvals, left in place because the fix needs its
+  own card states. The mux now hands that path the same send sink, so the work is a
+  second `ApprovalGate`-shaped machine rather than a second protocol change.
 - **The terminal readout is proven on the host and unproven on the phone.** The
   protocol was measured against both live routers with a websocket client
   (`~/tmp/routerprobe/readout.mjs`), the numbers are in the section above, and the app

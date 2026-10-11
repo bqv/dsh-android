@@ -14,10 +14,13 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import uk.xa0.dsh.data.DshConfig
+import uk.xa0.dsh.model.ApprovalAnswer
+import uk.xa0.dsh.model.ApprovalGate
 import uk.xa0.dsh.model.arr
 import uk.xa0.dsh.model.bool
 import uk.xa0.dsh.model.obj
 import uk.xa0.dsh.model.str
+import uk.xa0.dsh.net.AnswerSink
 import uk.xa0.dsh.net.DshClient
 import uk.xa0.dsh.net.MuxState
 import uk.xa0.dsh.net.RemoteMux
@@ -76,6 +79,15 @@ class AttentionCenter(private val context: Context) {
      */
     private val approvals = ConcurrentHashMap<String, PendingApproval>()
     private val questionSets = ConcurrentHashMap<String, PendingQuestionSet>()
+
+    /**
+     * The answer machine behind each pending approval, keyed by `eventId`.
+     *
+     * It is what a tap now talks to: [ApprovalGate] owns whether the item may be
+     * answered, what has been sent and what the host did with it, so a failed answer
+     * can be retried without the card ever having been cleared.
+     */
+    private val answerGates = ConcurrentHashMap<String, ApprovalGate>()
 
     /**
      * The single card the UI shows: whichever of the maps above belongs to the
@@ -241,7 +253,7 @@ class AttentionCenter(private val context: Context) {
         if (attachedMux === mux && eventsJob?.isActive == true) return
         stop()
         mux.postEventResult = { args -> client.rpc("\$events/result", args) }
-        mux.onWaterfall = { frame -> handleWaterfall(frame) }
+        mux.onWaterfall = { frame, send -> handleWaterfall(frame, send) }
         mux.onWaterfallCancel = { eventId -> handleCancel(eventId) }
         attachedMux = mux
         eventsJob = scope.launch {
@@ -274,6 +286,7 @@ class AttentionCenter(private val context: Context) {
         stateJob = null
         attachedMux = null
         pending.clear()
+        answerGates.clear()
         // Every pending item alerted under its own session id, so each must be
         // withdrawn by that id; the legacy constants only clear sessionless ones.
         approvals.values.forEach { Attention.cancel(context, Attention.approvalId(it.sessionId)) }
@@ -347,11 +360,15 @@ class AttentionCenter(private val context: Context) {
 
     /**
      * The host withdrew a waterfall it had already fanned out — its own timeout,
-     * or another answerer. Complete the wait so the mux is not left holding it,
-     * and drop the card and notification rather than showing a decision that can
-     * no longer be delivered.
+     * another answerer, or a settle this client's own answer caused.
+     *
+     * This is the authoritative clear. Nothing else takes a card off the screen once
+     * an answer has been sent, so a card left up here really is gone on the host.
      */
     private fun handleCancel(eventId: String) {
+        // Ends the answer wait without sending: whatever the reader tapped a moment
+        // ago is moot, and the host has already said so.
+        answerGates.remove(eventId)?.withdraw()
         pending.remove(eventId)?.complete(JSONObject().put("kind", "next"))
         removeApproval(eventId)?.let {
             Attention.cancel(context, Attention.approvalId(it.sessionId))
@@ -415,44 +432,59 @@ class AttentionCenter(private val context: Context) {
         return questionSets.remove(key)
     }
 
-    private suspend fun handleWaterfall(frame: JSONObject): JSONObject = when (frame.str("event")) {
-        "approval/request" -> awaitApproval(
-            eventId = frame.str("eventId"),
-            sessionId = frame.str("agentId").takeIf { it.isNotEmpty() },
-            request = frame.obj("request") ?: JSONObject(),
-        )
+    private suspend fun handleWaterfall(frame: JSONObject, send: AnswerSink) {
+        when (frame.str("event")) {
+            "approval/request" -> awaitApproval(
+                eventId = frame.str("eventId"),
+                sessionId = frame.str("agentId").takeIf { it.isNotEmpty() },
+                request = frame.obj("request") ?: JSONObject(),
+                send = send,
+            )
 
-        // Without this branch the host's own `noAnswerer` rejects the request and
-        // the agent's question fails outright.
-        "user-questions/request" -> awaitQuestion(
-            eventId = frame.str("eventId"),
-            sessionId = frame.str("agentId").takeIf { it.isNotEmpty() },
-            request = frame.obj("request") ?: JSONObject(),
-        )
+            // Without this branch the host's own `noAnswerer` rejects the request and
+            // the agent's question fails outright.
+            "user-questions/request" -> awaitQuestion(
+                eventId = frame.str("eventId"),
+                sessionId = frame.str("agentId").takeIf { it.isNotEmpty() },
+                request = frame.obj("request") ?: JSONObject(),
+                send = send,
+            )
 
-        else -> JSONObject().put("kind", "next")
+            else -> send(JSONObject().put("kind", "next"))
+        }
     }
 
     /**
-     * Waits for a decision. The cap is the escape hatch, not the policy: a
-     * pocketed phone must not hang the agent forever, so after the timeout the
-     * request is delegated on and the host refuses it in its own words.
+     * Waits for a decision, and keeps waiting after an answer the host would not take.
+     *
+     * The loop is the fix. Each pass arms a fresh wait; a tap is posted through [send]
+     * and its reply decides what happens next. Accepted leaves the item on screen in
+     * [ApprovalAnswer.Sent] — the host's `cancel` is what removes it, and nothing here
+     * anticipates that. Refused or unreachable puts the item back in a tappable state
+     * and goes round again, so the reader can answer once more rather than being shown
+     * a card that quietly cleared itself.
+     *
+     * The cap is the escape hatch, not the policy: a pocketed phone must not hang the
+     * agent forever, so after the timeout the request is delegated on and the host
+     * refuses it in its own words. If even that cannot be delivered, the card stays up
+     * instead of leaving a blocked agent with nothing on screen.
      */
     private suspend fun awaitApproval(
         eventId: String,
         sessionId: String?,
         request: JSONObject,
-    ): JSONObject {
-        val deferred = CompletableDeferred<JSONObject>()
-        pending[eventId] = deferred
+        send: AnswerSink,
+    ) {
         val toolName = request.str("toolName").ifEmpty { "a tool" }
-        val item = PendingApproval(
+        val gate = ApprovalGate(APPROVAL_TIMEOUT_MS)
+        gate.onState = { next -> setAnswer(eventId, next) }
+        answerGates[eventId] = gate
+        approvals[keyFor(sessionId, eventId)] = PendingApproval(
             eventId = eventId,
             toolName = toolName,
             reason = request.str("reason").takeIf { it.isNotEmpty() },
             sessionId = sessionId,
         )
-        approvals[keyFor(sessionId, eventId)] = item
         publishVisible()
         alert(
             id = Attention.approvalId(sessionId),
@@ -460,24 +492,23 @@ class AttentionCenter(private val context: Context) {
             title = "Approval needed",
             text = "$toolName is waiting for your permission.",
         )
-        val outcome = withTimeoutOrNull(APPROVAL_TIMEOUT_MS) { deferred.await() }
-            ?: JSONObject().put("kind", "next")
-        pending.remove(eventId)
-        // Only if this exact item still owns its slot (a newer waterfall from the
-        // same session may have replaced it): withdraw *its* notification, not the
-        // one now on screen.
-        removeApproval(eventId)?.let {
-            Attention.cancel(context, Attention.approvalId(it.sessionId))
-            publishVisible()
-        }
-        return outcome
+
+        gate.answer(send)
+
+        // The wait is over. If the host withdrew the waterfall, `handleCancel` has
+        // already taken the card and its notification away. If an answer was taken, it
+        // stays until that cancel arrives. Anything else is still an unanswered
+        // prompt, so it goes with the wait.
+        answerGates.remove(eventId)
+        if (gate.state !is ApprovalAnswer.Sent) forgetApproval(eventId)
     }
 
     private suspend fun awaitQuestion(
         eventId: String,
         sessionId: String?,
         request: JSONObject,
-    ): JSONObject {
+        send: AnswerSink,
+    ) {
         val questions = request.arr("questions") ?: JSONArray()
         val parsed = (0 until questions.length()).mapNotNull { index ->
             val item = questions.optJSONObject(index) ?: return@mapNotNull null
@@ -499,7 +530,10 @@ class AttentionCenter(private val context: Context) {
                 approveLabel = item.obj("intent")?.str("approve")?.takeIf { it.isNotEmpty() },
             )
         }
-        if (parsed.isEmpty()) return JSONObject().put("kind", "next")
+        if (parsed.isEmpty()) {
+            send(JSONObject().put("kind", "next"))
+            return
+        }
 
         val deferred = CompletableDeferred<JSONObject>()
         pending[eventId] = deferred
@@ -528,20 +562,57 @@ class AttentionCenter(private val context: Context) {
             Attention.cancel(context, Attention.questionId(it.sessionId))
             publishVisible()
         }
-        return outcome
+        send(outcome)
     }
 
     // --------------------------------------------------------------- outbound
 
+    /**
+     * The reader answered the approval card.
+     *
+     * It clears nothing. The tap is handed to the item's [ApprovalGate], which moves
+     * the card into its answering state and refuses a second tap; the card and its
+     * notification then stay until the host's own `cancel` arrives. That is the whole
+     * of the fix for an accept that used to disappear before anything was sent.
+     */
     fun resolveApproval(allow: Boolean) {
         val current = _approval.value ?: return
-        val outcome = JSONObject()
-            .put("kind", "result")
-            .put("value", if (allow) "allowed-once" else "rejected")
-        pending.remove(current.eventId)?.complete(outcome)
-        // The card names its own item, so resolving it leaves every other
-        // session's pending approval — and notification — untouched.
-        removeApproval(current.eventId)?.let {
+        answerGates[current.eventId]?.tap(allow)
+    }
+
+    /**
+     * Re-draws one item after its answer moved on, and says so in the shade too.
+     *
+     * A failed answer is re-posted rather than withdrawn: the notification exists to
+     * get a reader who never opens the app to a prompt, and an answer the host has not
+     * confirmed is still an open prompt. Only a `cancel` — or the cap expiring — takes
+     * it away.
+     *
+     * Answering and Sent deliberately do not re-post. Both are transitions a reader
+     * can only make from the card, which means the app is in the foreground on that
+     * session, which means [alert] suppresses the post anyway; and an accepted answer
+     * is followed by the host's own `cancel` in one round-trip, so re-copying the
+     * shade for that window would only buzz a pocketed phone about a decision it has
+     * already taken. The withdrawal that matters is the one that is *not* made here.
+     */
+    private fun setAnswer(eventId: String, answer: ApprovalAnswer) {
+        val key = approvals.entries.firstOrNull { it.value.eventId == eventId }?.key ?: return
+        approvals.computeIfPresent(key) { _, held -> held.copy(answer = answer) }
+        publishVisible()
+        if (answer !is ApprovalAnswer.Unsent) return
+        val held = approvals[key] ?: return
+        alert(
+            id = Attention.approvalId(held.sessionId),
+            sessionId = held.sessionId,
+            title = "Approval answer not sent",
+            text = "${held.toolName} is still waiting — ${answer.message}.",
+        )
+    }
+
+    /** Drops an item and its notification: the wait is over and nothing was taken. */
+    private fun forgetApproval(eventId: String) {
+        answerGates.remove(eventId)
+        removeApproval(eventId)?.let {
             Attention.cancel(context, Attention.approvalId(it.sessionId))
             publishVisible()
         }
