@@ -1,5 +1,7 @@
 package uk.xa0.dsh.model
 
+import uk.xa0.dsh.SessionItem
+
 /**
  * Which Workspaces the sidebar draws, and — the part that is easy to get wrong —
  * what it is allowed to say about one that has no rows.
@@ -172,6 +174,92 @@ fun WorkspaceGroupState.headerCount(visibleRows: Int): Int? =
     if (this == WorkspaceGroupState.Loading) null else visibleRows
 
 /**
+ * Whether anything in a group is running, and — the half that is easy to get wrong — whether
+ * this client is entitled to say that nothing is.
+ *
+ * This is the fact the group header's blue means, and it is deliberately *not*
+ * `containsCurrent`: that one means "the session you have open lives here", which is a fact
+ * about the reader's own position in the list. A Workspace can hold the open session and no
+ * work, or work and not the open session, or both, or neither, and the four draw differently.
+ *
+ * The three states are mutually exclusive and are read off one field, `SessionItem.running`
+ * — `RunningBook`'s answer and nothing else (see `model/LiveRunning.kt`). The journal
+ * projection `subagentTiming.active` is *not* read as liveness anywhere here: a killed turn
+ * leaves it set forever, and a header that stayed blue over a dead child would be worse than
+ * no signal at all.
+ */
+enum class WorkspaceRunState {
+    /** At least one accounted member is live work. A positive fact; sends the header blue. */
+    Running,
+
+    /** Every accounted member has been delivered, and none of them is live work. The resting state. */
+    Idle,
+
+    /**
+     * The registry names a member the roster has not delivered, and nothing known is running.
+     *
+     * "Nothing is running in here" is therefore **not a fact**, and the header must not be left
+     * looking like the [Idle] one: the app's standing rule is that a reading it cannot confirm is
+     * neither claimed nor drawn as a confirmed nothing (the widget's `(known, value, asOf)` and
+     * its `Running: unknown`; the Router tab's "not asked"). So this state is untinted *and*
+     * spoken — see [WorkspaceCopy.RUNNING_UNKNOWN].
+     */
+    Unknown,
+}
+
+/**
+ * Decide one group's run state from the three things that are actually known about it.
+ *
+ * A running member outranks an undelivered one, because "something is running" stays true
+ * however many members have not arrived — only the *negative* needs the whole membership.
+ *
+ * @param memberIds the ids the group accounts for, as the host last reported them. Deliberately
+ *   the *unfiltered* set, for the same reason [workspaceGroupState] takes it: a member the
+ *   reader's Archived switch has hidden, or that the drawer lifted into another section, is
+ *   still work happening in this directory, and a running one must not stop the header going
+ *   blue because a filter hid its row.
+ * @param liveIds every id the roster reports as live work — its own running turn, or a running
+ *   descendant; see [liveWorkIds].
+ * @param knownIds every session id the roster has delivered, filters ignored.
+ */
+fun workspaceRunState(
+    memberIds: Collection<String>,
+    liveIds: Set<String>,
+    knownIds: Set<String>,
+): WorkspaceRunState {
+    if (memberIds.any { it in liveIds }) return WorkspaceRunState.Running
+    if (memberIds.any { it !in knownIds }) return WorkspaceRunState.Unknown
+    return WorkspaceRunState.Idle
+}
+
+/**
+ * Every id the roster reports as live work, for [workspaceRunState].
+ *
+ * Two sources, both `SessionItem.running` (so both `RunningBook`'s answer):
+ *
+ *  * a session whose **own** turn is running, and
+ *  * a **parent of a running descendant**, handed in as
+ *    `indexSubagentRollups(sessions).filterValues { it.running > 0 }.keys`.
+ *
+ * The second is here because a subagent is never a top-level row — measured on the running
+ * host, a Workspace's `sessionIds` held no subagent at all while its members had dozens
+ * between them. A folder whose only live work is delegated therefore holds no *member* that
+ * is running, and without the rollup the header would stay grey and hide exactly the work
+ * collapsing it was going to hide. This is the same accent the session row already draws as
+ * its descendant count and the header chip draws as `+N running`: "running" in the drawer has
+ * always included a running child, and the group header is that fact lifted one level up.
+ */
+fun liveWorkIds(
+    sessions: List<SessionItem>,
+    parentsWithRunningDescendants: Collection<String> = emptyList(),
+): Set<String> {
+    val out = HashSet<String>()
+    for (session in sessions) if (session.running) out += session.id
+    out += parentsWithRunningDescendants
+    return out
+}
+
+/**
  * The catch-all section's title.
  *
  * "Ungrouped" is the host's own label (`ui-workspace` locales, `group.ungrouped`) and it
@@ -225,6 +313,23 @@ object WorkspaceCopy {
 
     /** The host's label for the catch-all bucket, once the registry can back it. */
     const val UNGROUPED = "Ungrouped"
+
+    /**
+     * What a group header says about live work when it can say it.
+     *
+     * The header's blue is invisible to a screen reader, so the same fact is spoken. The word is
+     * the widget's own (`WidgetCopy.RUNNING`), because it is the same claim on the same
+     * authority.
+     */
+    const val RUNNING = "Running"
+
+    /**
+     * What a group header says when membership has not arrived and nothing known is running.
+     *
+     * The blue is withheld — the client cannot confirm it — and this is what stops the absence
+     * of blue reading as a confirmed nothing. The widget's own sentence for the same situation.
+     */
+    const val RUNNING_UNKNOWN = "Running: unknown"
 
     /** What the catch-all is while the registry is unknown. */
     const val SESSIONS = "Sessions"
