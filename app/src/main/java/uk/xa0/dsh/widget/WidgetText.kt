@@ -25,7 +25,7 @@ enum class WidgetLevel { QUIET, ATTENTION, UNKNOWN }
  * snapshot can support:
  *
  *  * **"nothing is waiting" is only said when the app confirmed it.** A reading the app
- *    could not confirm draws [NEEDS_UNKNOWN], never "Nothing needs you". This is the
+ *    could not confirm draws [NEEDS_UNKNOWN], never "No agents active". This is the
  *    Router tab's "not asked" rule, applied to a homescreen.
  *  * **Everything drawn is stamped, and the stamp is a bound over the whole card.**
  *    [WidgetText.ageInstant] is the *oldest* instant any reading that has a line here was
@@ -114,7 +114,7 @@ data class WidgetText(
 object WidgetCopy {
 
     const val NEEDS_UNKNOWN = "Needs you: unknown"
-    const val NEEDS_NOTHING = "Nothing needs you"
+    const val NEEDS_NOTHING = "No agents active"
     const val RUNNING_UNKNOWN = "Running: unknown"
     const val RUNNING_NOTHING = "Nothing running"
 
@@ -293,7 +293,7 @@ object WidgetCopy {
         //  2. Whether anything is waiting cannot be told. An unknown that could be an
         //     approval outranks a positive that is merely interesting.
         //  3. Sessions are running and the host is talking: they are *working*, not just
-        //     listed — the fact this card previously spent on "Nothing needs you".
+        //     listed — the fact this card previously spent on "No agents active".
         //  4. Sessions are running per the roster, with no live traffic to confirm it.
         //     The same claim in the roster's own word, which claims no freshness.
         //  5. Nothing is running and nothing needs you: the quiet sentence, which is only

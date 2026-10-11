@@ -92,7 +92,7 @@ exists to prevent.
 
 ### The headline is the most useful true fact
 
-An earlier revision spent the headline on `Nothing needs you` whenever nothing was
+An earlier revision spent the headline on `No agents active` whenever nothing was
 waiting. That is almost always true, which is exactly the problem: a headline that is
 nearly always the same words has stopped being a headline, and the reader learns to skip
 the first line of a card they have deliberately put where they cannot skip it. The
@@ -114,7 +114,7 @@ So the headline has a priority order now, and every branch of it is a reading wi
    — an agent inside a long tool call, or a reading renewed from the last whole-world
    pull. It is the roster's own word for the condition (`session/list`'s `running`), so it
    asserts exactly what was established and nothing about this second.
-5. **`Nothing needs you`.** Nothing is waiting and nothing is running. This is the
+5. **`No agents active`.** Nothing is waiting and nothing is running. This is the
    fallback now, and the story above is why it had to become one.
 6. **`Running: unknown`.** The roster cannot be read, so what is running cannot be said at
    all. The second line is dropped rather than repeating the sentence.
@@ -219,7 +219,7 @@ stops being read at all.
 The temptation is a card that says
 
 ```
-Nothing needs you
+No agents active
 ```
 
 which is a claim about the world. It is only true while the app can still hear the
@@ -231,7 +231,7 @@ open — they are looking at it instead of opening the app.
 
 Every reading is `(known, value, asOf)` (`WidgetReading`). `known = false, value = 0` is
 **nobody has looked**; `known = true, value = 0` is **the app looked and nothing is
-waiting**. They are drawn as `Needs you: unknown` and `Nothing needs you`, and the
+waiting**. They are drawn as `Needs you: unknown` and `No agents active`, and the
 publisher treats the difference as a change worth writing. This is the Router tab's rule
 for "not asked" versus "reported as empty" — `RouterLoad.slotsUnread` in this codebase —
 applied to a homescreen, and for the same reason: an empty answer and no answer are

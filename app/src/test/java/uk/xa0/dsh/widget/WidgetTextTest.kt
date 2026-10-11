@@ -64,7 +64,7 @@ class WidgetTextTest {
     @Test
     fun `a confirmed empty world is said plainly`() {
         val text = WidgetCopy.of(snapshot())
-        assertEquals("Nothing needs you", text.headline)
+        assertEquals("No agents active", text.headline)
         assertEquals("Nothing running", text.detail)
         assertEquals("oldest reading", text.stampLabel)
         // Scope, stated rather than implied: this snapshot gives all three readings the
@@ -223,7 +223,7 @@ class WidgetTextTest {
             ),
         )
         // The headline takes the unknown over the quiet sentence: what is running cannot
-        // be said, and that is more useful to a reader than "Nothing needs you".
+        // be said, and that is more useful to a reader than "No agents active".
         assertEquals("Running: unknown", text.headline)
         assertNull("the detail would be the same sentence twice", text.detail)
         assertEquals(emptyList<WidgetSession>(), text.rows)
@@ -290,7 +290,7 @@ class WidgetTextTest {
     @Test
     fun `host traffic with nothing running is not drawn as work`() {
         assertEquals(
-            "Nothing needs you",
+            "No agents active",
             WidgetCopy.of(snapshot(working = 0, activeKnown = true, active = 1)).headline,
         )
     }
@@ -320,7 +320,7 @@ class WidgetTextTest {
         )
         assertEquals(
             "and the quiet sentence is only what is left when nothing is running",
-            "Nothing needs you",
+            "No agents active",
             WidgetCopy.of(snapshot(working = 0, activeKnown = true, active = 0)).headline,
         )
     }

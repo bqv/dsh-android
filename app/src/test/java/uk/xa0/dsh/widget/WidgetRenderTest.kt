@@ -120,7 +120,7 @@ class WidgetRenderTest {
     @Test
     fun `the accent is the only way a widget can raise its voice`() {
         val quiet = draw(
-            WidgetText("Nothing needs you", "Nothing running", WidgetCopy.STAMP_OLDEST, 1L, WidgetLevel.QUIET),
+            WidgetText("No agents active", "Nothing running", WidgetCopy.STAMP_OLDEST, 1L, WidgetLevel.QUIET),
         )
         val loud = draw(
             WidgetText("Approval waiting", "1 running", WidgetCopy.STAMP_OLDEST, 1L, WidgetLevel.ATTENTION),
@@ -136,7 +136,7 @@ class WidgetRenderTest {
     @Test
     fun `a detail line that does not exist is hidden rather than left blank`() {
         val view = draw(
-            WidgetText("Nothing needs you", null, WidgetCopy.STAMP_OLDEST, 1L, WidgetLevel.QUIET),
+            WidgetText("No agents active", null, WidgetCopy.STAMP_OLDEST, 1L, WidgetLevel.QUIET),
         )
         assertEquals(View.GONE, view.detail().visibility)
     }
