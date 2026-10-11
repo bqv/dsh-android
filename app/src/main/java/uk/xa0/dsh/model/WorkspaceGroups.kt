@@ -305,9 +305,14 @@ object WorkspaceCopy {
     const val SESSIONS_HIDDEN = "Sessions hidden by filters"
 
     /**
-     * The figure drawn where a group's count would go, when the number is not known: the
-     * whole registry, before any baseline has arrived. The same word the widget uses for
-     * a reading it could not confirm.
+     * The figure drawn where a group's count would go, when the number is not known: the whole
+     * registry before any baseline has arrived, and a Workspace whose members the roster has not
+     * delivered. The same word the widget uses for a reading it could not confirm.
+     *
+     * It is drawn rather than left blank for the second case because a Workspace's own
+     * "Sessions not loaded" note sits under the header, so a *folded* group would otherwise show
+     * nothing at all where the missing members are — which is the one thing the pending-registry
+     * row above the groups already refuses to do.
      */
     const val UNKNOWN = "unknown"
 
