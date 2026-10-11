@@ -80,6 +80,17 @@ class WidgetPublisher(
     private var subagentReading = WidgetReading.NEVER
 
     /**
+     * Whether the host is talking to this app; see [WidgetSnapshot.active].
+     *
+     * Renewed by the same one-second loop that renews [workingReading], because both
+     * facts are read off the same live socket. The loop recomputes it every tick and this
+     * class writes or draws only when the value *moves*, which for this reading means the
+     * moment the host falls quiet for [ACTIVE_WINDOW_MS] and the moment it speaks again —
+     * two edges per burst of work, and nothing at all while the app sits idle.
+     */
+    private var activityReading = WidgetReading.NEVER
+
+    /**
      * The named running sessions behind [workingReading], already capped and already
      * stripped of rows a card could not draw. Empty whenever the reading is withdrawn,
      * because a name is a claim about a session being at work and a withdrawn reading
@@ -118,6 +129,10 @@ class WidgetPublisher(
             needsYouReading = previous.needsYou
             workingReading = previous.working
             subagentReading = previous.subagents
+            // The activity reading comes back too, still stamped with when it was last
+            // true. A restart does not make "the host was talking a moment ago" false;
+            // it makes it old, and the footer says how old.
+            activityReading = previous.active
             runningSessions = previous.running
             kind = previous.kind
             sessionId = previous.sessionId
@@ -175,6 +190,31 @@ class WidgetPublisher(
     }
 
     /**
+     * Publishes whether the host is still talking to this app: [heard] is a host frame
+     * inside [ACTIVE_WINDOW_MS], and [known] is the app's ability to hear at all (the
+     * mux socket being open).
+     *
+     * This is the one reading whose owner is the socket rather than a piece of app
+     * state, and it is deliberately *not* a count of anything: the host's own roster
+     * already answers "how many are running" ([working]), and every candidate that could
+     * only answer for one session was rejected — `session/follow` is opened for exactly
+     * one session, and the `job/list` roster is per-session, so neither can speak for the
+     * world. A frame on the mux can, because the mux carries every stream this app holds.
+     *
+     * `known = false` is "nobody can tell", and the copy layer keeps it apart from a
+     * confirmed zero: a socket that is down does not entitle the card to say the sessions
+     * have stopped. See [WidgetCopy] for how the two are drawn.
+     */
+    fun activity(heard: Boolean, known: Boolean) {
+        val now = System.currentTimeMillis()
+        synchronized(lock) {
+            activityReading = stamped(activityReading, known, if (heard) 1 else 0, now)
+            everPublished = true
+        }
+        wake.trySend(Unit)
+    }
+
+    /**
      * Called by [DshWidgetProvider] when a widget appears, and by nothing else.
      *
      * If an owner has already published, the ordinary path draws it — but *forced*, past
@@ -205,12 +245,13 @@ class WidgetPublisher(
         }
         val snapshot = synchronized(lock) {
             WidgetSnapshot(
-                needsYouReading,
-                workingReading,
-                subagentReading,
-                runningSessions,
-                kind,
-                sessionId,
+                needsYou = needsYouReading,
+                working = workingReading,
+                subagents = subagentReading,
+                active = activityReading,
+                running = runningSessions,
+                kind = kind,
+                sessionId = sessionId,
             )
         }
         val now = System.currentTimeMillis()
@@ -349,5 +390,24 @@ class WidgetPublisher(
          * dead app, which is what `updatePeriodMillis` would buy.
          */
         const val HEARTBEAT_MS = 15 * 60 * 1000L
+
+        /**
+         * How recently the host must have spoken for the card to call the sessions
+         * *working* rather than merely *running*.
+         *
+         * It is a decay window, not a timeout: the value is recomputed on every tick of
+         * the one-second loop that already runs, and the card is drawn only when it moves
+         * — so a burst of work costs two edges (start and the fall back to quiet) and an
+         * idle app costs nothing at all.
+         *
+         * Two minutes, and the length is a judgement recorded as one. A streaming turn
+         * delivers frames many times a second, so any window at all would hold across it;
+         * the window exists for the stretches in between, where an agent is inside a long
+         * tool call and the host has nothing to say. Two minutes covers the tool calls
+         * this app's own work is made of without stretching the word "working" over an
+         * afternoon, and it is an order of magnitude under [HEARTBEAT_MS] so the two can
+         * never be confused for one another.
+         */
+        const val ACTIVE_WINDOW_MS = 2 * 60 * 1000L
     }
 }

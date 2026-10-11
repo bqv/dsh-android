@@ -113,10 +113,10 @@ data class WidgetSession(
  *
  * A handful of facts and no more, deliberately: what is waiting on the user
  * ([needsYou], ranked by the website's own cross-domain precedence), what is working
- * ([working], of which [subagents], and *which* of it by name in [running]), and — for
- * the tap — which session to open ([sessionId]). What is *not* here is as much the
- * design as what is: no model chip, no jobs and no balance, each for a reason recorded
- * in `docs/WIDGET.md`.
+ * ([working], of which [subagents], and *which* of it by name in [running]), whether the
+ * app is still hearing the host at all ([active]), and — for the tap — which session to
+ * open ([sessionId]). What is *not* here is as much the design as what is: no model
+ * chip, no jobs and no balance, each for a reason recorded in `docs/WIDGET.md`.
  *
  * ## Why the names are here and the jobs are not
  *
@@ -126,11 +126,36 @@ data class WidgetSession(
  * fetches it, and each row already carries `running`. A list of running sessions is
  * therefore a real fact about the whole system, which is exactly what a count of jobs
  * could never be.
+ *
+ * The same bar was applied to "is anything happening": [active] is built on the one mux
+ * socket every stream shares, not on the followed session's turn or the open session's
+ * job roster, both of which speak for one session and would be wrong for every other.
  */
 data class WidgetSnapshot(
     val needsYou: WidgetReading = WidgetReading.NEVER,
     val working: WidgetReading = WidgetReading.NEVER,
     val subagents: WidgetReading = WidgetReading.NEVER,
+    /**
+     * Whether the host is *talking to this app*: 1 while a frame has arrived on the
+     * mux within [WidgetPublisher.ACTIVE_WINDOW_MS], 0 once that window has lapsed,
+     * `known = false` when the socket is not open and the app therefore cannot tell.
+     *
+     * This is the reading that separates "still listed" from "actually working". It is
+     * deliberately **not** a second count of sessions: [working] is the host's own
+     * whole-world liveness answer and is already on the card. What [working] cannot say
+     * is whether the app is still hearing the host at all, and that is what this is —
+     * a fact about the evidence rather than about any one session. Every candidate that
+     * could speak only for one session (`session/follow` for the open session, the
+     * per-session `job/list` roster) was rejected for exactly that reason; see
+     * `docs/WIDGET.md`.
+     *
+     * The copy layer draws the stronger word for a running list only while this
+     * reading is confirmed ([WidgetCopy.WORKING]); when it is 0 or unknown the card
+     * falls back to the roster's own word ([WidgetCopy.RUNNING]), which claims no
+     * freshness. An unknown activity reading therefore never renders as "nothing is
+     * happening": it withholds a word rather than asserting an idle world.
+     */
+    val active: WidgetReading = WidgetReading.NEVER,
     /**
      * The running sessions the card may name, in the app's own roster order, at most
      * [MAX_NAMED_SESSIONS] of them. See [WidgetPublisher.namedSessions] for which rows
@@ -169,9 +194,13 @@ data class WidgetSnapshot(
      * — the same roster pull, the same fold, the same instant — so the stamp that bounds
      * the running line already bounds every name under it. A separate stamp for the list
      * would only be a second thing to keep honest.
+     *
+     * [active] does bound the card, because it is drawn: it decides whether the headline
+     * says the sessions are working or merely running. A word whose reading was left out
+     * of this bound would be exactly the claim the footer could no longer cover.
      */
     val confirmedAt: Long?
-        get() = listOf(needsYou, working, subagents)
+        get() = listOf(needsYou, working, subagents, active)
             .filter { it.everSeen }
             .minOfOrNull { it.asOf }
 
@@ -181,6 +210,10 @@ data class WidgetSnapshot(
             needsYou.sameValueAs(other.needsYou) &&
             working.sameValueAs(other.working) &&
             subagents.sameValueAs(other.subagents) &&
+            // An activity change is a change to what the card draws — it decides which
+            // word the headline uses — so it is a moved value like any other, and the
+            // publisher's gate lets it through at once.
+            active.sameValueAs(other.active) &&
             // A title is a fact the card draws, so a rename is a change worth a write —
             // and the order is part of the statement, because the reader reads top-down.
             running == other.running &&
@@ -192,6 +225,7 @@ data class WidgetSnapshot(
         .put(KEY_NEEDS_YOU, needsYou.toJson())
         .put(KEY_WORKING, working.toJson())
         .put(KEY_SUBAGENTS, subagents.toJson())
+        .put(KEY_ACTIVE, active.toJson())
         .put(KEY_RUNNING, JSONArray().apply { running.forEach { put(it.toJson()) } })
         .put(KEY_KIND, kind ?: JSONObject.NULL)
         .put(KEY_SESSION, sessionId ?: JSONObject.NULL)
@@ -209,6 +243,13 @@ data class WidgetSnapshot(
          * key it does not know — reads a document with it and draws exactly what it drew
          * before. The version exists for documents this build **cannot read**; an absent
          * optional list is not one of those.
+         *
+         * `active` is optional on exactly the same terms, and its absent state is a real
+         * one rather than a placeholder: a document with no activity reading is one whose
+         * author could not say whether the host was talking, so it reads as
+         * [WidgetReading.NEVER] and the copy layer withholds the word that would have
+         * claimed otherwise. A *present* key this build cannot parse is a different thing
+         * — a document contradicting itself — and is refused by [decode].
          */
         const val VERSION = 1
 
@@ -228,6 +269,7 @@ data class WidgetSnapshot(
         private const val KEY_NEEDS_YOU = "needsYou"
         private const val KEY_WORKING = "working"
         private const val KEY_SUBAGENTS = "subagents"
+        private const val KEY_ACTIVE = "active"
         private const val KEY_RUNNING = "running"
         private const val KEY_KIND = "kind"
         private const val KEY_SESSION = "sessionId"
@@ -246,6 +288,10 @@ data class WidgetSnapshot(
          * The list is read up to [MAX_NAMED_SESSIONS]: a longer one can only come from a
          * file this app did not write, and the count in `working` still tells the reader
          * how many sessions exist.
+         *
+         * An absent `active` key is likewise not an error — it is "this document does not
+         * say" — but a present one that is not a reading is refused, because that is a
+         * document contradicting itself rather than one from an older build.
          */
         fun decode(text: String?): WidgetSnapshot? {
             if (text.isNullOrBlank()) return null
@@ -254,6 +300,15 @@ data class WidgetSnapshot(
             val needsYou = WidgetReading.fromJson(json.optJSONObject(KEY_NEEDS_YOU)) ?: return null
             val working = WidgetReading.fromJson(json.optJSONObject(KEY_WORKING)) ?: return null
             val subagents = WidgetReading.fromJson(json.optJSONObject(KEY_SUBAGENTS)) ?: return null
+            // Absent (an older document) and JSON null both mean "nobody said", which the
+            // copy layer draws by withholding the word. Anything else present under this
+            // key has to be a reading: a value that is not one is a document contradicting
+            // itself, and is refused with the rest of the unreadable shapes.
+            val active = if (!json.has(KEY_ACTIVE) || json.isNull(KEY_ACTIVE)) {
+                WidgetReading.NEVER
+            } else {
+                WidgetReading.fromJson(json.optJSONObject(KEY_ACTIVE)) ?: return null
+            }
             val running = json.optJSONArray(KEY_RUNNING)?.let { array ->
                 (0 until minOf(array.length(), MAX_NAMED_SESSIONS))
                     .mapNotNull { WidgetSession.fromJson(array.optJSONObject(it)) }
@@ -262,6 +317,7 @@ data class WidgetSnapshot(
                 needsYou = needsYou,
                 working = working,
                 subagents = subagents,
+                active = active,
                 running = running,
                 // A JSON null reads back through `optString` as the text "null".
                 kind = json.optString(KEY_KIND).takeIf { it.isNotEmpty() && it != "null" },

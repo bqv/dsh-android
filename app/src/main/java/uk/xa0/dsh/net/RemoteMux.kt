@@ -109,6 +109,32 @@ class RemoteMux(
     @Volatile
     private var eventClientId: String? = null
 
+    /**
+     * When the host last *said* something on this socket, or 0 before the first frame.
+     *
+     * Every logical stream this app can hold — the forwarded host events, the control
+     * stream, the workspace stream, the followed session, jobs and terminals — rides
+     * this one socket, so a frame arriving is evidence that the host is doing something
+     * somewhere. That is the whole of what makes it usable as an app-wide activity
+     * signal: no per-session stream can speak for the world.
+     *
+     * It counts text frames only, and that is load-bearing rather than incidental. The
+     * client dials with `pingInterval(20, SECONDS)` (see `DshClient.buildClients`), and
+     * OkHttp handles ping, pong and close as WebSocket *control frames* inside the
+     * socket rather than through [Listener.onMessage]. A socket kept alive by nothing but
+     * its pings therefore looks quiet here — which is the honest reading, because a live
+     * TCP connection is not activity.
+     */
+    private val lastFrameAt = AtomicLong(0L)
+
+    /**
+     * The instant of the last host frame, or 0 before the first.
+     *
+     * Read by the widget's activity reading: it is a fact about this app's evidence
+     * rather than about any one session, and it costs one store per frame to keep.
+     */
+    fun lastHostFrameAt(): Long = lastFrameAt.get()
+
     init {
         supervise()
     }
@@ -298,6 +324,10 @@ class RemoteMux(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            // Any host frame, before it is even parsed: the host speaking is the fact
+            // the widget's activity reading is made of, and a frame this client cannot
+            // read is still the host talking.
+            lastFrameAt.set(System.currentTimeMillis())
             val frame = runCatching { JSONObject(text) }.getOrNull() ?: return
             when (frame.optString("type")) {
                 "item" -> {

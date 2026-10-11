@@ -156,6 +156,7 @@ import uk.xa0.dsh.term.terminalReapList
 import uk.xa0.dsh.term.terminalSeats
 import uk.xa0.dsh.term.terminalToAdopt
 import uk.xa0.dsh.term.withHostShellSession
+import uk.xa0.dsh.widget.WidgetPublisher
 import uk.xa0.dsh.widget.WidgetSession
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -2441,6 +2442,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // stopped simply stops being renewed, which is what makes the age it draws
                 // mean something. The publisher collapses the tick; see [publishWidgetWorking].
                 publishWidgetWorking()
+                // And the same tick renews the widget's reading of whether the host is
+                // still *talking* to us — the fact that turns a running list from "still
+                // listed" into "working". It is recomputed here rather than pushed from
+                // the socket thread so the two readings are taken at one instant and
+                // through one writer; the publisher draws only when the value moves.
+                publishWidgetActivity()
                 delay(1000)
             }
         }
@@ -5122,6 +5129,35 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             running = running.map { WidgetSession(id = it.id, title = it.title) },
             subagents = running.count { it.isSubagent },
             known = rosterLanded && state.muxState == MuxState.OPEN,
+        )
+    }
+
+    /**
+     * Publishes the homescreen widget's activity reading: whether the host is still
+     * *saying* anything to this app.
+     *
+     * The fact lives on the mux, because that is the one place it can be whole-world:
+     * every logical stream rides the one socket, so a frame arriving means the host is
+     * doing something somewhere. Every alternative speaks for a single session and is
+     * rejected on that ground — `session/follow` is opened for exactly one session and
+     * the `job/list` roster exists only for the session whose job list is open — which is
+     * the same reason the card names sessions and never counts jobs.
+     *
+     * [known] is the socket being open, not `AttentionCenter.isLive()`: the reading is
+     * built from frames on the mux, so the ability to observe it is the socket, and the
+     * `$events` registration is a different question. A socket that is down is reported
+     * as unknown rather than as zero, because "I cannot hear" and "I heard nothing" are
+     * the two claims this widget must never merge.
+     *
+     * Called from the same one-second loop as [publishWidgetWorking], and free when
+     * nothing changes: the recomputation is a clock subtraction, and the publisher draws
+     * only when the value it produces differs from the last one written.
+     */
+    private fun publishWidgetActivity() {
+        val last = runCatching { client.mux().lastHostFrameAt() }.getOrDefault(0L)
+        app.widgets.activity(
+            heard = last > 0L && System.currentTimeMillis() - last <= WidgetPublisher.ACTIVE_WINDOW_MS,
+            known = _ui.value.muxState == MuxState.OPEN,
         )
     }
 

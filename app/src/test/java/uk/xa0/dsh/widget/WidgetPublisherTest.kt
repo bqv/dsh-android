@@ -327,6 +327,76 @@ class WidgetPublisherTest {
         )
     }
 
+    /**
+     * The activity reading, end to end through the writer: confirmed while the host is
+     * talking, drawn down to zero when it falls quiet, and withdrawn rather than zeroed
+     * when the socket goes away.
+     */
+    @Test
+    fun `activity is written while the host talks and falls to zero when it stops`() {
+        boundWidget()
+        val publisher = publisher()
+
+        publisher.activity(heard = true, known = true)
+        assertTrue(reading()?.active?.known == true)
+        assertEquals(1, reading()?.active?.value)
+        assertTrue("a reading the app could assert has an instant", (reading()?.active?.asOf ?: 0L) > 0L)
+
+        publisher.activity(heard = false, known = true)
+        assertTrue(reading()?.active?.known == true)
+        assertEquals("the host going quiet is a confirmed zero, not an unknown", 0, reading()?.active?.value)
+
+        publisher.activity(heard = false, known = false)
+        assertTrue(reading()?.active?.known == false)
+        assertEquals(
+            "the last value is kept so the card can still say when it last knew",
+            0,
+            reading()?.active?.value,
+        )
+    }
+
+    /**
+     * The reading a document written before the activity key existed decodes to: never
+     * confirmed, so the copy layer withholds the word that would have claimed otherwise.
+     */
+    @Test
+    fun `an activity reading nobody has ever confirmed is left as nothing, not stamped`() {
+        boundWidget()
+        publisher().activity(heard = false, known = false)
+        val snapshot = reading()
+        assertTrue(snapshot?.active?.known == false)
+        assertEquals(
+            "an instant must not be invented for a reading that never existed",
+            0L,
+            snapshot?.active?.asOf,
+        )
+    }
+
+    /**
+     * Another movement on the same gate: the moment the host stops talking changes which
+     * word the headline draws, so it has to reach the card at once and may not wait for
+     * the quarter hour.
+     */
+    @Test
+    fun `an activity change is a value that moved`() {
+        val publisher = publisher()
+        val talking = WidgetSnapshot(active = WidgetReading(known = true, value = 1, asOf = confirmedAt))
+        val quiet = talking.copy(active = WidgetReading(known = true, value = 0, asOf = confirmedAt + 1_000L))
+
+        assertTrue(
+            publisher.publishDue(quiet, previous = talking, writtenAt = confirmedAt, now = confirmedAt + 1_000L),
+        )
+        assertFalse(
+            "a fresher instant for the same activity is not news",
+            publisher.publishDue(
+                quiet.copy(active = quiet.active.copy(asOf = confirmedAt + 2_000L)),
+                previous = quiet,
+                writtenAt = confirmedAt + 1_000L,
+                now = confirmedAt + 2_000L,
+            ),
+        )
+    }
+
     private companion object {
         const val WIDGET_ID = 7
     }
