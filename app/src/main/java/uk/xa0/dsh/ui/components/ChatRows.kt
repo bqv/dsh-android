@@ -55,6 +55,7 @@ import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Visibility
@@ -89,6 +90,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -100,6 +103,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import uk.xa0.dsh.GoalState
 import uk.xa0.dsh.model.ApprovalAnswer
+import uk.xa0.dsh.model.ApprovalCopy
 import uk.xa0.dsh.model.ChatEntry
 import uk.xa0.dsh.model.DisplayRow
 import uk.xa0.dsh.model.JobObservation
@@ -1387,6 +1391,22 @@ fun NoticeRow(
  * reply is what settles the card — it is up for a bounded grace and then gone, and a
  * host `cancel` takes it sooner — so every state here has to be legible on its own,
  * and the buttons are inert for the two that have nothing left for a tap to do.
+ *
+ * ## The card does not move when the state does
+ *
+ * The words live in [uk.xa0.dsh.model.ApprovalCopy] and are drawn in
+ * [ApprovalStatusStrip], which is one fixed line tall and is laid out in *every*
+ * state, [ApprovalAnswer.Waiting] included. That is the fix for the reported defect:
+ * the state used to be a sentence in a region that only existed once something had
+ * happened, so the card grew on the tap, grew again — to a second line — when the
+ * host took the answer, and shrank when the card was cleared a second and a half
+ * later. Two jumps per approval, in and out.
+ *
+ * Nothing else here varies with the state: the banner's word is one line whatever it
+ * says, and the buttons' `enabled` only changes their alpha and whether a tap is
+ * taken. So no state can change this card's geometry — see [ApprovalStatusStrip] for
+ * why the strip itself is proof against a future copy change rather than merely
+ * shorter today.
  */
 @Composable
 fun ApprovalCard(
@@ -1400,15 +1420,6 @@ fun ApprovalCard(
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(20.dp)
     val tappable = answer is ApprovalAnswer.Waiting || answer is ApprovalAnswer.Unsent
-    val status: String? = when (answer) {
-        ApprovalAnswer.Waiting -> null
-        is ApprovalAnswer.Answering -> "Sending your answer…"
-        is ApprovalAnswer.Sent ->
-            if (answer.allow) "Allowed once — the host has taken it."
-            else "Rejected — the host has taken it."
-
-        is ApprovalAnswer.Unsent -> "Not sent: ${answer.message}."
-    }
     Column(
         modifier
             .fillMaxWidth()
@@ -1434,6 +1445,11 @@ fun ApprovalCard(
                 if (answer is ApprovalAnswer.Sent) "Approval sent" else "Approval required",
                 style = DshType.meta,
                 color = colors.warn,
+                // One line whatever it says: this banner is the other thing on the
+                // card that changes with the state, and a second line here would
+                // move the card just as the status line used to.
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
 
@@ -1447,14 +1463,8 @@ fun ApprovalCard(
                 Spacer(Modifier.height(DshSpacing.sm))
                 Text(reason, style = DshType.meta, color = colors.labelSecondary)
             }
-            if (status != null) {
-                Spacer(Modifier.height(DshSpacing.sm))
-                Text(
-                    text = status,
-                    style = DshType.meta,
-                    color = if (tappable) colors.warn else colors.labelSecondary,
-                )
-            }
+            Spacer(Modifier.height(DshSpacing.sm))
+            ApprovalStatusStrip(answer)
             Spacer(Modifier.height(DshSpacing.xl))
             Row(horizontalArrangement = Arrangement.spacedBy(DshSpacing.lg)) {
                 PillButton("Reject", primary = false, enabled = tappable, onClick = onReject)
@@ -1463,6 +1473,102 @@ fun ApprovalCard(
         }
     }
 }
+
+/**
+ * The card's one state-dependent region, sized so that no state can move it.
+ *
+ * It is laid out in every state, [ApprovalAnswer.Waiting] included, and it is exactly
+ * one `DshType.meta` line tall at whatever font scale the reader has chosen. That
+ * combination is the structural guarantee rather than a shorter sentence:
+ *
+ *  * the height is *fixed*, not a minimum, so a label can never enlarge the region —
+ *    it is clipped by it instead;
+ *  * `maxLines = 1` with ellipsis means the visible text cannot wrap, so the label
+ *    stays inside the line it is given;
+ *  * the region exists even when there is nothing to say, so the card is already
+ *    this size before the first tap and after the last one.
+ *
+ * What varies between states is therefore only what cannot affect layout: the tint,
+ * and the glyph of a mark drawn at a fixed size. The *words* vary too, and that is
+ * safe precisely because the region is one line — a wider word has nowhere to push
+ * anything, since the card is already as wide as the screen.
+ *
+ * Not colour alone: each state also has its own mark — a clock for an answer in
+ * flight, an outbound arrow for one the host has taken, a warning triangle for one
+ * that did not get through — and its own words, so a reader who cannot separate the
+ * tints, or who is looking at a dimmed screen, still has the claim. There is
+ * deliberately no `stateDescription` here: the drawer sets one because its blue
+ * carries the state on its own, while these words already say it, and a state
+ * description equal to the visible text is only read out twice.
+ */
+@Composable
+private fun ApprovalStatusStrip(
+    answer: ApprovalAnswer,
+    modifier: Modifier = Modifier,
+) {
+    val status = ApprovalCopy.status(answer)
+    val tint = answer.statusTint()
+    val mark = answer.statusMark()
+    // The style's own line height, at the reader's font scale: one sp of line height
+    // is one dp of box. (`Density` has no `TextUnit.toDp()`, so this is the round
+    // trip through px, which is exact: px = sp x fontScale x density.)
+    val line = with(LocalDensity.current) { DshType.meta.lineHeight.toPx().toDp() }
+    Row(
+        modifier
+            .fillMaxWidth()
+            .height(line)
+            .testTag(APPROVAL_STATUS_STRIP_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // The mark's seat is laid out in every state, so the claim starts at the same
+        // x whether or not there is a mark to draw.
+        Box(Modifier.size(ApprovalMarkSize), contentAlignment = Alignment.Center) {
+            if (mark != null) {
+                Icon(
+                    mark,
+                    contentDescription = null,
+                    tint = tint,
+                    modifier = Modifier.size(ApprovalMarkSize),
+                )
+            }
+        }
+        Spacer(Modifier.width(DshSpacing.md))
+        Text(
+            text = status ?: "",
+            style = DshType.meta,
+            color = tint,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** The strip's mark: a shape per state, so the state is never carried by tint alone. */
+private fun ApprovalAnswer.statusMark(): ImageVector? = when (this) {
+    ApprovalAnswer.Waiting -> null
+    is ApprovalAnswer.Answering -> Icons.Rounded.Schedule
+    is ApprovalAnswer.Sent -> Icons.Rounded.Send
+    is ApprovalAnswer.Unsent -> Icons.Rounded.Warning
+}
+
+/** The strip's tint. It reinforces the claim; it never has to make it on its own. */
+@Composable
+private fun ApprovalAnswer.statusTint(): Color = when (this) {
+    ApprovalAnswer.Waiting -> DshTheme.colors.labelSecondary
+    is ApprovalAnswer.Answering -> DshTheme.colors.labelSecondary
+    is ApprovalAnswer.Sent -> DshTheme.colors.success
+    is ApprovalAnswer.Unsent -> DshTheme.colors.error
+}
+
+/** Fixed size for the strip's mark, in every state, so the seat cannot move. */
+private val ApprovalMarkSize = 15.dp
+
+/**
+ * Names the strip for `ApprovalCardTest`, which measures it: the region's declared
+ * height is the one part of "it does not reflow" this harness can actually see.
+ */
+internal const val APPROVAL_STATUS_STRIP_TAG = "approval-status-strip"
 
 @Composable
 private fun PillButton(

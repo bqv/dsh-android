@@ -582,6 +582,22 @@ one.
   post for an already-settled event is answered `ok` too, because the no-op path returns
   without throwing — but both readings mean the host is no longer holding the waterfall,
   which is the fact the card needs.
+- **The card's changing line is a reserved, fixed-height strip, and its words live in
+  one place.** `Sent` lasts the settle grace and nothing else, so a status sentence
+  that wrapped to a second line arrived, moved the card's buttons and left again within
+  a second and a half, twice per approval. `ApprovalCard` now draws
+  `ApprovalStatusStrip` in *every* state, `Waiting` included, exactly one
+  `DshType.meta` line tall (`lineHeight.toPx().toDp()`, so it follows the reader's font
+  scale) with `maxLines = 1` and ellipsis. A state is carried by a fixed-size mark, a
+  tint and a short label, so the shape and the words — not the hue — are what tell the
+  four apart; the marks are a clock in flight, an outbound arrow taken, a warning
+  triangle not sent. The words are `model/ApprovalCopy.kt`, shared with the shade
+  entry, and `ApprovalCopyTest` fails if a label grows past the 24-character budget
+  (`Unsent` excepted on purpose: the strip ellipsises the host's own message and the
+  notification repeats it in full). **Unverified on a device:** the JVM harness levels
+  every string to one line, so neither the fit nor the absence of wrapping can be
+  tested here. `ApprovalCardTest` measures the strip and the whole card at one size
+  across all four states, which is the part that can be measured.
 - **The durable reconciliation is the host's re-announcement roster.** `openRemoteEvents`
   re-delivers every waterfall still in `pendingRemoteEvents` to a newly opened `$events`
   stream, before anything else on it, and names nothing it has settled. So a fresh

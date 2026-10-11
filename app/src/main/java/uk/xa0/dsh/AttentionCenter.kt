@@ -17,6 +17,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import uk.xa0.dsh.data.DshConfig
 import uk.xa0.dsh.model.ApprovalAnswer
+import uk.xa0.dsh.model.ApprovalCopy
 import uk.xa0.dsh.model.ApprovalGate
 import uk.xa0.dsh.model.ApprovalRoster
 import uk.xa0.dsh.model.arr
@@ -745,8 +746,12 @@ class AttentionCenter(private val context: Context) {
         alert(
             id = Attention.approvalId(held.sessionId),
             sessionId = held.sessionId,
-            title = "Approval answer not sent",
-            text = "${held.toolName} is still waiting — ${answer.message}.",
+            // The card's own words, from the one place that holds them: the card
+            // states the not-sent claim in a fixed line and may ellipsise the host's
+            // message, so this is where that message is repeated in full rather than
+            // a second phrasing that could drift away from it.
+            title = ApprovalCopy.UNSENT_TITLE,
+            text = ApprovalCopy.unsentNotificationText(held.toolName, answer),
         )
     }
 
