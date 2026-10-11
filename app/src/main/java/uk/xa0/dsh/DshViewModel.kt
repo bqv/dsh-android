@@ -42,7 +42,10 @@ import uk.xa0.dsh.model.ModelChoice
 import uk.xa0.dsh.model.ModelRef
 import uk.xa0.dsh.model.ModelSelectionState
 import uk.xa0.dsh.model.PendingSessionTarget
+import uk.xa0.dsh.model.QUEUE_PREVIEW_CHARS
+import uk.xa0.dsh.model.inboxQueueItems
 import uk.xa0.dsh.model.parseHostModelSelection
+import uk.xa0.dsh.model.parseQueueItems
 import uk.xa0.dsh.model.parseModelRef
 import uk.xa0.dsh.model.SessionIntentPlan
 import uk.xa0.dsh.model.subagentTreeIds
@@ -3463,12 +3466,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * The host-wide live control stream (`session/control`).
      *
-     * This is the only place the pending queue is published. It opens with one
-     * `baseline` covering *every* session — queues, background jobs and folded
-     * projections — then pushes `queue` / `projection` / `jobs` replacements.
-     * The queue is transient by nature (it is inbox state, not journal state),
-     * so nothing about it appears in `session/follow`: without this stream the
-     * composer has no idea a message is waiting.
+     * The pending queue rides here — but as a **projection**, not as a frame of
+     * its own: 0.2.0's baseline carries `projections` and pushes a `projection`
+     * frame per change, and the `inbox` key inside them is the queue. The old
+     * `queues` block and `queue` frame are still read for a host that sends them.
+     * The queue is transient by nature (it is inbox state, not journal state), so
+     * nothing about it appears in `session/follow`'s records either; without this
+     * stream, or a follow snapshot's projection block, the composer has no idea a
+     * message is waiting.
      */
     private fun ensureControlStream() {
         if (controlJob?.isActive == true) return
@@ -3498,16 +3503,17 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 queues.clear()
                 payload.obj("queues")?.let { all ->
                     all.keys().forEach { sessionId ->
-                        queues[sessionId] = parseQueue(all.optJSONArray(sessionId))
+                        queues[sessionId] = parseQueueItems(all.optJSONArray(sessionId))
                     }
                 }
                 // The running host's baseline carries `projections` and nothing
                 // else: no `queues`, and — the reason jobs had vanished from every
                 // session — no `jobs`. The queue block above is kept because an
-                // older host does send it; the job block is deliberately *not*
-                // replaced with a fallback, because a client that keeps waiting for
-                // a frame the host no longer sends waits forever. Jobs come from
-                // `job/list` now; see [watchJobs].
+                // older host does send it, and the live queue is the `inbox` key
+                // inside the projection block below; the job block is deliberately
+                // *not* replaced with a fallback, because a client that keeps
+                // waiting for a frame the host no longer sends waits forever. Jobs
+                // come from `job/list` now; see [watchJobs].
                 publishJobsForCurrent()
                 // Seed the open session's folded projections so a control delta
                 // that only carries one key still has its siblings in hand.
@@ -3529,10 +3535,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 publishQueue()
             }
 
+            // An older host's queue replacement. 0.2.0 sends no such frame — its
+            // pending queue is the `inbox` projection, folded in
+            // [applySessionProjections] — but a host that still pushes one is read
+            // rather than dropped.
             "queue" -> {
                 val sessionId = value.str("sessionId")
                 if (sessionId.isEmpty()) return
-                queues[sessionId] = parseQueue(value.arr("items"))
+                queues[sessionId] = parseQueueItems(value.arr("items"))
                 publishQueue()
             }
 
@@ -3612,72 +3622,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Flattens one wire queue item.
+     * Replaces one session's host-backed queue rows from the `inbox` projection.
      *
-     * Both client-side derivations are ported verbatim from the host's client
-     * store (`queue-mirror.ts`) because the dock's behaviour depends on them:
-     * the preview is the *non-attachment* content and `text` is null the moment
-     * any block is not text, which is exactly when the web disables Edit.
+     * The projection is the *whole* pending set, so it replaces rather than
+     * merges, and an empty one clears the entry: a row the host no longer holds
+     * must not linger, because the item id it carries is what
+     * `session/updateQueue` addresses — a stale one answers
+     * `session/queue-item-not-found`.
      */
-    private fun parseQueue(array: JSONArray?): List<QueuedMessage> {
-        if (array == null) return emptyList()
-        val result = ArrayList<QueuedMessage>(array.length())
-        for (i in 0 until array.length()) {
-            val item = array.optJSONObject(i) ?: continue
-            val message = item.obj("message")
-            val content = message.arr("content") ?: JSONArray()
-            val attachments = ArrayList<QueueAttachment>()
-            val flat = StringBuilder()
-            var allText = true
-            for (j in 0 until content.length()) {
-                val block = content.optJSONObject(j) ?: continue
-                when (val type = block.str("type")) {
-                    "text" -> {
-                        if (flat.isNotEmpty()) flat.append(' ')
-                        flat.append(block.str("text"))
-                    }
-
-                    "image", "file" -> {
-                        allText = false
-                        val ref = block.obj("attachment")
-                        attachments += QueueAttachment(
-                            kind = type,
-                            name = ref.str("name").ifEmpty { if (type == "image") "Image" else "File" },
-                            bytes = ref.int("bytes"),
-                        )
-                    }
-
-                    else -> {
-                        allText = false
-                        if (flat.isNotEmpty()) flat.append(' ')
-                        flat.append("[$type]")
-                    }
-                }
-            }
-            val collapsed = flat.toString().replace(Regex("\\s+"), " ").trim()
-            val preview = if (collapsed.length > QUEUE_PREVIEW_CHARS) {
-                collapsed.take(QUEUE_PREVIEW_CHARS) + "…"
-            } else {
-                collapsed
-            }
-            result += QueuedMessage(
-                id = item.str("id"),
-                placement = item.str("placement").ifEmpty { "queued" },
-                preview = preview,
-                // `textOf` joins with NO separator, unlike the preview.
-                text = if (allText) content.let { blocks ->
-                    (0 until blocks.length()).joinToString("") { blocks.optJSONObject(it)?.str("text").orEmpty() }
-                } else {
-                    null
-                },
-                attachments = attachments,
-                // Probed on this host: the row carries `rpcId`, copied from the
-                // `session/prompt.requestId` that admitted it. That is the only
-                // identity a local echo can be matched against.
-                rpcId = item.str("rpcId").takeIf { it.isNotEmpty() },
-            )
-        }
-        return result
+    private fun applyInbox(sessionId: String, inbox: JSONObject?) {
+        val rows = parseQueueItems(inboxQueueItems(inbox))
+        if (rows.isEmpty()) queues.remove(sessionId) else queues[sessionId] = rows
+        if (sessionId == _ui.value.currentSessionId) publishQueue()
     }
 
     // ------------------------------------------------------------------- jobs
@@ -4680,7 +4636,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             for (i in 0 until items.length()) {
                 val item = items.optJSONObject(i) ?: continue
                 if (item.optString("sessionId") == currentId) {
-                    applySessionProjections(item.obj("projections")?.obj("values"))
+                    applySessionProjections(item.obj("projections")?.obj("values"), live = false)
                     break
                 }
             }
@@ -6487,10 +6443,30 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * `session/list`. These are the host's already-folded values, so they are the
      * truth for access mode, plan mode and context pressure — no client-side
      * guessing.
+     *
+     * [live] separates a *stream* block from a roster row's. Both carry the same
+     * keys, but only the streams' are folded for the queue: a roster row's block is
+     * a cached fold whose watermark this function does not compare, and a stale
+     * empty `inbox` arriving there would clear a queue the control stream had just
+     * pushed, with nothing to re-assert it until the queue changed again — which is
+     * the one state that leaves the dock with no editable row at all.
      */
-    private fun applySessionProjections(values: JSONObject?) {
+    private fun applySessionProjections(values: JSONObject?, live: Boolean = true) {
         if (values == null) return
         val previousGoalPhase = _ui.value.goal?.phase
+
+        // The pending queue is a *projection*, not a control-stream frame. The
+        // 0.2.0 control baseline carries `projections` and nothing else and pushes
+        // a `projection` frame per change, and the host's own web client reads the
+        // same key (`dsh-client-ui-conversation`: `useProjection("inbox")`). The
+        // old `queues` block and `queue` frame are read too, for a host that still
+        // sends them — see [handleControlFrame] — but on this host they never
+        // arrive, which is what left the dock showing local echoes only and its
+        // Edit action permanently disabled. The value belongs to the **open**
+        // session: the roster path checks the id before calling.
+        if (live && values.has("inbox")) {
+            _ui.value.currentSessionId?.let { applyInbox(it, values.obj("inbox")) }
+        }
 
         // The host also projects the standing plan (`todos`, a bare array). The
         // transcript's own `todo/write` row is the richer source, but on a cold
@@ -7250,9 +7226,6 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Base64 uploads inflate by ~33%, so cap before the host sees it. */
         const val MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
-
-        /** The web client's queue-preview cap (`QUEUE_PREVIEW_CHARS`). */
-        const val QUEUE_PREVIEW_CHARS = 200
 
         /**
          * How long a queue-mode submission echo may wait for its host row before
