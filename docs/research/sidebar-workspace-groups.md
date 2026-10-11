@@ -249,6 +249,69 @@ device was touched for this change), and the live registry currently holds no em
 Workspace — the `Empty` branch rests on the host sources above plus the drawer rule
 that already drew such a group.
 
+**Superseded in part (2026-10-11):** `Filtered` no longer hides its group. Every
+Workspace the registry reports is drawn, and a zero-row header says which absence it is.
+See the next section.
+
+## Every Workspace draws, always (2026-10-11)
+
+Request: "i still cant see all workspaces in the drawer (ref is empty, only has archived
+sessions, so is hidden?)". A Workspace whose only sessions are archived had no visible
+members with the Archived switch off, so the drawer emitted no section for it at all. The
+registry has always reported it — `workspace/follow`'s baseline is the whole registry — so
+`ref` was in the list the client held; the *filter*, not the registry, was erasing the
+directory. The Archived switch persists (`drawer_show_archived`), so the filter can be one
+the reader set days ago and no longer remembers, and the sidebar then showed no trace that
+the Workspace, or the filter, existed.
+
+That was a deliberate port of the web's `deriveGroups` ("the archived-only filter drops
+groups without visible members"), which is why `WorkspaceGroupState.Filtered` was defined as
+"never drawn". It is now the opposite: `showsHeader` is gone and every Workspace the
+registry reports gets a section.
+
+* `Filtered` draws, and says `Sessions hidden by filters`. `Empty` keeps `No sessions` and
+  `Loading` keeps `Sessions not loaded`, so the three zero-row groups remain three different
+  claims: the registry says the directory accounts for no session / every member is known
+  and this drawer's own view rules hide them all / the roster has not delivered the members.
+  Only `Loading` withholds its count — the count column must not make the claim the
+  placeholder beside it refuses to make.
+* The copy does not say "your filters". The Archived switch is the reader's, but the other
+  two rules that can empty a group are the drawer's own — a subagent is reached through its
+  parent rather than as a top-level row, and an automation run is listed under Automations.
+  "hidden by filters" is true of all three; "your" would be a false claim in two of them.
+* A tap does what a header tap does everywhere else — fold/unfold — and no more. Revealing
+  the hidden members would mean clearing the global Archived filter, which on this client's
+  own live registry (12 workspaces, 889 archived ids) would pour hundreds of rows into the
+  list from a tap on a folder; and a glyph that sometimes folds and sometimes rewrites a
+  global filter is two controls wearing one icon. The Archived switch beside the query box is
+  the labelled control for that, and the note names the cause so it can be found. This is
+  also what `Empty` and `Loading` headers already do: their tap folds a group that has no
+  rows, and making `Filtered` the one zero-row header that was *not* tappable would make two
+  identical-looking rows behave differently for no reader-visible reason.
+* Order is untouched (the registry's own), and so is the header count: a `Filtered` group's
+  figure is 0, because that is how many rows it draws — the same figure `Empty` prints, told
+  apart by the sentence underneath.
+
+The divergence is recorded in `docs/PARITY.md`, both in the sidebar feature list and under
+"Deliberate divergences". `WorkspaceGroupTest` pins the three sentences apart from one
+another and pins that a `Filtered` group now draws with a 0 that is a fact.
+
+Read from the live registry rather than taken from the report: `~/.dsh/storages/workspace.json`
+— the durable store the running host projects, 12 workspaces, the same count as the
+`DshSidebar` logcat line in the section above — has `ref` with **20 members: 10 of them in
+`archivedSessionIds`, and the other 10 all beginning `dsh-automation-session-`**, which
+`partitionAutomations` lifts into the Automations section
+(`model/Automations.kt: AUTOMATION_SESSION_PREFIX`). So `ref` is `Filtered` on *both*
+non-reader causes at once: the archived half is hidden by the switch, the run half is listed
+somewhere else in the same list. The note therefore could not say "your filters" without
+being false about half of `ref` — and the reader's own account ("only has archived sessions")
+was itself half the story.
+
+Unverified as of writing: nothing here was compiled or run — no build, no test and no device
+was touched for this change (the orchestrating session runs them). The rules stay in
+`model/WorkspaceGroups.kt` because the unit-test source set is not a friend of `main` and the
+drawer's `remember` block cannot be reached from the JVM harness.
+
 ## Observed but out of scope
 
 The blank-"New Session" landing on `--es uk.xa0.dsh.session <id>` is fixed:

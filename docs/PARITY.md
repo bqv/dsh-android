@@ -32,6 +32,18 @@ of where the app stands against them.
 - [x] Brand lockup (mark + "DSH")
 - [x] New Session (38dp, hairline border, r12)
 - [x] Workspace grouping from the host registry
+- [x] **Every registered Workspace always draws**, even when the current view hides all of
+      its sessions. **Divergence:** the web's `deriveGroups`
+      (`dsh-client-ui-workspace/lib/types/client/tree.d.ts`) drops a group with no visible
+      members, so an archived-only Workspace leaves the sidebar entirely — and the Archived
+      switch persists here, so a filter set days earlier could erase a directory with
+      nothing on screen to say the directory (or the filter) existed. A drawn group with no
+      rows says which absence it is: "No sessions" (the registry accounts none), "Sessions
+      hidden by filters" (every member is known and the drawer's own view rules hide them),
+      or "Sessions not loaded" (the roster has not delivered them), the last of which prints
+      no count at all (`model/WorkspaceGroups.kt`, `WorkspaceGroupTest`). The header tap
+      keeps its one meaning — fold/unfold — and never clears a filter
+      (`ui/SessionsDrawer.kt`); see the rationale in `docs/research/sidebar-workspace-groups.md`
 - [x] **Ungrouped** bucket for sessions outside every workspace
 - [x] Group by: `WorkSpace` / `List`; Order by: `Manual` / `Updated` (persisted in `ConfigStore`)
 - [x] Per-section collapse + "Show N more sessions" / "Show less"
@@ -383,6 +395,11 @@ host settings write stays a value with a disabled control.
 - **The rail is press-to-grow**; the web's preview mark and tooltip are hover-only.
 - **The goal chip carries `roundsStarted/maxGoalRounds`**; the web GoalBar has no counter
   (`docs/research/goal-chip.md`).
+- **Every registry Workspace is drawn**, even one whose sessions the reader's filters all
+  hide; the web's `deriveGroups` drops a group with no visible members, which let a
+  persisted Archived filter erase a directory from the sidebar. The group states which
+  absence it is instead, and its header tap still only folds
+  (`model/WorkspaceGroups.kt`, `ui/SessionsDrawer.kt`).
 
 ## Host traps that shape the client
 

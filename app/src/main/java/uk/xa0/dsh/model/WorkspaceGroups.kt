@@ -24,10 +24,11 @@ package uk.xa0.dsh.model
  * from `cwd`, and nothing invents one — a directory no registry row names is not a group
  * at all, however many sessions ran in it.
  *
- * ## The two zero-row groups
+ * ## The three zero-row groups
  *
- * `sessionIds: []` and "the members exist but this client has not been handed them yet"
- * both draw a group with nothing under it, and they are **not the same claim**:
+ * `sessionIds: []`, "the members exist but this client has not been handed them yet", and
+ * "the members exist and every one of them is hidden by this drawer's own view rules" all
+ * draw a group with nothing under it, and they are **not the same claim**:
  *
  *  * **[WorkspaceGroupState.Empty]** — the host said this directory accounts for no
  *    session. "No sessions" is a fact the registry supplied.
@@ -35,18 +36,25 @@ package uk.xa0.dsh.model
  *    not delivered (it is a `session/list` pull behind, or the pull omitted them:
  *    `DshViewModel.warnOnMissingMembers` logs exactly that divergence). "0" would be a
  *    lie here; the truthful statement is that the sessions have not arrived.
+ *  * **[WorkspaceGroupState.Filtered]** — every member is known and none of them is drawn
+ *    under this header: the Archived switch is off, they are subagent sessions (never
+ *    top-level rows), or they are automation runs this drawer lists in their own section.
  *
- * They therefore draw different words *and* a different count — see [placeholder] and
- * [headerCount] — which is this app's standing convention for "nothing" versus "not
- * told" (`WidgetCopy.NEEDS_NOTHING` / `NEEDS_UNKNOWN`, and the Router tab's "not asked"
- * rule). A group number that is not yet a fact is not drawn at all.
+ * They therefore draw different words — see [placeholder] — and they differ in the header's
+ * count as well: a group whose membership has not arrived prints no figure at all
+ * ([headerCount]). That is this app's standing convention for "nothing" versus "not told"
+ * (`WidgetCopy.NEEDS_NOTHING` / `NEEDS_UNKNOWN`, and the Router tab's "not asked" rule): a
+ * group number that is not yet a fact is not drawn.
  *
- * A third case never reaches the screen and is kept distinct anyway:
- * **[WorkspaceGroupState.Filtered]** is every member known but every one of them hidden
- * by the drawer's own filters (search, Archived off, subagents). The reader caused that
- * and can undo it, so the group is simply not drawn — the same rule the web applies when
- * the archived-only filter drops a group with no visible members
- * (`dsh-client-ui-workspace/lib/types/client/tree.d.ts`, `deriveGroups`).
+ * **Every one of the three draws a header**, and that is a deliberate divergence from the
+ * web: its `deriveGroups` drops a group with no visible members
+ * (`dsh-client-ui-workspace/lib/types/client/tree.d.ts`), so an archived-only Workspace
+ * leaves the sidebar entirely. The reader's Archived switch persists across restarts, so
+ * on this client a directory could disappear because of a filter set days ago, with
+ * nothing on screen to say the directory — or the filter — exists. The whole point of a
+ * Workspace list is that the Workspaces in it can be seen, so here the registry always
+ * wins over the filter, and the price is that a group with no visible members must *say*
+ * why it has none ([placeholder]). Recorded in `docs/PARITY.md`.
  *
  * ## Order
  *
@@ -85,7 +93,9 @@ enum class WorkspaceListPhase {
 /**
  * Why one Workspace's section draws the rows it does.
  *
- * [Members] and [Empty] and [Loading] draw a header; [Filtered] does not.
+ * Every state draws a header: the sidebar is the list of the host's Workspaces, so a
+ * registered Workspace is always on it. What the states differ in is what a zero-row
+ * header says underneath itself.
  */
 enum class WorkspaceGroupState {
     /** At least one accounted member has a row the drawer would draw. */
@@ -97,7 +107,13 @@ enum class WorkspaceGroupState {
     /** The host accounts members this client's roster has not delivered. Not yet a fact. */
     Loading,
 
-    /** Every member is known, and the drawer's own filters hide all of them. */
+    /**
+     * Every member is known, and none of them is drawn under this header.
+     *
+     * The drawer's own view rules emptied the group — the Archived switch, the rule that
+     * a subagent is reached through its parent rather than as a top-level row, or the
+     * automation lift-out. The group still draws, and says so: see [placeholder].
+     */
     Filtered,
 }
 
@@ -130,26 +146,18 @@ fun workspaceGroupState(
 }
 
 /**
- * Whether this group draws a header row.
- *
- * [WorkspaceGroupState.Filtered] is the only state that does not: the group is non-empty
- * and everything about it is known, so an empty header would be the drawer reporting the
- * user's own filter back to them as a fact about the directory.
- */
-val WorkspaceGroupState.showsHeader: Boolean
-    get() = this != WorkspaceGroupState.Filtered
-
-/**
  * The line a group with no rows draws under its header, or null when it draws none.
  *
- * These two strings are the whole on-screen difference between "this Workspace has
- * nothing" and "this Workspace's sessions have not arrived", so they are held here where
- * a test can assert they are not equal, rather than inline in the drawer.
+ * These three strings are the whole on-screen difference between "this Workspace has
+ * nothing", "this Workspace's sessions have not arrived" and "this Workspace's sessions
+ * are all hidden by the drawer's view rules", so they are held here where a test can
+ * assert none of them coincides with another, rather than inline in the drawer.
  */
 val WorkspaceGroupState.placeholder: String?
     get() = when (this) {
         WorkspaceGroupState.Empty -> WorkspaceCopy.NO_SESSIONS
         WorkspaceGroupState.Loading -> WorkspaceCopy.SESSIONS_NOT_LOADED
+        WorkspaceGroupState.Filtered -> WorkspaceCopy.SESSIONS_HIDDEN
         else -> null
     }
 
@@ -193,6 +201,20 @@ object WorkspaceCopy {
      * carries the same lesson). The word matches the widget's "Running: unknown".
      */
     const val SESSIONS_NOT_LOADED = "Sessions not loaded"
+
+    /**
+     * Nothing drawn, but everything accounted for: the drawer's own view rules emptied the
+     * group.
+     *
+     * Deliberately not "No sessions": the directory holds sessions, and at least one of the
+     * rules that can empty a group — the Archived switch — is a control the reader can turn
+     * back on, which is a different fact from a directory the host says holds nothing.
+     * Deliberately not "your filters" either: the other two rules — a subagent is reached
+     * through its parent rather than as a top-level row, and an automation run is listed
+     * under its own section — are the drawer's own, not the reader's, so the sentence names
+     * the filters without claiming who set them.
+     */
+    const val SESSIONS_HIDDEN = "Sessions hidden by filters"
 
     /**
      * The figure drawn where a group's count would go, when the number is not known: the

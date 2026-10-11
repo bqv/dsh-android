@@ -87,7 +87,6 @@ import uk.xa0.dsh.model.WorkspaceGroupState
 import uk.xa0.dsh.model.WorkspaceListPhase
 import uk.xa0.dsh.model.headerCount
 import uk.xa0.dsh.model.placeholder
-import uk.xa0.dsh.model.showsHeader
 import uk.xa0.dsh.model.ungroupedTitle
 import uk.xa0.dsh.model.workspaceGroupState
 import uk.xa0.dsh.diag.DiagLazyList
@@ -485,34 +484,40 @@ fun SessionsDrawer(
             // on its own, so only the newest-first view needs holding.
             if (orderByUpdated) items = holdOrder(items, heldOrder)
             claimed += claimedIds
-            // A Workspace with no sessions at all is still a group: "Add
-            // workspace…" just created it, and hiding it made the row look inert.
-            // A Workspace whose members are all merely filtered out (search,
-            // archived, subagents) stays hidden — but one whose members are
-            // missing from the list itself does not, because that is a transient
-            // the user cannot see or fix.
+            // Every Workspace the registry reports is drawn, always: a Workspace whose
+            // members are all hidden by the Archived switch (or by the subagent rule, or
+            // by the automation lift-out) is still a directory that exists, and hiding it
+            // meant a persisted filter could erase it from the sidebar with nothing on
+            // screen to say why. That is a deliberate divergence from the web's
+            // `deriveGroups`, which drops a group with no visible members; see
+            // `model/WorkspaceGroups.kt` and `docs/PARITY.md`.
             //
-            // Those two zero-row cases are not the same claim, though, and the
-            // sidebar must not draw them alike: "this directory accounts for no
-            // session" is a fact the registry supplied, while "its sessions have not
-            // arrived" is not. [workspaceGroupState] keeps them apart and the group
-            // header plus its placeholder say which one it is; see
-            // `model/WorkspaceGroups.kt`.
+            // The three zero-row cases are not the same claim, though, and the sidebar
+            // must not draw them alike: "this directory accounts for no session" is a fact
+            // the registry supplied, "its sessions have not arrived" is not, and "its
+            // sessions are all filtered out" is a fact about this drawer rather than about
+            // the directory. [workspaceGroupState] keeps them apart and the group header
+            // plus its placeholder say which one it is.
+            //
+            // A tap keeps the one meaning a header has everywhere else — fold/unfold — so
+            // nothing here reveals the hidden members: on this client's own registry
+            // turning Archived on pours hundreds of rows into the list, and a folder glyph
+            // that sometimes folds and sometimes rewrites a global filter is two controls
+            // wearing one icon. The Archived switch beside the query box is the control for
+            // that, and it is already labelled.
             val state = workspaceGroupState(
                 memberIds = workspace.sessionIds,
                 visibleIds = items.map { it.id },
                 knownIds = known.keys,
             )
-            if (state.showsHeader) {
-                result += Section(
-                    key = workspace.id,
-                    title = workspace.title,
-                    rows = items.flatMap { disclose(it) },
-                    createIn = workspace.id,
-                    state = state,
-                    containsCurrent = currentId != null && currentId in workspace.sessionIds,
-                )
-            }
+            result += Section(
+                key = workspace.id,
+                title = workspace.title,
+                rows = items.flatMap { disclose(it) },
+                createIn = workspace.id,
+                state = state,
+                containsCurrent = currentId != null && currentId in workspace.sessionIds,
+            )
         }
 
         // Sessions outside every Workspace. The host labels this "Ungrouped" — a claim
@@ -910,10 +915,11 @@ fun SessionsDrawer(
                     }
 
                     // What a group with nothing in it means, in words. This is the row
-                    // that keeps "this Workspace has no sessions" apart from "its
-                    // sessions have not been loaded": those two states draw differently
-                    // here and in the header's count, and nowhere else on screen are
-                    // they distinguishable at all.
+                    // that keeps "this Workspace has no sessions", "its sessions are all
+                    // hidden by the drawer's filters" and "its sessions have not been
+                    // loaded" apart: those three states draw differently here and, while
+                    // membership is unknown, in the header's count — and nowhere else on
+                    // screen are they distinguishable at all.
                     section.state?.placeholder?.let { note ->
                         item(key = "note-${section.key}") { GroupNoteRow(note) }
                     }
@@ -1159,10 +1165,11 @@ private fun ShowMoreRow(label: String, onClick: () -> Unit) {
 /**
  * The one line a Workspace group draws when it has no rows: what that absence *means*.
  *
- * "No sessions" and "Sessions not loaded" are different claims about a directory, and
- * this row is where they are told apart — the header above it cannot carry the difference
- * alone, because a count of zero looks the same whether the registry said the directory is
- * empty or the roster has simply not delivered its members.
+ * "No sessions", "Sessions hidden by filters" and "Sessions not loaded" are different
+ * claims about a directory, and this row is where they are told apart — the header above it
+ * cannot carry the difference alone, because a count of zero looks the same whether the
+ * registry said the directory is empty, the drawer's own view rules emptied it, or the
+ * roster has simply not delivered its members.
  *
  * Deliberately not clickable: there is no session behind it and nothing a tap could
  * open. It sits where `ShowMoreRow` sits, in the same type, so a group with nothing in

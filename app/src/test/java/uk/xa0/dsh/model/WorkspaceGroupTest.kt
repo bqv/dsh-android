@@ -1,7 +1,6 @@
 package uk.xa0.dsh.model
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -10,15 +9,16 @@ import org.junit.Test
 /**
  * What the sidebar's Workspace groups are allowed to say.
  *
- * The whole point of these rules is that two groups which *look* alike on screen must not
- * be drawn alike when they mean different things: a directory the host says accounts for
- * no session, and a directory whose sessions this client has simply not been handed. The
- * drawer's own `remember` block cannot be reached from the JVM harness, so the rules live
- * in `WorkspaceGroups.kt` and are pinned here.
+ * The whole point of these rules is that groups which *look* alike on screen must not be
+ * drawn alike when they mean different things: a directory the host says accounts for no
+ * session, a directory whose sessions this client has not been handed, and a directory
+ * whose sessions this drawer's own view rules have all hidden. The drawer's own `remember`
+ * block cannot be reached from the JVM harness, so the rules live in `WorkspaceGroups.kt`
+ * and are pinned here.
  */
 class WorkspaceGroupTest {
 
-    // ---------------------------------------------------------------- empty vs loading
+    // ------------------------------------------------- empty vs loading vs filtered
 
     @Test
     fun `a Workspace the host accounts no sessions to is empty, and says so`() {
@@ -28,7 +28,6 @@ class WorkspaceGroupTest {
             knownIds = emptySet(),
         )
         assertEquals(WorkspaceGroupState.Empty, state)
-        assertTrue("an empty Workspace is a group the sidebar draws", state.showsHeader)
         assertEquals(WorkspaceCopy.NO_SESSIONS, state.placeholder)
         assertEquals("zero visible sessions is a fact here", 0, state.headerCount(0))
     }
@@ -41,7 +40,6 @@ class WorkspaceGroupTest {
             knownIds = setOf("a"),
         )
         assertEquals(WorkspaceGroupState.Loading, state)
-        assertTrue("the group is still drawn — its absence is the point", state.showsHeader)
         assertEquals(WorkspaceCopy.SESSIONS_NOT_LOADED, state.placeholder)
         assertNull(
             "a group that does not know its membership must not print a count",
@@ -50,39 +48,57 @@ class WorkspaceGroupTest {
     }
 
     @Test
-    fun `empty and loading are drawn differently in both places the group has`() {
+    fun `no two zero-row states say the same thing`() {
         val empty = workspaceGroupState(emptyList(), emptyList(), emptySet())
         val loading = workspaceGroupState(listOf("a"), emptyList(), emptySet())
+        val filtered = workspaceGroupState(listOf("a"), emptyList(), setOf("a"))
 
-        // The words, and the count. If either pair ever coincides, the sidebar is back
-        // to claiming "this directory has nothing" when it has merely not been told.
-        assertNotEquals(empty.placeholder, loading.placeholder)
+        // The words, and the count. If any pair of these ever coincides the sidebar is
+        // back to claiming one thing while meaning another — "this directory has nothing"
+        // when it has merely not been told, or when its reader's own filter is on.
+        val words = listOf(empty.placeholder, loading.placeholder, filtered.placeholder)
+        assertTrue("every zero-row state has words, none is silent", words.all { it != null })
+        assertEquals(
+            "each zero-row state has a sentence of its own",
+            3,
+            words.toSet().size,
+        )
         assertNotEquals(empty.headerCount(0), loading.headerCount(0))
+        // Empty and Filtered both draw a zero, and that zero is true of both — what is
+        // drawn under the header is what tells them apart.
+        assertEquals(empty.headerCount(0), filtered.headerCount(0))
     }
 
     @Test
-    fun `both zero-row states have words to draw`() {
+    fun `every zero-row state has words to draw`() {
         // A placeholder that silently went missing would leave an empty header looking
         // exactly like an empty directory.
         assertEquals("No sessions", WorkspaceGroupState.Empty.placeholder)
         assertEquals("Sessions not loaded", WorkspaceGroupState.Loading.placeholder)
+        assertEquals("Sessions hidden by filters", WorkspaceGroupState.Filtered.placeholder)
     }
 
     // ------------------------------------------------------------------------ filtered
 
     @Test
-    fun `members the filters hid are not a group at all`() {
-        // Every member is known — archived, a subagent, or simply not matching the
-        // query. The reader did that and can undo it, so an empty header would be the
-        // drawer reporting their own filter back as a fact about the directory.
+    fun `a Workspace whose only sessions are archived is drawn, and says the filters hide them`() {
+        // The reader's own report: a Workspace holds only archived sessions, the Archived
+        // switch is off, and the drawer dropped the whole group — so the Workspace looked
+        // like it did not exist. Archived sessions and subagents are *known* members (the
+        // drawer hands this the unfiltered roster), so the group is Filtered; Filtered now
+        // draws, because the registry always outranks the reader's persisted filter.
         val state = workspaceGroupState(
-            memberIds = listOf("a"),
+            memberIds = listOf("archived", "subagent"),
             visibleIds = emptyList(),
-            knownIds = setOf("a"),
+            knownIds = setOf("archived", "subagent", "unrelated"),
         )
         assertEquals(WorkspaceGroupState.Filtered, state)
-        assertFalse(state.showsHeader)
-        assertNull(state.placeholder)
+        assertEquals(WorkspaceCopy.SESSIONS_HIDDEN, state.placeholder)
+        assertEquals(
+            "nothing is drawn under the header, so its figure is a fact",
+            0,
+            state.headerCount(0),
+        )
     }
 
     @Test
@@ -90,7 +106,7 @@ class WorkspaceGroupTest {
         // The drawer hands this the *unfiltered* roster: archived sessions and subagents
         // are delivered rows, not missing ones. Calling them missing would put a
         // permanent "Sessions not loaded" under every Workspace whose sessions are all
-        // archived.
+        // archived, when the truth is that the reader's own switch is hiding them.
         val state = workspaceGroupState(
             memberIds = listOf("archived", "subagent"),
             visibleIds = emptyList(),
