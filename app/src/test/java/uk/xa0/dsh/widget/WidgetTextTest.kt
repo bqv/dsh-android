@@ -27,12 +27,23 @@ class WidgetTextTest {
         workingKnown: Boolean = true,
         working: Int = 0,
         subagents: Int = 0,
+        activeKnown: Boolean = false,
+        active: Int = 0,
         running: List<WidgetSession> = emptyList(),
         asOf: Long = at,
     ) = WidgetSnapshot(
         needsYou = WidgetReading(known = needsKnown, value = needs, asOf = asOf),
         working = WidgetReading(known = workingKnown, value = working, asOf = asOf),
         subagents = WidgetReading(known = workingKnown, value = subagents, asOf = asOf),
+        // The default is an activity reading nobody confirmed, which is what a document
+        // written before this reading existed carries. A reading is only "ever seen" when
+        // it was confirmed, so an unconfirmed one must be given no instant to bound the
+        // footer with either.
+        active = WidgetReading(
+            known = activeKnown,
+            value = active,
+            asOf = if (activeKnown) asOf else 0L,
+        ),
         running = running,
         kind = kind,
     )
@@ -211,7 +222,10 @@ class WidgetTextTest {
                 running = sessions("Alpha", "Beta", "Gamma"),
             ),
         )
-        assertEquals("Running: unknown", text.detail)
+        // The headline takes the unknown over the quiet sentence: what is running cannot
+        // be said, and that is more useful to a reader than "Nothing needs you".
+        assertEquals("Running: unknown", text.headline)
+        assertNull("the detail would be the same sentence twice", text.detail)
         assertEquals(emptyList<WidgetSession>(), text.rows)
         assertNull(text.moreLabel)
     }
@@ -224,8 +238,134 @@ class WidgetTextTest {
     @Test
     fun `a withdrawn reading with no names still says unknown rather than nothing`() {
         val text = WidgetCopy.of(snapshot(workingKnown = false, working = 3, running = emptyList()))
-        assertEquals("Running: unknown", text.detail)
+        assertEquals("Running: unknown", text.headline)
+        assertNull(text.detail)
         assertEquals(emptyList<WidgetSession>(), text.rows)
+    }
+
+    /**
+     * The indicator the reader asked for, and the whole point of the activity reading: two
+     * cards that both name the same running sessions are told apart by whether the host is
+     * still talking to the app. "Working" is only available while that is confirmed;
+     * "Running" is the roster's own word and claims no freshness.
+     */
+    @Test
+    fun `a running list says working while the host is talking and running when it is not`() {
+        val named = sessions("Fix the login bug")
+        assertEquals(
+            "a host that is still talking is evidence the sessions are at work",
+            "Working",
+            WidgetCopy.of(snapshot(working = 1, activeKnown = true, active = 1, running = named)).headline,
+        )
+        assertEquals(
+            "once the host has fallen quiet the roster's own word is used, and it claims no freshness",
+            "Running",
+            WidgetCopy.of(snapshot(working = 1, activeKnown = true, active = 0, running = named)).headline,
+        )
+    }
+
+    /**
+     * The substitution this design exists to prevent, at the new word: a reading nobody
+     * confirmed is not a reading of zero. An activity reading the app cannot assert must
+     * withhold the stronger word rather than draw the weaker one as though it had been
+     * measured — and must certainly not be read as "nothing is happening".
+     */
+    @Test
+    fun `an activity reading nobody confirmed never draws the stronger word`() {
+        val never = WidgetCopy.of(snapshot(working = 2, activeKnown = false, active = 1))
+        assertEquals("Running", never.headline)
+        assertEquals("2 running", never.detail)
+
+        // And the confirmed-zero case is the same word, for a different and equally true
+        // reason: the roster is what is being reported, and it does not claim freshness.
+        val quiet = WidgetCopy.of(snapshot(working = 2, activeKnown = true, active = 0))
+        assertEquals("Running", quiet.headline)
+    }
+
+    /**
+     * Activity is evidence *about* work, not a substitute for it. A host that is talking
+     * about something else — a session being opened, a queue frame, a workspace change —
+     * with nothing running does not turn the headline into a claim of work.
+     */
+    @Test
+    fun `host traffic with nothing running is not drawn as work`() {
+        assertEquals(
+            "Nothing needs you",
+            WidgetCopy.of(snapshot(working = 0, activeKnown = true, active = 1)).headline,
+        )
+    }
+
+    /**
+     * The priority order, stated as the three-way conflict it is: something waiting on a
+     * human outranks a running list, and a running list outranks the quiet sentence.
+     */
+    @Test
+    fun `the headline is the most useful true fact in priority order`() {
+        assertEquals(
+            "an approval outranks any amount of activity",
+            "Approval waiting",
+            WidgetCopy.of(
+                snapshot(needs = 1, kind = "APPROVAL", working = 3, activeKnown = true, active = 1),
+            ).headline,
+        )
+        assertEquals(
+            "and an unknown that could be an approval outranks activity too",
+            "Needs you: unknown",
+            WidgetCopy.of(snapshot(needsKnown = false, working = 3, activeKnown = true, active = 1)).headline,
+        )
+        assertEquals(
+            "with nothing waiting, the running fact is the headline",
+            "Working",
+            WidgetCopy.of(snapshot(working = 3, activeKnown = true, active = 1)).headline,
+        )
+        assertEquals(
+            "and the quiet sentence is only what is left when nothing is running",
+            "Nothing needs you",
+            WidgetCopy.of(snapshot(working = 0, activeKnown = true, active = 0)).headline,
+        )
+    }
+
+    /**
+     * The headline's own reading has to be inside the footer's bound, or the word at the
+     * top of the card is the one claim nothing below it covers. The activity reading is
+     * the older of the two here, so only an implementation that bounds the card by it can
+     * produce the answer.
+     */
+    @Test
+    fun `the activity reading bounds the card like every other drawn fact`() {
+        val text = WidgetCopy.of(
+            WidgetSnapshot(
+                needsYou = WidgetReading(known = true, value = 0, asOf = at),
+                working = WidgetReading(known = true, value = 1, asOf = at),
+                subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                active = WidgetReading(known = true, value = 1, asOf = at - 600_000),
+            ),
+        )
+        assertEquals("Working", text.headline)
+        assertEquals(
+            "the headline's word is only as good as the instant that reading was confirmed",
+            at - 600_000,
+            text.ageInstant,
+        )
+    }
+
+    /**
+     * A withdrawn activity reading is still a reading that was once taken, so the instant
+     * it stopped being confirmable still bounds the card — the same rule the other
+     * readings are held to.
+     */
+    @Test
+    fun `a withdrawn activity reading still bounds the card`() {
+        val text = WidgetCopy.of(
+            WidgetSnapshot(
+                needsYou = WidgetReading(known = true, value = 0, asOf = at),
+                working = WidgetReading(known = true, value = 2, asOf = at),
+                subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                active = WidgetReading(known = false, value = 1, asOf = at - 600_000),
+            ),
+        )
+        assertEquals("Running", text.headline)
+        assertEquals(at - 600_000, text.ageInstant)
     }
 
     /**

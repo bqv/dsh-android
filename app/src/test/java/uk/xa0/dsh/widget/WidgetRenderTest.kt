@@ -207,6 +207,37 @@ class WidgetRenderTest {
     }
 
     /**
+     * The indicator, as the launcher would draw it: the same running list, and a headline
+     * whose word follows the activity reading. This is the one line that changes, which is
+     * what keeps the card from spending a redraw on a per-second tick.
+     */
+    @Test
+    fun `the headline word follows the activity reading`() {
+        fun card(active: WidgetReading) = WidgetCopy.of(
+            WidgetSnapshot(
+                needsYou = WidgetReading(known = true, value = 0, asOf = 1L),
+                working = WidgetReading(known = true, value = 2, asOf = 1L),
+                subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                active = active,
+            ),
+        )
+
+        assertEquals(
+            "Working",
+            draw(card(WidgetReading(known = true, value = 1, asOf = 1L))).headline().text.toString(),
+        )
+        assertEquals(
+            "Running",
+            draw(card(WidgetReading(known = true, value = 0, asOf = 1L))).headline().text.toString(),
+        )
+        assertEquals(
+            "an activity reading nobody confirmed withholds the stronger word",
+            "Running",
+            draw(card(WidgetReading.NEVER)).headline().text.toString(),
+        )
+    }
+
+    /**
      * Every row's tap has to be its own. `Intent.filterEquals` — which is what decides
      * whether two `PendingIntent`s are the same one — compares everything *except* the
      * extras, so three rows carrying three session ids would collapse into a single

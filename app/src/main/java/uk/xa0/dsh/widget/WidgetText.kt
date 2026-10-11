@@ -47,6 +47,14 @@ enum class WidgetLevel { QUIET, ATTENTION, UNKNOWN }
  *    left to withdraw them with. A stamp that names a past instant is the only kind of
  *    claim that cannot be left behind — there is nothing to withdraw, because nothing in
  *    it ever becomes untrue.
+ *  * **The headline is the most useful true fact, not the calmest one.** "Nothing needs
+ *    you" is true nearly always and says almost nothing, which is why it is now the
+ *    *fallback* rather than the default: something waiting is said first, a running list
+ *    is said next ([WORKING] while the host is talking, [RUNNING] otherwise), and the
+ *    quiet sentence is drawn only when nothing is waiting and nothing is running. Each of
+ *    those is a reading with a `known` flag and an instant, so the footer's bound covers
+ *    the headline as it covers every other line — and a fact the card cannot confirm is
+ *    never quietly replaced by one it can.
  *  * **A name is only drawn behind a reading that can still assert it.** The running
  *    list is the detail of the *running* reading, not a fact of its own: when that
  *    reading is withdrawn the list is gone with it, and the card says `Running: unknown`
@@ -54,6 +62,15 @@ enum class WidgetLevel { QUIET, ATTENTION, UNKNOWN }
  *    running", the one thing an unknown roster does not entitle anyone to say.
  */
 data class WidgetText(
+    /**
+     * The single most useful true fact the card can support, chosen by [WidgetCopy.of] in
+     * the priority order its own comment records. It is drawn from a reading and never
+     * from a guess: the needs line from `needsYou`, [WidgetCopy.WORKING] and
+     * [WidgetCopy.RUNNING] from `working` gated by `active`, [WidgetCopy.RUNNING_UNKNOWN]
+     * from `working.known`, and the quiet sentence from both. Each of those readings is in
+     * [WidgetSnapshot.confirmedAt], so [ageInstant] bounds the headline as it bounds every
+     * other line — no word here is outside the footer's claim.
+     */
     val headline: String,
     /** Null when there is nothing honest to put on a second line. */
     val detail: String?,
@@ -100,6 +117,31 @@ object WidgetCopy {
     const val NEEDS_NOTHING = "Nothing needs you"
     const val RUNNING_UNKNOWN = "Running: unknown"
     const val RUNNING_NOTHING = "Nothing running"
+
+    /**
+     * The headline for a list of sessions the host is *currently talking about*: the
+     * activity reading is confirmed, so the app is not reading a roster it pulled and
+     * then stopped hearing about — it is watching the host work.
+     *
+     * The word is earned, not decorative. It is drawn only when the roster already says
+     * something is running ([WidgetSnapshot.working] above zero) *and*
+     * [WidgetSnapshot.active] is confirmed, so it never claims work the host has not
+     * reported and never claims liveness the app cannot see. When either falls the card
+     * says [RUNNING] instead, which is the roster's own word and claims no freshness.
+     */
+    const val WORKING = "Working"
+
+    /**
+     * The headline for sessions the roster says are running while the app is not hearing
+     * the host right now — an agent inside a long tool call, or a reading renewed from
+     * the last whole-world pull.
+     *
+     * It is the same word the roster uses for the condition (`session/list`'s own
+     * `running`), which is why it is the honest fallback and not a weaker synonym: it
+     * asserts exactly what was established, at the instant the footer prints, and nothing
+     * about whether anything is happening this second.
+     */
+    const val RUNNING = "Running"
 
     /**
      * The footer's word, and it names the **bound** rather than the app's activity.
@@ -240,19 +282,63 @@ object WidgetCopy {
         )
 
         val needs = snapshot.needsYou
-        val headline = when {
-            !needs.known -> NEEDS_UNKNOWN
-            needs.value <= 0 -> NEEDS_NOTHING
-            needs.value == 1 -> singleHeadline(snapshot.kind)
-            else -> "${needs.value} need you"
-        }
-
+        val working = snapshot.working
         val running = runningLine(snapshot)
+
+        // The headline's whole job is to be the most useful true fact the card can
+        // support, in that order:
+        //
+        //  1. Something is waiting on a human. It is the only urgent fact here, and the
+        //     only one that is useless late.
+        //  2. Whether anything is waiting cannot be told. An unknown that could be an
+        //     approval outranks a positive that is merely interesting.
+        //  3. Sessions are running and the host is talking: they are *working*, not just
+        //     listed — the fact this card previously spent on "Nothing needs you".
+        //  4. Sessions are running per the roster, with no live traffic to confirm it.
+        //     The same claim in the roster's own word, which claims no freshness.
+        //  5. Nothing is running and nothing needs you: the quiet sentence, which is only
+        //     drawn now that it is genuinely the whole truth.
+        //  6. The roster cannot be read, so what is running cannot be said at all.
+        //
+        // Every one of these is a reading with a `known` flag and an instant, and every
+        // reading it draws from is in [WidgetSnapshot.confirmedAt], so the footer's bound
+        // covers the headline as it covers everything else.
+        val headline: String
+        val detail: String?
+        when {
+            !needs.known -> {
+                headline = NEEDS_UNKNOWN
+                detail = running.detail
+            }
+
+            needs.value > 0 -> {
+                headline = if (needs.value == 1) singleHeadline(snapshot.kind) else "${needs.value} need you"
+                detail = running.detail
+            }
+
+            // The roster is the only whole-world answer to "what is running", so when it
+            // cannot be read the headline says that rather than the quiet sentence. The
+            // detail is dropped because it would be the same sentence twice.
+            !working.known -> {
+                headline = RUNNING_UNKNOWN
+                detail = null
+            }
+
+            working.value > 0 -> {
+                headline = if (hostIsTalking(snapshot.active)) WORKING else RUNNING
+                detail = running.detail
+            }
+
+            else -> {
+                headline = NEEDS_NOTHING
+                detail = running.detail
+            }
+        }
 
         val stamp = snapshot.confirmedAt
         return WidgetText(
             headline = headline,
-            detail = running.detail,
+            detail = detail,
             stampLabel = if (stamp != null) STAMP_OLDEST else STAMP_OPEN,
             ageInstant = stamp,
             level = when {
@@ -264,6 +350,19 @@ object WidgetCopy {
             moreLabel = running.more,
         )
     }
+
+    /**
+     * Whether the host has spoken recently enough for the card to call a running list
+     * *working*.
+     *
+     * Confirmed and positive, both, because the two failures here are not symmetric. A
+     * [WidgetReading.NEVER] activity reading drawn as "not talking" would render "I cannot
+     * tell" as "nothing is happening", which is the one substitution this widget exists
+     * to prevent; drawing it as "talking" would claim evidence nobody has. So an unknown
+     * activity reading withholds the stronger word and the card falls back to [RUNNING],
+     * which is still true.
+     */
+    private fun hostIsTalking(active: WidgetReading): Boolean = active.known && active.value > 0
 
     /**
      * What the card can say about what is running: either a handful of names, or one line

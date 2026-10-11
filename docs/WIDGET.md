@@ -13,7 +13,7 @@ answered. The answer is not a layout.
 A headline, a list, and a stamp.
 
 ```
-Approval waiting            <- headline: what is waiting on a human
+Approval waiting            <- headline: the most useful true fact, in priority order
 3 running                   <- ...or, when the app can name them, the names themselves:
 · Fix the login bug
 · Widget sessions
@@ -90,6 +90,113 @@ drops them and the card says `Running: unknown` — because a list of names unde
 the app can no longer assert is exactly the stale-and-quietly-wrong card this feature
 exists to prevent.
 
+### The headline is the most useful true fact
+
+An earlier revision spent the headline on `Nothing needs you` whenever nothing was
+waiting. That is almost always true, which is exactly the problem: a headline that is
+nearly always the same words has stopped being a headline, and the reader learns to skip
+the first line of a card they have deliberately put where they cannot skip it. The
+sentence is not a lie; it is the *least informative* true thing the card can say.
+
+So the headline has a priority order now, and every branch of it is a reading with a
+`known` flag and an instant:
+
+1. **`Approval waiting` / `3 need you`.** Something is parked on a human. It is the only
+   urgent fact in the app and the only one that is useless late, and the host gives up on
+   it (an approval lapses after five minutes, a question after fifteen).
+2. **`Needs you: unknown`.** The app cannot rule an approval out. An unknown that could be
+   urgent outranks a positive that is merely interesting, so this sits above everything
+   below even when a running list is in hand.
+3. **`Working`.** Sessions are running *and* the host has spoken to this app inside the
+   activity window — the indicator the next section is about. The list is not merely being
+   displayed; the app is watching the host work.
+4. **`Running`.** Sessions are running per the roster, with no live traffic to confirm it
+   — an agent inside a long tool call, or a reading renewed from the last whole-world
+   pull. It is the roster's own word for the condition (`session/list`'s `running`), so it
+   asserts exactly what was established and nothing about this second.
+5. **`Nothing needs you`.** Nothing is waiting and nothing is running. This is the
+   fallback now, and the story above is why it had to become one.
+6. **`Running: unknown`.** The roster cannot be read, so what is running cannot be said at
+   all. The second line is dropped rather than repeating the sentence.
+
+The card's second line is unchanged: the running sessions by name when they can be named,
+otherwise the count and its subagent qualifier, otherwise the reason it cannot say. The
+headline takes no space from it — the layout is the same set of `TextView`s it always was,
+and no new view, colour or dependency was added.
+
+### What "active" means, and what it does not
+
+`active` is a reading, `(known, value, asOf)`, exactly like the others:
+
+- **`value` is 1 while the host has delivered a frame on the mux within
+  `WidgetPublisher.ACTIVE_WINDOW_MS`** (two minutes), and 0 once that window has lapsed.
+- **`known` is the mux socket being `OPEN`** — the app's ability to hear at all. A socket
+  that is down is `known = false`, which is a different statement from a confirmed zero
+  and is never drawn as one.
+- **`asOf` is renewed by the one-second loop that already reads the socket**, so the
+  footer's bound covers the word the headline draws from it, like every other reading.
+
+It is deliberately **not a second count of sessions.** The roster already answers "how
+many are running" (`working`), and it is the host's own liveness answer. What the roster
+cannot say is whether the app is still hearing the host at all — a `session/list` pull is
+a cut, and a cut does not go on being true. `active` is that fact, and it is what lets the
+card say *working* rather than *running*.
+
+**It costs no new Remote call.** The host already tells us: `RemoteMux.Listener.onMessage`
+is where every frame lands, and it stamps an `AtomicLong` before it even parses the frame.
+The reading is then reduced on the one-second loop the view model already runs, and the
+publisher draws it only when the value moves. To keep is one `AtomicLong` store per frame
+and one comparison per second; nothing new is registered, polled or woken.
+
+**The definition had to be true of the whole system, and that is what chose it.** The
+candidates that were rejected, and why:
+
+| Candidate | Verdict |
+| --- | --- |
+| A turn streaming in a session | **Rejected.** `session/follow` is opened for exactly **one** session — the one on screen, through `DshViewModel.startFollow`. A turn streaming in any other session is invisible to this app, so this fact cannot speak for the world. (The view model's own `lastEventAt` is stamped from that one stream, for the same reason.) |
+| A live background job | **Rejected.** `job/list` is per-session and the running 0.2.0-rc.2 host no longer pushes an app-wide `jobs` block on `session/control`. A job figure would present one session's jobs as the world's — the same ground the jobs count was cut on. |
+| A running subagent | **Rejected, but only as an *indicator*.** It *is* whole-world — it comes from the roster — but it is a subset of `working`, which is already on the card, so it would add a number rather than a fact. |
+| Socket-level activity | **Chosen.** Every logical stream the app holds — the forwarded host events, `session/control`, `workspace/follow`, the followed session, jobs and terminals — rides the one mux socket. A frame arriving is therefore a fact about the whole system: the host is doing something somewhere. |
+
+**Why frames and not pings.** This is the part that makes the reading mean anything. The
+stream client dials with `pingInterval(20, SECONDS)` (`DshClient.buildClients`), and
+OkHttp handles ping, pong and close as WebSocket *control* frames inside the socket rather
+than through `WebSocketListener.onMessage`. So a socket kept alive by nothing but its own
+pings looks quiet here. A live TCP connection is not activity; a text frame is.
+
+**Why the value is a window and not an instant.** `value = 1` means "the host has spoken
+recently", which is a state the card can draw and a word it can put at the top. Printing
+the frame instant instead would move the value on every frame — a token stream delivers
+many a second — and the publisher's rule is that a moved value is drawn at once, which is
+precisely the per-second cost this feature just had removed. The window is what collapses
+a stream of frames into one state that changes only at its edges.
+
+**What the card shows when the app cannot tell.** When the socket is down, `active` is
+`known = false`, and the copy layer withholds the stronger word: the headline falls to
+`Running` (if the roster is known) or to the unknown sentences above it. An unknown
+activity reading is never rendered as "nothing is active" — it is not rendered as
+anything at all, because the card withholds the claim rather than asserting its negation.
+The same is true of a document written before this key existed: an absent `active` decodes
+as never confirmed, which is the same withholding.
+
+**What it does not claim.** `Working` is drawn only when the roster already reports
+something running *and* the activity reading is confirmed. Host traffic with nothing
+running — opening a session, a queue frame, a workspace change — cannot turn the headline
+into a claim of work. And when the host falls quiet for longer than the window the card
+falls back to `Running`, which is still true; the activity signal can strengthen a running
+list but it can never manufacture one.
+
+**Why `Working` is not the forbidden "live" lamp.** It is a word, not a badge, and it is
+drawn from a reading whose instant the footer prints — the activity reading is part of
+`WidgetSnapshot.confirmedAt`, so `oldest reading 11 Oct 12:03` bounds it exactly as it
+bounds a name. A lamp is a claim about *now* with nothing under it to age; `Working` is the
+stronger of two true words for a fact the two readings already carry, and it expires in the
+reader's own eyes the moment its instant looks old. When the app is alive the card withdraws
+it by redrawing on the `1 → 0` edge; when the app is dead it is bounded by the same stamp
+as everything else on the card. There is no new failure mode here, and there is no new
+wake-up: the draw that withdraws the word is one the publisher was already going to make
+for the value change.
+
 ### What earns a place, and what was cut
 
 Ranked by "would I want to know this without opening the app":
@@ -98,6 +205,7 @@ Ranked by "would I want to know this without opening the app":
 | --- | --- | --- |
 | Approvals, questions and plan reviews | **Yes**, as a count and the highest-precedence kind | The agent is *blocked* until it is answered, and the host gives up: an approval lapses after 5 minutes, a question after 15. It is the one fact in this app that is both urgent and useless late. `AttentionCenter` already owns it and already drives notifications from it. |
 | Sessions and subagents with an agent working | **Yes**, by name | The difference between "still going" and "finished while I was away" is the question a person actually has while their phone is in their hand, and *which one* is the very next question. The roster makes it answerable: `session/list` is a whole-world pull this app already makes, and every row already carries `running`. |
+| Whether the app is still hearing the host | **Yes**, as the headline's word | It is the difference between a list that is being watched and one that was true when it was pulled. Every stream shares one socket, so a frame on it is a fact about the whole system, and the app is already reading that socket once a second — the reading costs one clock comparison per tick and is drawn only when it moves. |
 | Which session and model a turn would run | **No** | That is composer state, not a glance: it is a fact about a screen the reader is not on, it is per-session, and the model chip is already the most lie-prone thing in the app (see the `lastUsed`/`next` trap in `docs/HANDOFF.md`). |
 | Background jobs | **No** | They are only known for the session the app has **open** — `job/list` is a per-session stream — so a widget showing "2 jobs" would be silently reporting one session's jobs as if they were the world's. A count that is right for one session and wrong for every other is worse than no count. This is exactly why the roster could be listed and the jobs could not: the roster is app-wide, the jobs are per-session. |
 | Account balance | **No** | `BalanceState.Idle` until the usage panel is opened, so on a fresh process it is *not known*; it costs a network call to DeepSeek with the user's own key; and a money figure is the worst possible thing to leave on a homescreen going quietly out of date. |
@@ -142,6 +250,13 @@ records. The same pull is what makes the *names* assertable, and the same `known
 covers them: when it falls the publisher drops the names and the card says
 `Running: unknown`, because an empty list and an unknown one must never be drawn the same
 way.
+
+`known` for "is the host talking to us" is `muxState == OPEN` alone — the activity reading
+is built from frames on the socket, so the ability to observe it is the socket and nothing
+else. The two unknowns differ and are kept apart: a dropped socket is "I cannot tell
+whether anything is active", while `known = true, value = 0` is "I am listening and the
+host has been quiet for two minutes". Neither is drawn as "nothing is active"; the card
+withholds the word rather than asserting its negation.
 
 ### The stamp is an instant, not a ticking view
 
@@ -236,11 +351,13 @@ Nothing is scheduled. `updatePeriodMillis` is **0**.
 - **When the app is running**, `AttentionCenter` publishes on every change of the pending
   set, on every socket state change, and from `DshConnectionService`'s keep-alive loop;
   the view model publishes on every roster-running change and from the one-second loop
-  that already watches the mux, handing over every running session and its title.
+  that already watches the mux, handing over every running session and its title, and — on
+  the same tick — whether a host frame arrived inside `ACTIVE_WINDOW_MS`.
   `WidgetPublisher` collapses all of that into a file write and a widget update at most
   once per `HEARTBEAT_MS`, or immediately when a value moves — and a rename is a value
-  moving, because the title is a thing the card draws. The write and the draw are off the
-  main thread and coalesced through a conflated channel.
+  moving, because the title is a thing the card draws, and so is an activity change,
+  because it decides the headline's word. The write and the draw are off the main thread
+  and coalesced through a conflated channel.
 
   That collapse is now real on **both** halves, and the gap between them is the largest
   cost this feature ever had. The write was gated on the heartbeat and the *draw* was not,
@@ -252,6 +369,14 @@ Nothing is scheduled. `updatePeriodMillis` is **0**.
   either. This is what "staggering" the widget actually turned out to mean: the ticking
   view could not be staggered, and did not need to be, because the cost that could be
   removed was entirely our own.
+
+  **The activity reading does not reopen that cost.** It is recomputed on every tick —
+  one `lastHostFrameAt()` read and one subtraction — but the value only moves at the two
+  edges of a burst of work: `0 → 1` when the host starts talking and `1 → 0` a window
+  after it stops. While a turn streams, frames arrive many times a second and the value
+  stays at 1, so not one of them reaches the launcher. While nothing is happening it stays
+  at 0. An idle app therefore draws exactly what it drew before this reading existed: the
+  quarter-hour heartbeat, and nothing else.
 - **When the app is not running**, nothing at all happens. Every number on the card
   arrived over a socket; a wake-up could only re-read the same file and draw the same
   bytes, one interval older. The instant the card already carries is what says how old it
@@ -292,11 +417,18 @@ DshViewModel ────┘        (the one writer)                            
   drew before). A version bump would have blanked **every widget already on a homescreen**
   to "not known" until the app next ran, and this change does not need that. The version
   exists for documents a build cannot read at all.
+
+  `active` is optional on the same terms and for the same reason. An absent key decodes as
+  `WidgetReading.NEVER` — "nobody said" — which is a state the copy layer already knows how
+  to draw: it withholds the word that would otherwise have claimed activity, and the
+  headline falls back to the roster's own `Running`. A *present* key this build cannot
+  parse is a different thing, a document contradicting itself, and is refused rather than
+  guessed at.
 - **Seeded from the last run at construction.** A restart does not make yesterday's
   reading false, it makes it old, which is what its instant already says. Starting from
   nothing would instead claim that nothing was ever seen, which is a *worse* lie than an
-  old number. The names come back with it, and are drawn under the new stamp like every
-  other reading.
+  old number. The names and the activity reading come back with it, and are drawn under the
+  new stamp like every other reading.
 
 ## Why this is plain `RemoteViews` and not Glance
 
@@ -386,6 +518,20 @@ whole document is about:
   is therefore the narrow one: a per-second binder call into the system service and a
   per-second `RemoteViews` re-apply are gone, and nothing on the card re-renders on a timer
   any more.
+- **The activity reading's cadence is reasoned, not watched.** That the mux is quiet when
+  nothing is happening is an argument from the source: the `$events` stream forwards
+  transitions (`AttentionCenter` handles `emit` frames only), `session/control`
+  pushes on change, `workspace/follow` pushes on change, and the only periodic traffic on
+  the socket is the 20-second WebSocket ping, which OkHttp answers as a control frame that
+  never reaches `onMessage`. No frame count has been taken from a running app, because the
+  mux's own logging prints the head of each stream only (`seen <= 3`) and instrumenting the
+  app to measure it would be a change made to observe a change. What *is* pinned in source
+  is where the reading comes from (`RemoteMux.Listener.onMessage` stamps `lastFrameAt`) and
+  the two edges the publisher draws on.
+- **The `Working` / `Running` words have not been read on a device.** They are two strings
+  in a `TextView` that already exists, so there is no new layout risk; what is unverified is
+  whether a reader finds the distinction as legible as this document claims, which is a
+  judgement and not something a JVM harness can answer.
 - **`WidgetPublisher`'s dispatch is `Dispatchers.Unconfined` in tests and `Dispatchers.IO`
   in the app**; the tests therefore exercise the decisions — `publishDue`'s among them —
   and neither the thread hop nor the binder call the decisions lead to, which a JVM cannot

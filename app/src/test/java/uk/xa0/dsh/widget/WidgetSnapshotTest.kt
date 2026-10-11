@@ -72,6 +72,7 @@ class WidgetSnapshotTest {
             needsYou = WidgetReading(known = true, value = 2, asOf = at),
             working = WidgetReading(known = true, value = 3, asOf = at + 1),
             subagents = WidgetReading(known = true, value = 1, asOf = at + 2),
+            active = WidgetReading(known = true, value = 1, asOf = at + 3),
             running = listOf(
                 WidgetSession("session-a771fb9b", "Fix the login bug"),
                 WidgetSession("session-b9b", "Widget sessions"),
@@ -84,11 +85,49 @@ class WidgetSnapshotTest {
     }
 
     /**
+     * The activity reading decides which word the headline draws, so it is part of what
+     * the document says about the world — not an instant like `asOf` that a fresher
+     * renewal may move for free.
+     */
+    @Test
+    fun `an activity change is a change to what the card says`() {
+        val quiet = WidgetSnapshot(active = WidgetReading(known = true, value = 0, asOf = at))
+        val talking = quiet.copy(active = WidgetReading(known = true, value = 1, asOf = at))
+
+        assertFalse(quiet.sameValuesAs(talking))
+        assertFalse(talking.sameValuesAs(quiet))
+        // And unknown is a third state, not a zero.
+        assertFalse(quiet.sameValuesAs(quiet.copy(active = WidgetReading(known = false, value = 0, asOf = at))))
+        // A fresher instant for the same activity still is not news.
+        assertTrue(talking.sameValuesAs(talking.copy(active = talking.active.copy(asOf = at + 60_000))))
+    }
+
+    /**
+     * The activity reading bounds the card because it is drawn: the headline's word comes
+     * from it. Leaving it out of [WidgetSnapshot.confirmedAt] would leave the top line as
+     * the one claim the footer no longer covers.
+     */
+    @Test
+    fun `the activity reading is part of the oldest-reading bound`() {
+        val snapshot = WidgetSnapshot(
+            needsYou = WidgetReading(known = true, value = 0, asOf = at),
+            working = WidgetReading(known = true, value = 1, asOf = at),
+            subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+            active = WidgetReading(known = true, value = 1, asOf = at - 90_000),
+        )
+        assertEquals(at - 90_000, snapshot.confirmedAt)
+    }
+
+    /**
      * The document written by the build before this change has no `running` key at all.
      * It must still decode: the readings are the whole of what it claims, and "no names
      * were written down" is a state this build can draw honestly (the count alone).
      * Refusing it would blank every widget already on a homescreen for no gain — which is
      * exactly why [WidgetSnapshot.VERSION] was not bumped when the list was added.
+     *
+     * The same document has no `active` key either, and that is a reading this build
+     * must not invent: it decodes as never confirmed, so the copy layer falls back to the
+     * roster's own word rather than drawing an activity claim the old document never made.
      */
     @Test
     fun `an older document with no running list still reads, with no names in it`() {
@@ -97,10 +136,12 @@ class WidgetSnapshotTest {
                 needsYou = WidgetReading(known = true, value = 1, asOf = at),
                 working = WidgetReading(known = true, value = 3, asOf = at),
                 subagents = WidgetReading(known = false, value = 0, asOf = 0L),
+                active = WidgetReading(known = true, value = 1, asOf = at),
                 kind = "APPROVAL",
             ).encode(),
         )
         older.remove("running")
+        older.remove("active")
 
         val decoded = WidgetSnapshot.decode(older.toString())
         assertEquals(
@@ -110,6 +151,34 @@ class WidgetSnapshotTest {
         )
         assertTrue(decoded?.working?.known == true)
         assertTrue(decoded?.running?.isEmpty() == true)
+        assertTrue("an absent activity reading is 'nobody said', not a confirmation", decoded?.active?.known == false)
+        assertFalse(decoded?.active?.everSeen == true)
+    }
+
+    /**
+     * An absent `active` key is an older document and is read; a *present* one that is not
+     * a reading is a document contradicting itself, and is refused like any other
+     * unreadable shape. Guessing here would be a claim about the world drawn from a byte
+     * nobody wrote — and the safe direction is not available, because "not a reading" also
+     * covers a value that was *meant* to assert something.
+     */
+    @Test
+    fun `a present but unreadable activity reading is refused rather than guessed at`() {
+        val partial = JSONObject(WidgetSnapshot.NEVER.encode())
+        partial.put("active", JSONObject().put("known", true))
+        assertNull(WidgetSnapshot.decode(partial.toString()))
+
+        val notAnObject = JSONObject(WidgetSnapshot.NEVER.encode())
+        notAnObject.put("active", 1)
+        assertNull(WidgetSnapshot.decode(notAnObject.toString()))
+
+        // JSON null, on the other hand, is how a writer says "nothing here", and reads as
+        // the same absent key an older document has.
+        val nulled = JSONObject(WidgetSnapshot.NEVER.encode())
+        nulled.put("active", JSONObject.NULL)
+        val decoded = WidgetSnapshot.decode(nulled.toString())
+        assertTrue(decoded?.active?.known == false)
+        assertFalse("never confirmed is not the same as confirmed zero", decoded?.active?.everSeen == true)
     }
 
     @Test
