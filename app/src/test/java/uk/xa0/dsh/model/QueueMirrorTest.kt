@@ -72,8 +72,9 @@ class QueueMirrorTest {
         )
 
         assertEquals("one two three", rows.single().preview)
-        // `textOf` joins with no separator, unlike the preview.
-        assertEquals("  one\n\n twothree", rows.single().text)
+        // `textOf` joins with no separator, unlike the preview — so the trailing
+        // space of the first block stays, and there is no space before "three".
+        assertEquals("  one\n\n two three", rows.single().text)
     }
 
     @Test
@@ -85,12 +86,31 @@ class QueueMirrorTest {
         )
 
         val row = rows.single()
-        assertEquals("see this [image]", row.preview)
+        // `previewOf` filters image and file blocks out: an attachment draws a chip
+        // of its own, and the preview is the *non-attachment* content only. `[type]`
+        // is for an unknown block, not for an attachment — see the next test.
+        assertEquals("see this", row.preview)
+        // The rule that gates Edit: one non-text block and `textOf` answers null, so
+        // the dock draws the "editing is not supported" label rather than an editor
+        // whose save the host would refuse.
         assertNull(row.text)
         assertEquals(1, row.attachments.size)
         assertEquals("image", row.attachments.single().kind)
         assertEquals("shot.png", row.attachments.single().name)
         assertEquals(2048, row.attachments.single().bytes)
+    }
+
+    @Test
+    fun `an unknown block names itself in the preview and also forces text null`() {
+        val rows = parseQueueItems(
+            inboxQueueItems(
+                inbox(textMessage("m-5", text("listen"), "{\"type\":\"audio\"}")),
+            ),
+        )
+
+        val row = rows.single()
+        assertEquals("listen [audio]", row.preview)
+        assertNull(row.text)
     }
 
     @Test
