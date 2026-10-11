@@ -2,7 +2,9 @@ package uk.xa0.dsh.net
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
+import android.net.NetworkCapabilities
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -209,21 +211,23 @@ class DshClient(context: Context) {
             .build()
 
         /**
-         * The gateway calls' client: `base` plus a transport-failure hook.
+         * The gateway calls' client: `base` plus a route-failure hook.
          *
          * A call that fails at the transport is the one signal that the chosen
          * endpoint stopped working — a stale LAN choice is exactly this — and it
          * heals by re-probing. Only the unary gateway calls carry the hook: the
          * stream client must not reroute on every socket blip (it re-dials on its
          * own), and `httpClient` fetches internet pictures, whose failure says
-         * nothing about the host.
+         * nothing about the host. A call that *answered* something which is not a
+         * DSH envelope trips the same hook from [rpcRaw], because that is the
+         * other shape of a wrong door — see [onRouteFailure].
          */
         val unary = base.newBuilder()
             .addInterceptor { chain ->
                 try {
                     chain.proceed(chain.request())
                 } catch (e: IOException) {
-                    onTransportFailure()
+                    onRouteFailure()
                     throw e
                 }
             }
@@ -241,9 +245,9 @@ class DshClient(context: Context) {
         localIpv4 = { localIpv4Address() },
     )
 
-    /** Epoch millis of the last transport-failure invalidation; see [onTransportFailure]. */
+    /** Epoch millis of the last route-failure invalidation; see [onRouteFailure]. */
     @Volatile
-    private var lastTransportFailureAt = 0L
+    private var lastRouteFailureAt = 0L
 
     /**
      * Called when a refresh moved traffic to a different endpoint.
@@ -257,10 +261,6 @@ class DshClient(context: Context) {
     @Volatile
     var onRouteChanged: (() -> Unit)? = null
 
-    init {
-        watchConnectivity()
-    }
-
     /**
      * The event socket's client, from the current family.
      *
@@ -269,6 +269,7 @@ class DshClient(context: Context) {
      * the client on every dial for the same reason.
      */
     private fun streamClient(): OkHttpClient = clients.stream
+
     /**
      * Called when the event socket's handshake was refused for auth reasons.
      * Set by the view model (the only place that can heal it); null when no UI
@@ -322,6 +323,10 @@ class DshClient(context: Context) {
             primary = httpUrlOf(config.baseUrl),
             lan = httpUrlOf(lanCandidate(config)),
         )
+        // The route watcher's lifetime is the configuration's: with no host there
+        // is nothing to route to, and a default-network callback left registered
+        // would keep waking the process for changes it cannot use.
+        if (config.isConfigured) watchConnectivity() else stopWatchingConnectivity()
         // Prime the cache for whoever is listening, but do not reroute: the
         // config change itself has already dropped the multiplexer, and the
         // caller of applyConfig owns the reconnect that follows.
@@ -380,11 +385,30 @@ class DshClient(context: Context) {
      * Does **not** notify: this is the "a config just changed" path, and the
      * caller is about to rebuild the wiring and dial anyway — [applyConfig] has
      * already dropped the multiplexer, so a second nudge here would race the
-     * caller's own connect. The reactive paths ([requestRouteRefresh]) are the
-     * ones that notify.
+     * caller's own connect. [requestRouteRefresh] is the path that notifies, and
+     * [recheckRoute] the one that reports the move back to its own caller.
      */
     suspend fun refreshRoute() {
         resolveRoute(notify = false)
+    }
+
+    /**
+     * A fresh look at the route after an absence, for the one caller whose reason
+     * for asking is that time passed: the process coming back to the foreground.
+     *
+     * Forces the probe rather than trusting the cache. What the cache holds is an
+     * answer about the network the process went to sleep on, and the callbacks
+     * that would have replaced it are exactly what a frozen process cannot be
+     * relied on to have handled — delivering them is best-effort, not a guarantee.
+     *
+     * Does not notify, like [refreshRoute]: the caller owns its own rewire, so it
+     * is told instead. Returns true when this resolution moved the route, in which
+     * case it has already dropped the multiplexer every stream was bound to and
+     * the caller must rebuild before it dials again.
+     */
+    suspend fun recheckRoute(): Boolean {
+        endpoint.invalidate()
+        return resolveRoute(notify = false)
     }
 
     /**
@@ -404,35 +428,89 @@ class DshClient(context: Context) {
      * gone. "Moved" comes from this resolution's own answer, so two refreshes
      * racing the same probe cannot both act on it.
      */
-    private suspend fun resolveRoute(notify: Boolean) {
+    private suspend fun resolveRoute(notify: Boolean): Boolean {
         val choice = endpoint.resolve()
-        if (!choice.changed) return
+        if (!choice.changed) return false
         mux?.shutdown()
         mux = null
         if (notify) onRouteChanged?.invoke()
+        return true
     }
 
+    /** The registered default-network watcher, or null when no host is configured. */
+    @Volatile
+    private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
+
+    /** Which of the callback's reports is news; see [ConnectivityGate]. */
+    private val connectivityGate = ConnectivityGate()
+
     /**
-     * Re-resolve whenever the OS reports the default network moving — the moment
-     * a phone leaves the house, joins a hotspot, or comes back to the LAN. Both
-     * directions matter: onAvailable is the LAN returning, onLost is it going.
+     * Re-resolve whenever the OS reports the default network changing — the moment
+     * a phone leaves the house, joins a hotspot, or comes back to the LAN.
+     *
+     * Registered for exactly as long as there is a host to route to: [applyConfig]
+     * is the only caller, and it stops the watcher when the address is cleared. A
+     * default-network callback is a standing registration with the system that
+     * outlives every screen and wakes the process for each change, so leaving one
+     * in place with nothing configured would be a leak paid for in battery and not
+     * only in memory.
+     *
+     * What counts as a change is [ConnectivityGate]'s job: the default network
+     * arriving or going, plus the two moments it becomes one that can carry the
+     * route. `onAvailable` alone is not enough — it can arrive before the network
+     * is routable, and a probe that fails there must not be the last word. Only
+     * the *default* network is watched, and that is not a shortcut: a request only
+     * leaves by the default network, so a LAN candidate is unreachable unless the
+     * Wi-Fi carrying it is the default one.
      */
     private fun watchConnectivity() {
-        val manager = appContext.getSystemService(ConnectivityManager::class.java) ?: return
+        if (connectivityCallback != null) return
+        val manager = runCatching { appContext.getSystemService(ConnectivityManager::class.java) }
+            .getOrNull() ?: return
         val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                endpoint.invalidate()
-                requestRouteRefresh()
-            }
+            override fun onAvailable(network: Network) = routeMayHaveMoved()
 
             override fun onLost(network: Network) {
-                endpoint.invalidate()
-                requestRouteRefresh()
+                connectivityGate.lost()
+                routeMayHaveMoved()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                val usable = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                if (connectivityGate.capabilities(usable)) routeMayHaveMoved()
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, link: LinkProperties) {
+                val addressed = link.linkAddresses.any { it.address is Inet4Address }
+                if (connectivityGate.addressed(addressed)) routeMayHaveMoved()
             }
         }
         // A device with no connectivity service (or a test JVM) simply keeps the
         // event-driven refresh paths; there is nothing to report.
         runCatching { manager.registerDefaultNetworkCallback(callback) }
+            .onSuccess { connectivityCallback = callback }
+    }
+
+    /** Stop watching; for the moment the configured address is cleared. */
+    private fun stopWatchingConnectivity() {
+        val callback = connectivityCallback ?: return
+        connectivityCallback = null
+        connectivityGate.lost()
+        runCatching {
+            appContext.getSystemService(ConnectivityManager::class.java)
+                ?.unregisterNetworkCallback(callback)
+        }
+    }
+
+    /**
+     * The default network moved in a way that can change the route: drop every
+     * answer attached to the old wire — the cached winner *and* any door that
+     * failed on it — and probe again.
+     */
+    private fun routeMayHaveMoved() {
+        endpoint.networkChanged()
+        requestRouteRefresh()
     }
 
     /**
@@ -671,10 +749,19 @@ class DshClient(context: Context) {
                 if (text.isBlank()) throw DshRpcException("http/${response.code}", "Empty response from host", null)
 
                 val parsed = runCatching { JSONObject(text) }.getOrElse {
+                    // Content that is not JSON did not come from a DSH host. A
+                    // captive portal answers this way, and the probe that chose
+                    // the door cannot tell: see [onRouteFailure].
+                    onRouteFailure()
                     throw DshRpcException("http/${response.code}", text.take(400), null)
                 }
                 val result = parsed.optJSONObject("result")
-                    ?: throw DshRpcException("protocol", "Malformed response envelope", null)
+                    ?: run {
+                        // JSON, but not this protocol's envelope — the same
+                        // conclusion as above, for an answer that parsed.
+                        onRouteFailure()
+                        throw DshRpcException("protocol", "Malformed response envelope", null)
+                    }
 
                 if (!result.optBoolean("ok")) {
                     val error = result.optJSONObject("error")
@@ -739,23 +826,30 @@ class DshClient(context: Context) {
         }
 
     /**
-     * One call failed at the transport — a timeout, a dropped socket, no route.
+     * The chosen door failed in use — at the socket, or by answering something a
+     * DSH host does not answer with.
      *
-     * That is precisely what a stale LAN choice looks like: the address answered
-     * a minute ago and the phone has since left the network. Dropping the cache
-     * lets the next refresh move the app to whichever door answers now, so the
-     * route heals itself instead of waiting for a network callback that may
-     * never fire (a host that went away while the phone stayed put).
+     * A timeout, a dropped socket, no route: that is precisely what a stale LAN
+     * choice looks like, the address having answered a minute ago and the phone
+     * having since left the network. An unparseable answer is the *other* shape,
+     * and the one a captive portal produces: it answers every address with its own
+     * page, so the cheap `GET /` the resolver probes with succeeds and only a real
+     * gateway call reveals that nothing here speaks DSH.
+     *
+     * Either way the door is recorded as suspect before the cache is dropped, so
+     * the re-resolution that follows lands on the other one instead of choosing
+     * the broken door again. A network change is what forgives it.
      *
      * Rate-limited: an unreachable host fails *every* call, and invalidating per
      * failure would turn one outage into a probe round per request. The resolver
      * caches its answer anyway; this only bounds how often the cache is thrown
      * away while nothing answers.
      */
-    private fun onTransportFailure() {
+    private fun onRouteFailure() {
         val now = System.currentTimeMillis()
-        if (now - lastTransportFailureAt < TRANSPORT_FAILURE_COOLDOWN_MS) return
-        lastTransportFailureAt = now
+        if (now - lastRouteFailureAt < ROUTE_FAILURE_COOLDOWN_MS) return
+        lastRouteFailureAt = now
+        endpoint.noteUnreachable(endpoint.peek())
         endpoint.invalidate()
         requestRouteRefresh()
     }
@@ -769,8 +863,8 @@ class DshClient(context: Context) {
     companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
 
-        /** At most one transport-failure re-probe per this window; see [onTransportFailure]. */
-        private const val TRANSPORT_FAILURE_COOLDOWN_MS = 5_000L
+        /** At most one route-failure re-probe per this window; see [onRouteFailure]. */
+        private const val ROUTE_FAILURE_COOLDOWN_MS = 5_000L
     }
 }
 

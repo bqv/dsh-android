@@ -9,6 +9,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * The host of a configured address, with the scheme optional.
@@ -102,6 +103,15 @@ data class RouteChoice(val url: HttpUrl?, val changed: Boolean)
  * phone's own address and the clock all arrive as injected lambdas, so the whole
  * decision is JVM-testable and the same code serves the client and its tests.
  *
+ * A probe's "yes" is a *probation*, not a verdict. A door can answer a cheap
+ * `GET /` and still be the wrong door for real traffic — a captive portal that
+ * answers every address with its own sign-in page, or a different machine that
+ * took the host's address on another network — so a door that fails in use is
+ * [noteUnreachable] and stops being preferred until [networkChanged] says the
+ * network is not the one that produced the failure. That is what keeps the
+ * recovery from being worse than the fault: a phone that switched onto a broken
+ * LAN must not be switched back onto it on every retry.
+ *
  * [peek] is the half that request construction calls, synchronously, from a
  * thread that must not block; [resolve] is the half that probes. They are split
  * because OkHttp builds a request from a URL it is handed, and a resolver that
@@ -153,17 +163,50 @@ class EndpointResolver(
     private val refreshLock = Mutex()
 
     /**
+     * Doors that answered a probe and then failed in use, until the network moves.
+     *
+     * Concurrent because the failures arrive on OkHttp's threads while a
+     * resolution may be reading the set on another; the lock above is held for a
+     * whole probe round and must not be the thing a request thread waits on.
+     */
+    private val suspect: MutableSet<HttpUrl> = ConcurrentHashMap.newKeySet<HttpUrl>()
+
+    /**
      * Re-seed the candidates from a new configuration and drop the cached
      * winner: a changed address is not a reason to trust the old answer, and the
      * old winner may not even be among the new candidates.
+     *
+     * Suspicion goes with it: it is attached to addresses, and these may be
+     * different ones.
      */
     fun update(primary: HttpUrl?, lan: HttpUrl?) {
         this.primary = primary
         this.lan = lan
+        suspect.clear()
         winner = null
         winnerIsLan = false
         resolved = false
         resolvedAt = 0L
+    }
+
+    /**
+     * A door did not survive contact with real traffic: a dropped socket, or an
+     * answer that was not a DSH envelope at all.
+     *
+     * Recorded rather than acted on — the caller invalidates and re-resolves, and
+     * this is what makes that re-resolution land somewhere else.
+     */
+    fun noteUnreachable(url: HttpUrl?) {
+        if (url != null) suspect += url
+    }
+
+    /**
+     * The network itself changed, which is the one thing that excuses a door:
+     * the failure above happened on the wire that is now gone.
+     */
+    fun networkChanged() {
+        suspect.clear()
+        invalidate()
     }
 
     /**
@@ -216,16 +259,21 @@ class EndpointResolver(
         val answers = coroutineScope {
             ordered.map { (url, _) -> async { url to answersAsDshHost(url) } }.awaitAll()
         }
-        val pick = answers.firstOrNull { it.second }?.first
-        // Nothing answered: the primary is the honest fallback, and the reported
-        // door is whichever candidate that fallback actually is (a private
-        // `baseUrl` is a LAN address even when only the LAN field named it).
+        val answered = answers.filter { it.second }.map { it.first }
+        // An answering door that has not just failed in use wins; failing that, an
+        // answering door that has — a door that answers is still better than one
+        // that does not, so suspicion changes the order and never removes a
+        // candidate outright. With no answer at all the primary is the honest
+        // fallback, and the reported door is whichever candidate that fallback
+        // actually is (a private `baseUrl` is a LAN address even when only the LAN
+        // field named it).
+        val pick = answered.firstOrNull { it !in suspect } ?: answered.firstOrNull()
         val chosen = pick ?: primary ?: ordered.last().first
         winnerIsLan = ordered.first { it.first == chosen }.second
         val changed = chosen != lastProbed
         lastProbed = chosen
         // Cached like any other winner, so a phone between networks does not
-        // re-probe on every request; the network callback and a transport failure
+        // re-probe on every request; a network change and a door that failed in use
         // both invalidate, which is when re-probing actually matters.
         winner = chosen
         resolved = true

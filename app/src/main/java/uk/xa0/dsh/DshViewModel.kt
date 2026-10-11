@@ -3318,10 +3318,32 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 Log.d(TAG, "resume: re-checking the connection")
+                // The route is the one thing a frozen process cannot have kept up
+                // with: the network callbacks that would have re-probed it are not
+                // guaranteed to have been delivered while the app was in a pocket,
+                // and one that landed before the returning Wi-Fi was routable had
+                // nothing to find. Probe again before the socket is touched.
+                val moved = runCatching { client.recheckRoute() }.getOrDefault(false)
+                publishRoute()
+                if (moved) {
+                    // The multiplexer every stream was bound to has already been
+                    // dropped by that recheck, so rebuild the wiring here, in this
+                    // coroutine, rather than handing over to the route hook: this
+                    // path owns the streams' re-opening below, and two rewires
+                    // racing each other is what the hook's own guard exists to
+                    // avoid.
+                    Log.d(TAG, "resume: the route moved; rebuilding against the new door")
+                    rewireMux()
+                }
                 // A no-op while the socket is OPEN; the supervisor owns the rest.
                 runCatching { client.mux().ensureConnected() }
                 val open = runCatching { client.mux().state.value == MuxState.OPEN }.getOrDefault(false)
-                if (!open) {
+                // Only a socket that was already open is worth re-subscribing to
+                // here. After a move the multiplexer is *new* and cannot be open
+                // yet, so the backlog path below is the one that applies — and the
+                // streams are re-opened there without waiting for it, exactly as
+                // the live route hook does.
+                if (!open && !moved) {
                     Log.d(TAG, "resume: socket is down; leaving it to the backoff")
                     return@launch
                 }

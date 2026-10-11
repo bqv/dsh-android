@@ -227,4 +227,78 @@ class EndpointResolverTest {
         assertFalse(isPrivateLanHost(hostOf("172.32.0.1")))
         assertFalse(isPrivateLanHost(hostOf("host.example.com")))
     }
+
+    @Test
+    fun `a door that failed in use stops being preferred`() = runBlocking {
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+        r.update(primary = public, lan = lan)
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
+
+        // The LAN answered the cheap probe, then a real call failed on it: a
+        // captive portal that answers every address, or another machine that has
+        // taken the host's address on this network. The next resolution must land
+        // on the door that works rather than bouncing back onto this one.
+        r.noteUnreachable(lan)
+        r.invalidate()
+        val choice = r.resolve()
+        assertEquals(public, choice.url)
+        assertFalse(r.isLan)
+        assertTrue("LAN -> public is a move", choice.changed)
+    }
+
+    @Test
+    fun `a network change forgives the door that failed`() = runBlocking {
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+        r.update(primary = public, lan = lan)
+
+        r.noteUnreachable(lan)
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+
+        // A different network now: that address may be the host again, and the
+        // failure was a fact about the wire that is gone.
+        r.networkChanged()
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `a suspect door is still used when nothing else answers`() = runBlocking {
+        // Suspicion reorders the candidates; it must never make the app prefer a
+        // door that did not answer at all over the one door that did.
+        val probed = mutableListOf<String>()
+        val r = EndpointResolver(
+            isDshHost = { url -> probed += url.host; url.host == "192.168.1.110" },
+            localIpv4 = { null },
+        )
+        r.update(primary = public, lan = lan)
+        r.noteUnreachable(lan)
+        r.invalidate()
+
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
+        assertTrue(probed.contains("cloud.xa0.uk"))
+    }
+
+    @Test
+    fun `re-seeding the candidates forgets what failed on the old ones`() = runBlocking {
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+        r.update(primary = public, lan = lan)
+        r.noteUnreachable(lan)
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+
+        // The user corrected the LAN field. The new address has not failed, so it
+        // starts with a clean record rather than inheriting the old one's.
+        val corrected: HttpUrl = "http://192.168.1.120/".toHttpUrlOrNull()!!
+        answering += "192.168.1.120"
+        r.update(primary = public, lan = corrected)
+
+        assertEquals(corrected, r.resolve().url)
+        assertTrue(r.isLan)
+    }
 }
