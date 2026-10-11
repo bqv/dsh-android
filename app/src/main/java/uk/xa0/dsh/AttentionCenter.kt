@@ -1,6 +1,7 @@
 package uk.xa0.dsh
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -9,6 +10,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -16,6 +18,7 @@ import org.json.JSONObject
 import uk.xa0.dsh.data.DshConfig
 import uk.xa0.dsh.model.ApprovalAnswer
 import uk.xa0.dsh.model.ApprovalGate
+import uk.xa0.dsh.model.ApprovalRoster
 import uk.xa0.dsh.model.arr
 import uk.xa0.dsh.model.bool
 import uk.xa0.dsh.model.obj
@@ -88,6 +91,19 @@ class AttentionCenter(private val context: Context) {
      * can be retried without the card ever having been cleared.
      */
     private val answerGates = ConcurrentHashMap<String, ApprovalGate>()
+
+    /**
+     * What each fresh `$events` generation says the host is still holding.
+     *
+     * The accepted reply settles a card on its own, so this is the second,
+     * durable reconciliation: a card the host does not re-announce when it opens a
+     * new generation is settled, and that holds across a socket death, a route move
+     * and a process freeze alike.
+     */
+    private val roster = ApprovalRoster()
+
+    /** One bounded reconciliation per held event id, so a later generation replaces it. */
+    private val reconcileJobs = ConcurrentHashMap<String, Job>()
 
     /**
      * The single card the UI shows: whichever of the maps above belongs to the
@@ -255,6 +271,7 @@ class AttentionCenter(private val context: Context) {
         mux.postEventResult = { args -> client.rpc("\$events/result", args) }
         mux.onWaterfall = { frame, send -> handleWaterfall(frame, send) }
         mux.onWaterfallCancel = { eventId -> handleCancel(eventId) }
+        mux.onEventsGeneration = { clientId -> handleGeneration(clientId) }
         attachedMux = mux
         eventsJob = scope.launch {
             while (true) {
@@ -287,6 +304,11 @@ class AttentionCenter(private val context: Context) {
         attachedMux = null
         pending.clear()
         answerGates.clear()
+        // The cards are being dropped wholesale, so the roster that describes them
+        // must go too, and no reconciliation may fire against a card that is gone.
+        reconcileJobs.values.forEach { it.cancel() }
+        reconcileJobs.clear()
+        roster.clear()
         // Every pending item alerted under its own session id, so each must be
         // withdrawn by that id; the legacy constants only clear sessionless ones.
         approvals.values.forEach { Attention.cancel(context, Attention.approvalId(it.sessionId)) }
@@ -362,15 +384,23 @@ class AttentionCenter(private val context: Context) {
      * The host withdrew a waterfall it had already fanned out — its own timeout,
      * another answerer, or a settle this client's own answer caused.
      *
-     * This is the authoritative clear. Nothing else takes a card off the screen once
-     * an answer has been sent, so a card left up here really is gone on the host.
+     * One of the two authoritative clears: the other is the settle of an answer the
+     * host itself accepted. Either way the card and its notification go together, by
+     * this one method, so the shade cannot keep an alert the screen has dropped.
      */
     private fun handleCancel(eventId: String) {
-        // Ends the answer wait without sending: whatever the reader tapped a moment
-        // ago is moot, and the host has already said so.
-        answerGates.remove(eventId)?.withdraw()
-        pending.remove(eventId)?.complete(JSONObject().put("kind", "next"))
-        removeApproval(eventId)?.let {
+        val held = synchronized(roster) {
+            // Ends the answer wait without sending: whatever the reader tapped a moment
+            // ago is moot, and the host has already said so.
+            answerGates.remove(eventId)?.withdraw()
+            pending.remove(eventId)?.complete(JSONObject().put("kind", "next"))
+            // The host named this waterfall as settled, so no window of ours may decide
+            // about it again, and any reconciliation already waiting is moot.
+            roster.onSettled(eventId)
+            forgetReconcile(eventId)
+            removeApproval(eventId)
+        }
+        held?.let {
             Attention.cancel(context, Attention.approvalId(it.sessionId))
             publishVisible()
         }
@@ -378,6 +408,72 @@ class AttentionCenter(private val context: Context) {
             Attention.cancel(context, Attention.questionId(it.sessionId))
             publishVisible()
         }
+    }
+
+    /**
+     * A fresh `$events` generation has opened, first connect or reconnect alike.
+     *
+     * The host re-announces every waterfall it is still holding to the new
+     * generation, immediately and before anything else on the stream, and names
+     * nothing it has settled. A held card the host has not named by the end of the
+     * window has therefore been settled — by another answerer, by the host's own
+     * timeout, or by an answer of ours — and the roster is the evidence, not a guess.
+     *
+     * This is what makes the reconciliation durable rather than tied to one signal:
+     * a socket that died, a route that moved and a process that was frozen all end
+     * in a new generation, and every one of them re-states the host's pending set.
+     */
+    private fun handleGeneration(clientId: String) {
+        val generation = roster.onGeneration()
+        Log.d(TAG, "events generation $generation ($clientId): reconciling ${approvals.size} held")
+        approvals.values.toList().forEach { held -> scheduleReconcile(held.eventId, generation) }
+    }
+
+    /**
+     * Gives the host's re-announcement batch one bounded window in which to name
+     * [eventId], then takes a card it did not name as settled.
+     *
+     * The window is the only timing assumption in the reconciliation, and the wire
+     * carries no marker for the end of the batch that could remove it. A late
+     * re-announcement is self-healing rather than lost: the frame that arrives after
+     * the window raises the card again, as a fresh waterfall on the live generation.
+     */
+    private fun scheduleReconcile(eventId: String, generation: Long) {
+        reconcileJobs.remove(eventId)?.cancel()
+        reconcileJobs[eventId] = scope.launch {
+            delay(RECONCILE_GRACE_MS)
+            reconcileJobs.remove(eventId)
+            clearIfSettled(eventId, generation)
+        }
+    }
+
+    /**
+     * Takes the card for [eventId] if the host did not name it in [generation], and
+     * leaves it alone if it did.
+     *
+     * The decision and the removal are one step against [awaitApproval]'s claim,
+     * under the roster's own monitor: a re-announcement arriving in the instant a
+     * window expires must not have the card it has just been told about taken from
+     * under it. Every call inside the monitor is cheap and non-suspending — map
+     * writes, a channel send, a job cancellation — and the notification and the
+     * republication happen outside it.
+     */
+    private fun clearIfSettled(eventId: String, generation: Long) {
+        val held = synchronized(roster) {
+            if (!roster.settled(eventId, generation)) return
+            answerGates.remove(eventId)?.withdraw()
+            roster.onSettled(eventId)
+            forgetReconcile(eventId)
+            removeApproval(eventId)
+        } ?: return
+        Log.d(TAG, "approval $eventId settled: the host did not re-announce it")
+        Attention.cancel(context, Attention.approvalId(held.sessionId))
+        publishVisible()
+    }
+
+    /** Ends the reconciliation waiting on [eventId]: its card is no longer in doubt. */
+    private fun forgetReconcile(eventId: String) {
+        reconcileJobs.remove(eventId)?.cancel()
     }
 
     /**
@@ -458,16 +554,24 @@ class AttentionCenter(private val context: Context) {
      * Waits for a decision, and keeps waiting after an answer the host would not take.
      *
      * The loop is the fix. Each pass arms a fresh wait; a tap is posted through [send]
-     * and its reply decides what happens next. Accepted leaves the item on screen in
-     * [ApprovalAnswer.Sent] — the host's `cancel` is what removes it, and nothing here
-     * anticipates that. Refused or unreachable puts the item back in a tappable state
-     * and goes round again, so the reader can answer once more rather than being shown
-     * a card that quietly cleared itself.
+     * and its reply decides what happens next. Accepted holds the item on screen in
+     * [ApprovalAnswer.Sent] for the settle grace and then takes it — and its
+     * notification — away, because the accepted reply has already said the host is
+     * done with the waterfall. A `cancel` that arrives first does the same, sooner.
+     * Refused or unreachable puts the item back in a tappable state and goes round
+     * again, so the reader can answer once more rather than being shown a card that
+     * quietly cleared itself.
      *
      * The cap is the escape hatch, not the policy: a pocketed phone must not hang the
      * agent forever, so after the timeout the request is delegated on and the host
      * refuses it in its own words. If even that cannot be delivered, the card stays up
      * instead of leaving a blocked agent with nothing on screen.
+     *
+     * A re-announcement of the same waterfall on a new generation arrives here again.
+     * The previous wait is ended without sending and loses ownership of the card, so
+     * the two waits cannot fight over it; and because the host named the waterfall,
+     * `roster` records that it is still pending, which is what stops the reconciliation
+     * window from taking a card the host still holds.
      */
     private suspend fun awaitApproval(
         eventId: String,
@@ -476,31 +580,59 @@ class AttentionCenter(private val context: Context) {
         send: AnswerSink,
     ) {
         val toolName = request.str("toolName").ifEmpty { "a tool" }
-        val gate = ApprovalGate(APPROVAL_TIMEOUT_MS)
-        gate.onState = { next -> setAnswer(eventId, next) }
-        answerGates[eventId] = gate
-        approvals[keyFor(sessionId, eventId)] = PendingApproval(
-            eventId = eventId,
-            toolName = toolName,
-            reason = request.str("reason").takeIf { it.isNotEmpty() },
-            sessionId = sessionId,
-        )
+        val key = keyFor(sessionId, eventId)
+        val gate = ApprovalGate(APPROVAL_TIMEOUT_MS, APPROVAL_SETTLE_GRACE_MS)
+        // Told about every transition with the gate itself, because a re-announcement
+        // can replace this one while a post is still in flight: only the gate that
+        // still owns the card may write to it.
+        gate.onState = { next -> setAnswer(eventId, gate, next) }
+        // Claiming the card and recording the host's announcement are one step against
+        // the reconciliation, so a window expiring at this instant cannot take the card
+        // this frame has just been told the host is still holding. A re-announcement
+        // after a reconnect is the same waterfall on a new generation: the previous
+        // wait is ended without sending, and it cannot take this card down when it
+        // returns, because it no longer owns the slot (see `settleApproval`).
+        val held = synchronized(roster) {
+            val current = approvals[key]
+            answerGates.put(eventId, gate)?.withdraw()
+            roster.onAnnounced(eventId)
+            forgetReconcile(eventId)
+            approvals[key] = PendingApproval(
+                eventId = eventId,
+                toolName = toolName,
+                reason = request.str("reason").takeIf { it.isNotEmpty() },
+                sessionId = sessionId,
+                // A re-announcement is the host saying the waterfall is *still pending*,
+                // so a post that was in flight for it did not settle it: the card is
+                // legitimately answerable again, and the host applies one outcome per
+                // waterfall however many posts reach it. An item whose answer did not
+                // get through keeps saying so, because the host still holds it and the
+                // reader's last attempt is still the last thing that happened to it.
+                answer = (current?.answer as? ApprovalAnswer.Unsent) ?: ApprovalAnswer.Waiting,
+            )
+            current
+        }
         publishVisible()
-        alert(
-            id = Attention.approvalId(sessionId),
-            sessionId = sessionId,
-            title = "Approval needed",
-            text = "$toolName is waiting for your permission.",
-        )
+        // A card the reader has already been shown for this waterfall is not news,
+        // and its notification is already in the shade: re-posting one for a
+        // re-announcement would buzz a pocketed phone for a prompt it was told about
+        // the first time.
+        if (held == null) {
+            alert(
+                id = Attention.approvalId(sessionId),
+                sessionId = sessionId,
+                title = "Approval needed",
+                text = "$toolName is waiting for your permission.",
+            )
+        }
 
         gate.answer(send)
 
-        // The wait is over. If the host withdrew the waterfall, `handleCancel` has
-        // already taken the card and its notification away. If an answer was taken, it
-        // stays until that cancel arrives. Anything else is still an unanswered
-        // prompt, so it goes with the wait.
-        answerGates.remove(eventId)
-        if (gate.state !is ApprovalAnswer.Sent) forgetApproval(eventId)
+        // The wait is over because the host no longer holds this waterfall from our
+        // side: it withdrew it (and `handleCancel` has already cleared the card), it
+        // accepted an answer, or the cap handed the request back. All three clear the
+        // card and its notification, by the ownership-checked path below.
+        settleApproval(eventId, gate)
     }
 
     private suspend fun awaitQuestion(
@@ -572,8 +704,10 @@ class AttentionCenter(private val context: Context) {
      *
      * It clears nothing. The tap is handed to the item's [ApprovalGate], which moves
      * the card into its answering state and refuses a second tap; the card and its
-     * notification then stay until the host's own `cancel` arrives. That is the whole
-     * of the fix for an accept that used to disappear before anything was sent.
+     * notification then stay until the host's reply (or its own `cancel`) says the
+     * waterfall is settled. Nothing here anticipates that reply — which is the whole
+     * of the fix for an accept that used to disappear before anything was sent, and
+     * for the one that used to stay because the clear it waited on never came.
      */
     fun resolveApproval(allow: Boolean) {
         val current = _approval.value ?: return
@@ -585,22 +719,29 @@ class AttentionCenter(private val context: Context) {
      *
      * A failed answer is re-posted rather than withdrawn: the notification exists to
      * get a reader who never opens the app to a prompt, and an answer the host has not
-     * confirmed is still an open prompt. Only a `cancel` — or the cap expiring — takes
-     * it away.
+     * taken is still an open prompt. Only the host's reply, its `cancel`, or the cap
+     * expiring takes it away.
      *
-     * Answering and Sent deliberately do not re-post. Both are transitions a reader
-     * can only make from the card, which means the app is in the foreground on that
-     * session, which means [alert] suppresses the post anyway; and an accepted answer
-     * is followed by the host's own `cancel` in one round-trip, so re-copying the
-     * shade for that window would only buzz a pocketed phone about a decision it has
-     * already taken. The withdrawal that matters is the one that is *not* made here.
+     * Answering and Sent deliberately do not re-post. Both are transitions a reader can
+     * only make from the card, which means the app is in the foreground on that
+     * session, which means [alert] suppresses the post anyway; and Sent lasts only the
+     * settle grace before the card and the shade entry go together.
+     *
+     * The gate is consulted before anything is written, because a re-announcement may
+     * have replaced it while this one's post was still in flight: a wait that no longer
+     * owns the card has nothing to say about it.
      */
-    private fun setAnswer(eventId: String, answer: ApprovalAnswer) {
-        val key = approvals.entries.firstOrNull { it.value.eventId == eventId }?.key ?: return
-        approvals.computeIfPresent(key) { _, held -> held.copy(answer = answer) }
+    private fun setAnswer(eventId: String, gate: ApprovalGate, answer: ApprovalAnswer) {
+        // Under the roster's monitor, with the claim and the reconciliation: a gate
+        // that no longer owns the card must not write to whatever holds it now.
+        val held: PendingApproval? = synchronized(roster) {
+            if (answerGates[eventId] !== gate) return
+            val key = approvals.entries.firstOrNull { it.value.eventId == eventId }?.key ?: return
+            approvals.computeIfPresent(key) { _, current -> current.copy(answer = answer) }
+            approvals[key]
+        }
         publishVisible()
-        if (answer !is ApprovalAnswer.Unsent) return
-        val held = approvals[key] ?: return
+        if (answer !is ApprovalAnswer.Unsent || held == null) return
         alert(
             id = Attention.approvalId(held.sessionId),
             sessionId = held.sessionId,
@@ -609,13 +750,26 @@ class AttentionCenter(private val context: Context) {
         )
     }
 
-    /** Drops an item and its notification: the wait is over and nothing was taken. */
-    private fun forgetApproval(eventId: String) {
-        answerGates.remove(eventId)
-        removeApproval(eventId)?.let {
-            Attention.cancel(context, Attention.approvalId(it.sessionId))
-            publishVisible()
-        }
+    /**
+     * The wait is over with nothing left to do: drops the card and its notification.
+     *
+     * Only the gate that still owns the item may do this. A re-announcement after a
+     * reconnect replaces the gate and raises a live card of its own, and the replaced
+     * wait must return without touching it — otherwise a reconnect would take down the
+     * card the host has just re-announced. The claim is made under the roster's
+     * monitor, as [clearIfSettled]'s decision is, and the identity check is the same
+     * one [setAnswer] makes.
+     */
+    private fun settleApproval(eventId: String, gate: ApprovalGate) {
+        val held = synchronized(roster) {
+            if (answerGates[eventId] !== gate) return
+            answerGates.remove(eventId)
+            roster.onSettled(eventId)
+            forgetReconcile(eventId)
+            removeApproval(eventId)
+        } ?: return
+        Attention.cancel(context, Attention.approvalId(held.sessionId))
+        publishVisible()
     }
 
     fun answerQuestions(answers: List<Triple<String, List<String>, String?>>) {
@@ -658,7 +812,29 @@ class AttentionCenter(private val context: Context) {
     }
 
     private companion object {
+        const val TAG = "DshAttention"
+
         const val APPROVAL_TIMEOUT_MS = 5 * 60 * 1000L
+
+        /**
+         * How long a card stays up after the host has taken the answer.
+         *
+         * The accepted reply is the confirmation, so this is not a wait for one: it
+         * is the room a `cancel` gets to arrive first (another answerer, or the
+         * host's own timeout), and the beat in which a reader sees that their answer
+         * went. Short enough not to be the stale card the reader complained about.
+         */
+        const val APPROVAL_SETTLE_GRACE_MS = 1_500L
+
+        /**
+         * How long a fresh `$events` generation is given to re-announce what the host
+         * still holds before a card it did not name is taken as settled.
+         *
+         * The batch is delivered in the same burst as the generation's `ready` frame,
+         * so this is generous room rather than a latency budget; a re-announcement
+         * later than it raises the card again rather than being lost.
+         */
+        const val RECONCILE_GRACE_MS = 3_000L
 
         /**
          * Longer than an approval: a question is a real decision, and the cost of

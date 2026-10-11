@@ -14,7 +14,24 @@ import org.json.JSONObject
  */
 sealed interface AnswerDelivery {
 
-    /** The host took the outcome. The waterfall settles from here. */
+    /**
+     * The host answered the result call `ok`.
+     *
+     * For an approval's `{kind:"result"}` post that is the host's own word that the
+     * waterfall has settled, and it is the confirmation the card rests on. The
+     * gateway applies the outcome *before* it replies: `dispatchRpc`
+     * (`dsh-api-gateway/lib/index.js`, `$events/result` branch) calls
+     * `receiveRemoteEventResult` synchronously and only then returns `{ok:true}`,
+     * and that function settles a `result` outcome on the spot.
+     *
+     * It is not the same statement as "this answer was the one taken". A post for
+     * an event that is no longer pending — or from a client that is no longer a
+     * delivery of it — is answered `ok` too, because that no-op path returns without
+     * throwing. Both readings mean the same thing for the card, though: the host is
+     * not holding the waterfall any more. The one thing `ok` does not cover is a
+     * stale `clientId`, which fails the call outright (the host finds no active
+     * event stream for it) and arrives here as a [Refused].
+     */
     data object Accepted : AnswerDelivery
 
     /**
@@ -35,8 +52,9 @@ sealed interface AnswerDelivery {
  *
  * - [Waiting]: nothing has been sent. Both buttons answer.
  * - [Answering]: a tap is being posted right now. Neither button answers.
- * - [Sent]: the host took the post. Neither button answers, and the card stays
- *   until the host's own `cancel` arrives — that is the only thing that clears it.
+ * - [Sent]: the host answered the post `ok`, so the waterfall is settled and the
+ *   card has at most a bounded grace left. Neither button answers. The host's own
+ *   `cancel` ends it at once if one comes; otherwise the grace runs out.
  * - [Unsent]: the post was refused, or never arrived, with [message] saying so.
  *   Both buttons answer again.
  */
@@ -48,7 +66,10 @@ sealed interface ApprovalAnswer {
     /** A tap is on its way to the host. */
     data class Answering(val allow: Boolean) : ApprovalAnswer
 
-    /** The host took the answer; its `cancel` is what takes the card away. */
+    /**
+     * The host took the answer. The card is up for the settle grace and no longer:
+     * the host's reply has already said the waterfall is gone.
+     */
     data class Sent(val allow: Boolean) : ApprovalAnswer
 
     /**
@@ -82,8 +103,28 @@ sealed interface ApprovalAnswer {
  *  3. A refusal or a failed delivery returns the machine to a tappable state with
  *     [ApprovalAnswer.Unsent], and the queue outlives the attempt — that is what
  *     makes the retry possible at all.
- *  4. An accepted post leaves the machine in [ApprovalAnswer.Sent] and clears
- *     nothing. The host's `cancel` is the clear, and it is the only one.
+ *  4. An accepted post leaves the machine in [ApprovalAnswer.Sent] for a bounded
+ *     **settle grace** and then ends the wait, because the accepted reply itself is
+ *     the confirmation that the waterfall is settled. The card is not left waiting
+ *     for a second signal.
+ *
+ * ## Why the grace, and why not the `cancel`
+ *
+ * The earlier design made the host's `{type:"cancel"}` the only clear, on the
+ * belief that the host pushes one after it takes an answer. It does not push one to
+ * the client that answered: `receiveRemoteEventResult` removes the answering client
+ * from `pending.deliveries` *before* `finishRemoteEvent` builds its recipient set
+ * from that same map, so the cancel goes only to the *other* clients a waterfall was
+ * fanned out to. On a phone that is the only client, the recipient set is empty and
+ * no cancel is ever emitted — which is why a card could sit there until the process
+ * was restarted.
+ *
+ * The clear is therefore the accepted reply, which the host sends only after it has
+ * applied the outcome, and the grace is what the ordering assumption gets to hold
+ * in: a `cancel` that *does* arrive (another answerer got there first, or the host's
+ * own timeout fired) ends the wait at once, and one that never arrives costs only
+ * the grace. Nothing is speculated: the reply has already said the waterfall is
+ * gone.
  *
  * ## What it deliberately is not
  *
@@ -92,7 +133,15 @@ sealed interface ApprovalAnswer {
  * hands the request back through the same `send`, so a hand-back that does not arrive
  * is as visible as an answer that does not.
  */
-class ApprovalGate(private val timeoutMs: Long) {
+class ApprovalGate(
+    private val timeoutMs: Long,
+    /**
+     * How long [ApprovalAnswer.Sent] is held after an accepted answer, with a
+     * `cancel` cutting it short. Bounded rather than indefinite: the reply that
+     * produced the state is already the confirmation.
+     */
+    private val settleGraceMs: Long,
+) {
 
     private sealed interface Event {
         data class Tapped(val allow: Boolean) : Event
@@ -142,9 +191,13 @@ class ApprovalGate(private val timeoutMs: Long) {
     }
 
     /**
-     * The host withdrew this waterfall: its own timeout, or another answerer got
-     * there first. The wait ends with nothing sent, and the caller is left to drop
-     * the card and its notification.
+     * The host withdrew this waterfall: its own timeout, another answerer got
+     * there first, or the host is settling it now that the answer has landed.
+     *
+     * It ends the wait at once, from either a fresh wait or the settle grace. The
+     * caller is left to drop the card and its notification — or to find that it
+     * already has, because a host that takes the card down this way does so through
+     * the same handler.
      */
     fun withdraw() {
         events.trySend(Event.Withdrawn)
@@ -154,9 +207,9 @@ class ApprovalGate(private val timeoutMs: Long) {
      * Runs until this waterfall is settled, posting outcomes through [send].
      *
      * Returns only once there is nothing left to send: the host withdrew it, the cap
-     * expired and the request was handed back, or an answer was accepted. A refusal
-     * or a failed delivery loops to a fresh wait instead, so a failure stays
-     * answerable rather than being swallowed.
+     * expired and the request was handed back, or an answer was accepted and its
+     * settle grace ran out. A refusal or a failed delivery loops to a fresh wait
+     * instead, so a failure stays answerable rather than being swallowed.
      */
     suspend fun answer(send: suspend (JSONObject) -> AnswerDelivery) {
         while (true) {
@@ -185,6 +238,11 @@ class ApprovalGate(private val timeoutMs: Long) {
                     when (val delivery = send(outcomeFor(event.allow))) {
                         is AnswerDelivery.Accepted -> {
                             move(ApprovalAnswer.Sent(event.allow))
+                            // The reply is the confirmation, so the wait ends here —
+                            // after the grace, or sooner if a `cancel` arrives. Only a
+                            // withdrawal can be queued while the machine is `Sent`,
+                            // because `tap` refuses every state but Waiting and Unsent.
+                            withTimeoutOrNull(settleGraceMs) { events.receive() }
                             return
                         }
 

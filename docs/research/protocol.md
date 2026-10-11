@@ -271,13 +271,34 @@ Open it on the WS mux with `endpoint: "$events"` and `payload: {"args":{}}`. Fra
 { type: 'emit', event: string, args: unknown[] }
 // Host asks the client to answer a waterfall:
 { type: 'waterfall', event: string, eventId: string, agentId: string, request: object }
-// Host withdraws a pending waterfall:
+// Host withdraws a pending waterfall **for the other clients it was fanned out to**:
 { type: 'cancel', eventId: string }
 ```
 
 `request` never contains `agent` or `signal` — the Host projects them off
 (`projectRemoteEventRequest`, `stream-protocol.ts:145-172`; client rejects a request that carries
 them, `client/remote-events.ts:291-299`). `agentId` is the Session id of the scoped agent.
+
+**The client that answered a waterfall is never sent its `cancel`.** Its own accepted
+response is the settle. In the installed 0.2.0-rc.2 bundle
+(`@deepseek-ai/dsh-api-gateway/lib/index.js`), `receiveRemoteEventResult` removes the
+answering client from `pending.deliveries` and only then calls `settleRemoteEvent`, and
+`finishRemoteEvent` builds the cancel recipients from what is left of that set — empty
+when this client was the only one. So a client that waits for a `{type:'cancel'}` after
+its own `ok` waits for ever; the cancel is for *other* subscribers, which is also why
+the measured trace below (step 26 waterfall, step 27 POST) has no cancel after it. The
+host's `ok` is nonetheless authoritative that the waterfall settled, because
+`dispatchRpc` applies the `result` synchronously before it replies; what it does **not**
+say is that this particular answer was the one taken, since a post for an event that is
+no longer pending is answered `ok` as well (`receiveRemoteEventResult` returns on
+`pending === undefined` without throwing).
+
+The other durable fact is in `openRemoteEvents`: as a `$events` stream opens, the
+gateway delivers **every pending waterfall** to the new client before anything else, and
+names nothing it has settled (`finishRemoteEvent` deletes it from `pendingRemoteEvents`).
+A fresh generation is therefore also the host's pending list. There is no marker for the
+end of that batch, and no RPC that lists it — a client has to give the batch a bounded
+window.
 
 Answer a `waterfall` with a second **unary** HTTP call:
 

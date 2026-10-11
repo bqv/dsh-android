@@ -1383,8 +1383,9 @@ fun NoticeRow(
  *
  * The tap does not answer the card away. [answer] carries what has actually
  * happened since: nothing ([ApprovalAnswer.Waiting]), an answer on its way, an
- * answer the host took, or an answer that did not get through. Only the host's own
- * `cancel` takes the card away, so every state here has to be legible on its own —
+ * answer the host has taken, or an answer that did not get through. The accepted
+ * reply is what settles the card — it is up for a bounded grace and then gone, and a
+ * host `cancel` takes it sooner — so every state here has to be legible on its own,
  * and the buttons are inert for the two that have nothing left for a tap to do.
  */
 @Composable
@@ -1403,8 +1404,8 @@ fun ApprovalCard(
         ApprovalAnswer.Waiting -> null
         is ApprovalAnswer.Answering -> "Sending your answer…"
         is ApprovalAnswer.Sent ->
-            if (answer.allow) "Allowed once — waiting for the host to confirm."
-            else "Rejected — waiting for the host to confirm."
+            if (answer.allow) "Allowed once — the host has taken it."
+            else "Rejected — the host has taken it."
 
         is ApprovalAnswer.Unsent -> "Not sent: ${answer.message}."
     }

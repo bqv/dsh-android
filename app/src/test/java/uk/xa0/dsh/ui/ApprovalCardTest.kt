@@ -36,8 +36,9 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * They cannot show that the copy is *readable*: Robolectric stubs text metrics, so no
  * claim about wrapping, truncation or how a long failure message lays out can be made
  * here (`docs/HANDOFF.md`). Nor can they show what a reader actually does — the state
- * machine behind these is `model/ApprovalGateTest`, and the host's own `cancel` is
- * what clears a card in the app, which no test in this repository can produce.
+ * machine behind these is `model/ApprovalGateTest`, and how long a `Sent` card is up
+ * is the gate's settle grace, which is a duration and not something this harness can
+ * see.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = HarnessApplication::class)
@@ -90,13 +91,13 @@ class ApprovalCardTest {
     }
 
     @Test
-    fun `a sent card waits for the host and takes no tap`() {
+    fun `a sent card says the host has it and takes no tap`() {
         show(ApprovalAnswer.Sent(true))
         rule.onNodeWithText("Approval sent").assertExists()
-        rule.onNodeWithText("Allowed once — waiting for the host to confirm.").assertExists()
+        rule.onNodeWithText("Allowed once — the host has taken it.").assertExists()
         rule.onNodeWithText("Allow once").performClick()
         rule.waitForIdle()
-        assertEquals("an accepted answer is not sent twice", 0, allowed)
+        assertEquals("a taken answer is not sent twice", 0, allowed)
     }
 
     @Test

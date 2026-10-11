@@ -216,6 +216,19 @@ class RemoteMux(
     @Volatile
     var onWaterfallCancel: ((eventId: String) -> Unit)? = null
 
+    /**
+     * Called with the host's `clientId` each time a forwarded-event generation
+     * opens — the first connect and every reconnect alike.
+     *
+     * It is the one push that names what the host is still holding: as the
+     * `$events` stream opens, the gateway re-announces every pending waterfall to
+     * the new generation (`dsh-api-gateway/lib/index.js`, `openRemoteEvents`), and
+     * a waterfall it has settled is not pending and so is not named. The handler
+     * uses that roster to reconcile the cards it already has.
+     */
+    @Volatile
+    var onEventsGeneration: ((clientId: String) -> Unit)? = null
+
     @Volatile
     var onLog: ((String) -> Unit)? = null
 
@@ -355,7 +368,16 @@ class RemoteMux(
                     val value = frame.optJSONObject("value") ?: return
                     val streamId = frame.optString("streamId")
                     when (value.optString("type")) {
-                        "ready" -> eventClientId = value.optString("clientId")
+                        "ready" -> {
+                            val id = value.optString("clientId")
+                            if (id.isNotEmpty()) {
+                                eventClientId = id
+                                // A new generation is also the roster of what the
+                                // host still holds, delivered before anything else
+                                // on the stream.
+                                onEventsGeneration?.invoke(id)
+                            }
+                        }
                         "waterfall" -> handleWaterfall(value)
                         // The host withdraws a settled waterfall as a stream ITEM
                         // whose value type is "cancel" (the framing every other

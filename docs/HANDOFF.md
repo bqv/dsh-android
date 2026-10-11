@@ -563,29 +563,62 @@ one.
 
 ## Open items
 
-- **The confirmed approval answer is unit-tested and has never been answered on a
-  device.** The state machine (`model/ApprovalAnswer.kt`, `model/ApprovalGateTest.kt`)
-  and the card's four presentations (`ui/ApprovalCardTest.kt`) are covered on the JVM.
-  What no test here can produce is the host's own `cancel`, which is the *only* thing
-  that takes an accepted answer off the screen: that a `POST /api/$events/result` is
-  answered `ok` and followed by a `{type:"cancel", eventId}` item from
-  `finishRemoteEvent` is read from the gateway and the wire notes
-  (`docs/research/protocol.md`), not exercised. So the happy path — tap, "sent", card
-  clears on the host's cancel — rests on that contract. A live check has to be made on
-  a throwaway session, and answering a waterfall is a real authorisation, so it must
-  not be made against anything the user is running.
-- **If the host's cancellation never arrives, a `Sent` card stays up.** That is
-  deliberate — the answer *was* sent, and the honest thing is to say so — but a socket
-  that dies in the milliseconds between an accepted post and the host's cancel leaves
-  the card and its notification until the next `stop()`/`restart()` or the reader
-  opening the session. No test covers that window, and re-arming the answer after an
-  accepted post cannot help: answering a settled `eventId` is a swallowed no-op at the
-  host.
+- **Why an accepted approval used to stay on screen: the host never cancels the client
+  that answered.** Read from the installed gateway, `@deepseek-ai/dsh-api-gateway`
+  0.2.0-rc.2, `lib/index.js`. `receiveRemoteEventResult` removes the answering client
+  from `pending.deliveries` and only then calls `settleRemoteEvent`; `finishRemoteEvent`
+  builds its cancel recipients from what is left of that same set. On a phone that is
+  the only event client, the set is empty and no `{type:"cancel"}` is ever pushed. The
+  cancel exists for the *other* clients a waterfall was fanned out to. The measured
+  session trace in `docs/research/protocol.md` (step 27: the POST; no cancel after it)
+  shows the same thing.
+- **What clears an accepted answer now, and why it is not a guess.** The gateway applies
+  a `result` outcome synchronously inside `dispatchRpc` before it answers `ok`, so the
+  accepted reply is the host's own word that the waterfall has settled —
+  `AnswerDelivery.Accepted` is that reply. `ApprovalGate` holds `Sent` for
+  `APPROVAL_SETTLE_GRACE_MS` (1.5 s) so an earlier `cancel` can take the card first, and
+  then ends the wait; `AttentionCenter.settleApproval` takes the card **and its
+  notification**. `ok` is not the same statement as "this answer was the one taken" — a
+  post for an already-settled event is answered `ok` too, because the no-op path returns
+  without throwing — but both readings mean the host is no longer holding the waterfall,
+  which is the fact the card needs.
+- **The durable reconciliation is the host's re-announcement roster.** `openRemoteEvents`
+  re-delivers every waterfall still in `pendingRemoteEvents` to a newly opened `$events`
+  stream, before anything else on it, and names nothing it has settled. So a fresh
+  generation is also the host's pending list; a card it does not re-announce within
+  `RECONCILE_GRACE_MS` (3 s) has been settled. `RemoteMux.onEventsGeneration` reports
+  each generation and `model/ApprovalRoster.kt` pairs event ids with the generation that
+  named them. A route move rebuilds the mux, so `AttentionCenter.stop()` drops every card
+  and the re-announcement raises the pending ones again; a socket-only reconnect keeps
+  the cards and reconciles them; a process freeze ends in a reconnect either way. The
+  wire carries **no marker for the end of the re-announcement batch**, so this window is
+  a real assumption — a re-announcement slower than it clears a card, and the late frame
+  then raises that card again, which is why the window can be short.
+- **Nothing here authorises twice.** A re-announcement proves the host still holds the
+  waterfall, so any previous answer was not applied (an applied `result` settles the
+  event and it leaves `pendingRemoteEvents`), which is what makes the fresh card
+  legitimately tappable. `ApprovalGate` refuses every tap past `Waiting`/`Unsent`, and
+  `AttentionCenter` writes a card, settles one and reconciles one only from the gate
+  that still owns it and only under the roster's monitor — the claim, the state write,
+  the host's `cancel` and the reconciliation window are serialised, so a replaced wait
+  cannot clear or re-answer the live card and an expiring window cannot take a card the
+  host has just re-announced. A duplicate post to a settled event id is a swallowed
+  no-op at the host (`receiveRemoteEventResult` returns on `pending === undefined`), and
+  nothing in the app now posts one.
+- **Unverified.** No test here can produce the host's own `cancel`, its re-announcement
+  batch, or its accepted reply: `model/ApprovalGateTest.kt` talks to a stand-in host and
+  `model/ApprovalRosterTest.kt` has no wire at all. The gateway readings above are from
+  the installed bundle, not from a live answer — answering a waterfall is a real
+  authorisation, and none was made. The 1.5 s and 3 s windows are chosen, not measured
+  on a real link. A live check belongs on a throwaway session that approves nothing the
+  user is running.
 - **The question path is still optimistic.** `answerQuestions` / `skipQuestions` clear
   the question card and its notification on submit and never inspect the reply — the
   same defect this change fixes for approvals, left in place because the fix needs its
   own card states. The mux now hands that path the same send sink, so the work is a
-  second `ApprovalGate`-shaped machine rather than a second protocol change.
+  second `ApprovalGate`-shaped machine rather than a second protocol change. It does not
+  get the roster either: a settled question now lingers exactly as a settled approval
+  used to.
 - **The terminal readout is proven on the host and unproven on the phone.** The
   protocol was measured against both live routers with a websocket client
   (`~/tmp/routerprobe/readout.mjs`), the numbers are in the section above, and the app

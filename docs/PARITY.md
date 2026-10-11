@@ -18,12 +18,23 @@ of where the app stands against them.
       `ask_user_question` with `{answers:[{id,selected,custom?}]}`. One `$events`
       registration process-wide, owned by `AttentionCenter.kt`; it relays
       `api-session/status` to the ViewModel.
-      An approval answer is **not** optimistic any more: a tap moves the card into an
+      An approval answer is **not** optimistic: a tap moves the card into an
       answering state (`model/ApprovalAnswer.kt`, `ApprovalGate`), the post is
-      inspected, a refusal or an unreachable host leaves the item tappable with the
-      reason on the card, and only the host's own `cancel` clears it.
+      inspected, and a refusal or an unreachable host leaves the item tappable with
+      the reason on the card. The clear is the host's **accepted reply**, held for a
+      bounded settle grace so an earlier `cancel` can take it first
+      (`APPROVAL_SETTLE_GRACE_MS`, 1.5 s). The gateway applies a `result` before it
+      answers `ok` (`dsh-api-gateway/lib/index.js`: `dispatchRpc` and
+      `receiveRemoteEventResult`), and it does **not** send its `cancel` to the client
+      that answered (`finishRemoteEvent` builds its recipients from
+      `pending.deliveries` after the answerer has been removed from it), so a card
+      that waited for that cancel waited for ever. A second, durable reconciliation
+      uses the host's own re-announcement roster: a fresh `$events` generation is told
+      every waterfall the host still holds (`openRemoteEvents`), so a card it does not
+      name within a bounded window is settled (`model/ApprovalRoster.kt`,
+      `AttentionCenter.handleGeneration`). Card and notification always go together.
       `RemoteMux.onWaterfall` hands the handler a send sink instead of taking one
-      returned outcome, because an answer can now be posted more than once. The
+      returned outcome, because an answer can be posted more than once. The
       **question** path is unchanged and still clears on submit without inspecting the
       reply — the same defect, left in place deliberately (`docs/HANDOFF.md`)
 - [x] Dark + light themes from DSH tokens (`ui/theme/DshTheme.kt`)
@@ -265,9 +276,11 @@ of where the app stands against them.
       into an earlier line opens or retargets the menu instead of reading the draft's end
       (`ui/composer/ComposerTriggers.kt: detectTriggerToken`)
 - [x] Approval card above the card, in four presentations: waiting (both buttons live),
-      answering, sent and awaiting the host's confirmation, and not sent with the
-      reason and both buttons live again (`ui/components/ChatRows.kt: ApprovalCard`).
-      The buttons are inert in the middle two, and a tap never clears the card
+      answering, sent (the host has taken it, and the card has the settle grace left),
+      and not sent with the reason and both buttons live again
+      (`ui/components/ChatRows.kt: ApprovalCard`). The buttons are inert in the middle
+      two, a tap never clears the card, and the card leaves with its notification when
+      the answer settles
 - [x] Todo card above the card
 - [x] Queue dock (`session/updateQueue`: edit / remove / steer, long-press send mode,
       "Send behavior while busy") at dock order 20
