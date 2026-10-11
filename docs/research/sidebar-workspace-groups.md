@@ -312,6 +312,78 @@ was touched for this change (the orchestrating session runs them). The rules sta
 `model/WorkspaceGroups.kt` because the unit-test source set is not a friend of `main` and the
 drawer's `remember` block cannot be reached from the JVM harness.
 
+## A folded Workspace holding live work reads blue (2026-10-11)
+
+Request: "lets have collapsed workspaces with a running agent inside show as blue, so they cant
+be missed". A folded header said nothing at all about the work inside it, so a reader who had
+collapsed a directory could miss a running agent entirely.
+
+**What is tinted, and on what field.** `SessionItem.running` — `RunningBook`'s answer, and the
+one liveness source in the app (`model/LiveRunning.kt`). Deliberately not `containsCurrent`: that
+is the web's `folderActive`, "the session you have open lives here", a fact about the reader's
+own position rather than about work, and the folder glyph already carries it. The journal fold
+`subagentTiming.active` is not read anywhere in this: a killed turn leaves it set forever
+(`docs/HANDOFF.md` item 15), and a header stuck blue over a dead child would be worse than no
+signal.
+
+**Two facts, two elements, one blue.** The new rule is `WorkspaceRunState` in
+`model/WorkspaceGroups.kt` — `Running` | `Idle` | `Unknown` — decided by `workspaceRunState`
+over the group's accounted members ("no live work" below is both `Idle` and the `Unknown` state
+the next paragraph describes):
+
+| holds the open session | holds live work | folder glyph | title |
+| --- | --- | --- | --- |
+| no | no | tertiary | secondary |
+| yes | no | accent | secondary |
+| no | yes | tertiary | **accent (blue)** |
+| yes | yes | accent | **accent (blue)** |
+
+The blue token is shared but never carries two meanings on one element: the glyph means "you are
+here" and the title means "something here is running", so all four combinations draw differently
+and the ambiguity the request could have introduced did not happen by accident.
+
+**Unknown is neither blue nor silent.** If the registry names a member the roster has not
+delivered and nothing known is running, "nothing is running in here" is not a fact: the title
+keeps its normal colour (never the blue) *and* the header says `Running: unknown`
+(`stateDescription`), the app's standing convention for a reading it cannot confirm (the
+widget's `(known, value, asOf)` and its `Running: unknown`; the Router tab's "not asked"). The
+count column, which `WorkspaceGroupState.Loading` already refuses to fill, now prints `unknown`
+rather than nothing — a folded group has no "Sessions not loaded" note under it (that row only
+draws when the group is open), so the blank figure was the last silent case. A member that *is*
+running outranks an undelivered one: "something is running" stays true however much of the
+membership is still in flight, and only the negative needs the whole list.
+
+**Folded only, or always?** Always. An open group is capped at six rows until "Show N more"
+(`PAGE_SIZE`), and the drawer holds the roster's order still while it is open (`holdOrder`), so
+the running row can be below the fold of an expanded group too — and the header is sticky, so
+the tint is the one part of the group still on screen while its rows are scrolled through.
+
+**A running subagent counts.** Subagents are never top-level rows and, measured on the running
+host, never Workspace members either — a Workspace's nine members held no subagent while
+sixty-seven subagents had a parent inside it. So the derivation is `liveWorkIds`: a member whose
+own turn is running, or a member the rollup credits with a running descendant
+(`indexSubagentRollups(...).filterValues { it.running > 0 }.keys`). That is the same accent the
+row already draws as its descendant count and the header chip draws as `+N running`, so the
+header is that fact lifted one level — and still `SessionItem.running` underneath. Every group
+header is decided this way, not only Workspace ones: Ungrouped, the flat list and Automations
+fold the same way and hide rows the same way. The automation runs are subtracted from a
+Workspace's own member list, as the section's rows are, so a lifted run does not tint two
+headers at once.
+
+**Tests.** `WorkspaceGroupTest` pins the decider and the three-way distinction (a running member
+beating an undelivered one, an empty Workspace being idle rather than unknown, a running
+descendant reaching its ancestor's group, and the two spoken strings apart).
+`SessionsDrawerRunningTest` (Robolectric) pins the wiring end to end through the header's
+`stateDescription`, the blue's accessible twin: folded running, running via a delegated
+subagent, expanded running, idle drawing no claim at all, and a Workspace whose member never
+arrived reading `Running: unknown` with `unknown` where its count would be.
+
+Unverified as of writing: nothing here was compiled or run — no build, no test and no device was
+touched for this change (the orchestrating session runs them). The blue itself is not measured
+anywhere: the JVM harness has no text metrics and no pixels, so the colour is asserted only
+through the state that decides it, and a wrong token in `ui/SessionsDrawer.kt` would pass every
+test here.
+
 ## Observed but out of scope
 
 The blank-"New Session" landing on `--es uk.xa0.dsh.session <id>` is fixed:

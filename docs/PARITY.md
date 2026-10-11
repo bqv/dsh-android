@@ -44,6 +44,16 @@ of where the app stands against them.
       no count at all (`model/WorkspaceGroups.kt`, `WorkspaceGroupTest`). The header tap
       keeps its one meaning — fold/unfold — and never clears a filter
       (`ui/SessionsDrawer.kt`); see the rationale in `docs/research/sidebar-workspace-groups.md`
+- [x] **A group header holding live work reads blue**, and says `Running` to a screen reader. The
+      blue is `WorkspaceRunState.Running` over the group's accounted members — `SessionItem.running`,
+      plus a member with a running descendant, because a subagent is never a Workspace member — and
+      never `containsCurrent`, which keeps the folder glyph's own "you are here" meaning on its own
+      element, so the four combinations of the two facts draw differently. A group holding a member
+      the roster has not delivered is **not** tinted and is not silently drawn as idle: its title
+      takes the caption tint rather than any blue, it says `Running: unknown`, and where it has no
+      figure at all its count column prints `unknown` rather than nothing (`model/WorkspaceGroups.kt`,
+      `ui/SessionsDrawer.kt`, `SessionsDrawerRunningTest`); see
+      `docs/research/sidebar-workspace-groups.md`
 - [x] **Ungrouped** bucket for sessions outside every workspace
 - [x] Group by: `WorkSpace` / `List`; Order by: `Manual` / `Updated` (persisted in `ConfigStore`)
 - [x] Per-section collapse + "Show N more sessions" / "Show less"
