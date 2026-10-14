@@ -1586,6 +1586,12 @@ fun ChatScreen(vm: DshViewModel) {
             // app recorded against it. Nothing else on this page can tell "the LAN
             // is not here" from "the LAN answered and the app is avoiding it".
             lanDoorFault = ui.lanDoorFault,
+            // And the other reason a public route needs a sentence: no LAN address
+            // is configured, so no LAN door was ever in the running.
+            lanRouteConfigured = ui.lanRouteConfigured,
+            // A wrong answer is the one verdict no automatic path may lift, so the
+            // reader is offered the one action that can: their own "try again".
+            onRetryLanRoute = vm::connect,
             // The host's own DSH version, from its `$events` opening frame. Never
             // this app's version; see `model/HostVersion.kt`.
             hostVersion = ui.hostVersion,

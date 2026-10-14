@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -341,8 +342,9 @@ class DshClient(context: Context) {
         if (config.isConfigured) watchConnectivity() else stopWatchingConnectivity()
         // Prime the cache for whoever is listening, but do not reroute: the
         // config change itself has already dropped the multiplexer, and the
-        // caller of applyConfig owns the reconnect that follows.
-        scope.launch { runCatching { resolveRoute(notify = false) } }
+        // caller of applyConfig owns the reconnect that follows — which resolves
+        // again, through [dialRoute], before it dials.
+        scope.launch { runCatching { refreshRoute() } }
     }
 
     /**
@@ -409,10 +411,51 @@ class DshClient(context: Context) {
      * already dropped the multiplexer, so a second nudge here would race the
      * caller's own connect. [requestRouteRefresh] is the path that notifies, and
      * [recheckRoute] the one that reports the move back to its own caller.
+     *
+     * Honours the cache: a winner resolved inside the TTL is returned as it is.
+     * That is right for priming and wrong for a dial, which is why [dialRoute]
+     * exists.
      */
     suspend fun refreshRoute() {
         resolveRoute(notify = false)
     }
+
+    /**
+     * The route for a dial that is about to happen: probed now, in LAN-first
+     * order, rather than remembered.
+     *
+     * A connect, a reconnect and a fresh open are all questions about the wire as
+     * it is at that moment. The cached winner is an answer about the wire as it
+     * was, on a network the process may not have seen a callback for since — a
+     * phone that has been in a pocket, a host that has restarted, a Wi-Fi
+     * reassociation nobody reported. So this forces the probe whatever the TTL
+     * says, and reports whether *this* resolution moved the route, which is what
+     * tells the caller to rebuild the multiplexer the old address owned.
+     *
+     * [forgive] is for a dial a person asked for: their "try again" outranks every
+     * hold the resolver recorded, including a wrong-answer verdict, because it is
+     * evidence the app cannot obtain on its own; see
+     * [EndpointResolver.forgiveByUser]. Every automatic dial passes false, so a
+     * door that is being avoided stays avoided and a captive portal costs one
+     * failed attempt per request a human made rather than one per retry.
+     *
+     * Does not notify, like [refreshRoute]: the caller owns its own rewire.
+     */
+    suspend fun dialRoute(forgive: Boolean = false): Boolean {
+        if (forgive) {
+            Log.d(ROUTE_TAG, "a user asked again: clearing every door hold")
+            endpoint.forgiveByUser()
+        }
+        endpoint.invalidate()
+        return resolveRoute(notify = false)
+    }
+
+    /**
+     * Whether a LAN candidate exists for this config at all; see
+     * [EndpointResolver.hasLanCandidate]. False means no probe of the LAN door can
+     * ever run, which is a missing setting rather than a failed door.
+     */
+    fun hasLanCandidate(): Boolean = endpoint.hasLanCandidate
 
     /**
      * A fresh look at the route after an absence, for the one caller whose reason
@@ -428,12 +471,14 @@ class DshClient(context: Context) {
      * case it has already dropped the multiplexer every stream was bound to and
      * the caller must rebuild before it dials again.
      *
-     * This is also the one path that forgives: a resume is a deliberate "ask again
-     * after an absence", so the LAN door's transport failure — the shape a stale
-     * socket or a host restart leaves — is retried now rather than after the hold
-     * it earned. A door that answered real traffic with something that was not DSH
-     * is never forgiven here, and the forgiveness itself is bounded; see
-     * [EndpointResolver.grantRetry].
+     * This is the one path that forgives a *transport* hold on its own account: a
+     * resume is a deliberate "ask again after an absence", so the LAN door's
+     * transport failure — the shape a stale socket or a host restart leaves — is
+     * retried now rather than after the hold it earned. A door that answered real
+     * traffic with something that was not DSH is never forgiven here, and the
+     * forgiveness itself is bounded; see [EndpointResolver.grantRetry]. The only
+     * thing that lifts a wrong-answer verdict is a person's own action, through
+     * [dialRoute] with `forgive`; see [EndpointResolver.forgiveByUser].
      */
     suspend fun recheckRoute(): Boolean {
         endpoint.grantRetry()
@@ -461,6 +506,7 @@ class DshClient(context: Context) {
     private suspend fun resolveRoute(notify: Boolean): Boolean {
         val choice = endpoint.resolve()
         if (!choice.changed) return false
+        Log.d(ROUTE_TAG, "route moved to ${endpoint.peek()} (lan=${endpoint.isLan})")
         mux?.shutdown()
         mux = null
         if (notify) onRouteChanged?.invoke()
@@ -780,17 +826,21 @@ class DshClient(context: Context) {
                 if (text.isBlank()) throw DshRpcException("http/${response.code}", "Empty response from host", null)
 
                 val parsed = runCatching { JSONObject(text) }.getOrElse {
-                    // Content that is not JSON did not come from a DSH host. A
-                    // captive portal answers this way, and the probe that chose
-                    // the door cannot tell: see [onRouteFailure].
-                    onRouteFailure(DoorFault.WrongAnswer)
+                    // Content that is not JSON. Whether that is a verdict on the
+                    // door or the host's own surface failing the call is what the
+                    // status says; see [doorFaultForAnswer]. A captive portal
+                    // answers its page with 200, which is the case the verdict is
+                    // for; a 502 from the auth gate while the carrier restarts is
+                    // not, and treating it as one set the LAN door aside until the
+                    // network changed.
+                    onRouteFailure(doorFaultForAnswer(response.code))
                     throw DshRpcException("http/${response.code}", text.take(400), null)
                 }
                 val result = parsed.optJSONObject("result")
                     ?: run {
-                        // JSON, but not this protocol's envelope — the same
-                        // conclusion as above, for an answer that parsed.
-                        onRouteFailure(DoorFault.WrongAnswer)
+                        // JSON, but not this protocol's envelope — the same question
+                        // as above, answered the same way.
+                        onRouteFailure(doorFaultForAnswer(response.code))
                         throw DshRpcException("protocol", "Malformed response envelope", null)
                     }
 
@@ -862,13 +912,14 @@ class DshClient(context: Context) {
      *
      * A timeout, a dropped socket, no route: that is precisely what a stale LAN
      * choice looks like, the address having answered a minute ago and the phone
-     * having since left the network, and it is [DoorFault.Transport]. An
-     * unparseable answer is the *other* shape, and the one a captive portal
+     * having since left the network, and it is [DoorFault.Transport]. An answer
+     * that is not a DSH envelope is the *other* shape, and the one a captive portal
      * produces: it answers every address with its own page, so the cheap `GET /`
      * the resolver probes with succeeds and only a real gateway call reveals that
-     * nothing here speaks DSH. That one is [DoorFault.WrongAnswer], and the
-     * resolver keeps such a door out until the network changes rather than
-     * pretending a fresh probe of it would know better.
+     * nothing here speaks DSH. Which of the two a non-envelope answer is depends on
+     * the status that carried it — see [doorFaultForAnswer], which is what keeps the
+     * host's own `404` and the auth gate's `502` from being read as a verdict on the
+     * door and setting the LAN aside until the network changes.
      *
      * Either way the door is recorded before the cache is dropped, so the
      * re-resolution that follows lands on the other one instead of choosing the
@@ -881,7 +932,9 @@ class DshClient(context: Context) {
      * one outage must not be able to hide behind the cooldown.
      */
     private fun onRouteFailure(kind: DoorFault) {
-        endpoint.noteFailure(endpoint.peek(), kind)
+        val door = endpoint.peek()
+        Log.w(ROUTE_TAG, "$kind recorded against $door")
+        endpoint.noteFailure(door, kind)
         val now = System.currentTimeMillis()
         if (now - lastRouteFailureAt < ROUTE_FAILURE_COOLDOWN_MS) return
         lastRouteFailureAt = now
@@ -897,6 +950,17 @@ class DshClient(context: Context) {
 
     companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
+
+        /**
+         * The tag the route decisions are left under.
+         *
+         * The resolver is deliberately invisible when it works, which is what makes
+         * "the LAN got stuck again" unanswerable after the fact: the screen says
+         * Public without saying whether the LAN door was probed and missed, or set
+         * aside and not re-asked. These lines are the difference, and they are the
+         * only route state that leaves the process.
+         */
+        private const val ROUTE_TAG = "DshRoute"
 
         /** At most one route-failure re-probe per this window; see [onRouteFailure]. */
         private const val ROUTE_FAILURE_COOLDOWN_MS = 5_000L

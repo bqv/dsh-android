@@ -172,6 +172,10 @@ fun AboutSheet(
     activeRouteLan: Boolean = false,
     /** Why the LAN door is not the active route, when it is not; see [AboutContent]. */
     lanDoorFault: DoorFault? = null,
+    /** Whether a LAN address exists to try at all; see [AboutContent]. */
+    lanRouteConfigured: Boolean = true,
+    /** The reader's own "try the LAN door again"; see [AboutContent]. */
+    onRetryLanRoute: (() -> Unit)? = null,
     /** The DSH version the connected host named in its `$events` opening frame. */
     hostVersion: HostVersion = HostVersion.Unknown,
     /**
@@ -214,6 +218,8 @@ fun AboutSheet(
             activeUrl = activeUrl,
             activeRouteLan = activeRouteLan,
             lanDoorFault = lanDoorFault,
+            lanRouteConfigured = lanRouteConfigured,
+            onRetryLanRoute = onRetryLanRoute,
             hostVersion = hostVersion,
             lanUrl = lanUrl,
             onLanUrl = onLanUrl,

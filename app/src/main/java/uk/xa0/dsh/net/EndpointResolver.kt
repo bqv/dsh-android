@@ -114,6 +114,31 @@ enum class DoorFault {
 }
 
 /**
+ * How a door's answer that was not a DSH envelope should be recorded, from the
+ * status that carried it.
+ *
+ * A door that answers **2xx** with something that is not DSH is the shape
+ * [DoorFault.WrongAnswer] is for: it answered as though the request were fine, and
+ * what came back was another service's page — a captive portal, or a machine that
+ * has taken the host's address. No door that speaks DSH answers a gateway call
+ * that way, so the answer is a verdict on the door.
+ *
+ * A door that answers **4xx/5xx** with something that is not DSH is the host's own
+ * surface failing the call: the webserver's `404 not found` for an endpoint it does
+ * not serve, the auth gate's `502 bad gateway` while the carrier restarts, a 500
+ * page. Those say nothing about *which* door this is, and treating them as a
+ * verdict is what would set the LAN aside until the network changed every time the
+ * host hiccupped — a permanent trap built out of a transient fact. They are
+ * recorded as [DoorFault.Transport], whose hold is bounded, lengthens with each
+ * repeat, and is forgiven by the clock and by a resume.
+ *
+ * A top-level function rather than a private branch so the rule itself is
+ * addressable from the unit-test source set, which is not a friend of this one.
+ */
+fun doorFaultForAnswer(status: Int): DoorFault =
+    if (status in 200..299) DoorFault.WrongAnswer else DoorFault.Transport
+
+/**
  * Decides which door traffic goes through: the LAN address when the phone can
  * reach it, the public URL otherwise, and again whenever the network moves.
  *
@@ -141,7 +166,11 @@ enum class DoorFault {
  *   calls, may lift a hold early, a bounded number of times.
  * - A [DoorFault.WrongAnswer] — it answered, and the answer was not DSH — is a
  *   verdict on the door itself. A fresh probe of it is fooled in exactly the same
- *   way, so only [networkChanged] brings that door back.
+ *   way, so the clock does not bring that door back and [grantRetry] refuses to.
+ *   Two things do: [networkChanged], and [forgiveByUser], which is a person
+ *   asking again. The second exists because a verdict nothing the user can do
+ *   will revisit is indistinguishable, from the outside, from an app that has
+ *   quietly stopped trying.
  *
  * Holding every failure until the network changed, which is what this used to do,
  * meant one transient failure left the LAN door avoided for the life of that
@@ -346,6 +375,39 @@ class EndpointResolver(
         faults.clear()
         invalidate()
     }
+
+    /**
+     * A person asked again, which excuses every door at once for a different
+     * reason: they are holding the phone.
+     *
+     * This is the only path that lifts a [DoorFault.WrongAnswer] verdict, and it is
+     * deliberately not wired to anything automatic. The clock is not evidence about
+     * a door that answered with something which was not DSH — a captive portal
+     * answers a probe exactly as it answered the first one — and neither is a
+     * resolve, a retry or a resume, which the app makes on its own. A person is a
+     * different kind of evidence: they may have just walked into the house, swapped
+     * the router, or plugged the host back in, and none of that reaches a
+     * connectivity callback the app is guaranteed to see.
+     *
+     * Forgiving everything is the honest reading of one deliberate action. What it
+     * must not become is a cadence, and it cannot: nothing calls this except a
+     * caller acting on a tap, so a door that answers wrongly again is avoided again
+     * by the call that followed, and the cost of the re-ask is one failed attempt
+     * per request a human made.
+     */
+    fun forgiveByUser() {
+        faults.clear()
+    }
+
+    /**
+     * Whether any LAN candidate is configured at all.
+     *
+     * A different fact from "the LAN door failed": with no candidate there is
+     * nothing to probe, nothing to record a fault against, and no probe that could
+     * ever change the answer — so a reader who is told only "Public" would be
+     * looking at a missing setting and reading it as a broken door.
+     */
+    val hasLanCandidate: Boolean get() = lan != null
 
     /**
      * Mark the cached answer stale, so the next [refresh] probes again.

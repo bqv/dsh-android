@@ -116,6 +116,23 @@ fun AboutContent(
      */
     lanDoorFault: DoorFault? = null,
     /**
+     * Whether a LAN address exists to try at all. Defaulted to true so a caller
+     * that passes nothing says nothing: this note is for the reader who is looking
+     * at a public route and needs to know that no LAN door was ever in the running,
+     * which is a missing setting rather than a failed door.
+     */
+    lanRouteConfigured: Boolean = true,
+    /**
+     * The reader's own "try the LAN door again", if this caller can offer one.
+     *
+     * The resolver holds a door that answered with something which was not DSH
+     * until the network changes, and nothing automatic may lift that — a captive
+     * portal answers a probe exactly as it answered the first. Without an action
+     * here the verdict would be one no reader could ever revisit, which is
+     * indistinguishable from the app having stopped trying. Null hides the action.
+     */
+    onRetryLanRoute: (() -> Unit)? = null,
+    /**
      * The DSH version of the host this app is actually connected to, as that host
      * named it in its `$events` opening frame. Never this app's own version: the
      * host is a remote machine and the two releases move independently. Defaulted
@@ -223,7 +240,31 @@ fun AboutContent(
         // exactly the "works now, I do not know why" this app's convention says to
         // name instead. Omitted when there is nothing to explain: no fault, or a
         // fault on a door that is nevertheless the one in use.
-        lanDoorFault?.let { fault -> SectionNote(lanDoorNote(fault)) }
+        //
+        // A missing LAN address is the other reason a public route needs a
+        // sentence, and a different fact: nothing is probed, so no fault can ever be
+        // recorded and no reconnect can change the answer. Without this the two read
+        // identically from here.
+        val fault = lanDoorFault
+        when {
+            fault != null -> SectionNote(lanDoorNote(fault))
+            !lanRouteConfigured -> SectionNote(ABOUT_LAN_DOOR_UNCONFIGURED)
+        }
+        // And the one action that can revisit a verdict the clock may not: a person
+        // asking again. Offered only when there is a fault to revisit, because the
+        // other case needs a setting rather than a retry — the field is right below.
+        val retryLan = onRetryLanRoute
+        if (retryLan != null && fault != null) {
+            Column(Modifier.padding(horizontal = DshSpacing.xxl)) {
+                Spacer(Modifier.height(DshSpacing.sm))
+                Text(
+                    text = ABOUT_LAN_DOOR_RETRY,
+                    style = DshType.bodyMedium,
+                    color = colors.link,
+                    modifier = Modifier.clickableNoRipple { retryLan() },
+                )
+            }
+        }
 
         // The second door, edited where the other connection facts are read. Bound to
         // a stable local so the save lambda captures a non-null function rather than
@@ -449,6 +490,21 @@ const val ABOUT_LAN_DOOR_TRANSPORT: String =
 const val ABOUT_LAN_DOOR_WRONG_ANSWER: String =
     "The LAN door answered a real call with something that was not DSH, so it is set " +
         "aside until the network changes."
+
+/**
+ * What the About page says when there is no LAN address to try at all.
+ *
+ * Not a fault and not a failure: the resolver has no candidate, so nothing is
+ * probed and no reconnect can change the route. A reader who has set the LAN
+ * address on another screen is owed the difference between that setting being
+ * missing and the door being refused.
+ */
+const val ABOUT_LAN_DOOR_UNCONFIGURED: String =
+    "No LAN address is set, so only the public door is tried. If this phone is " +
+        "usually on the same network as the host, set one below."
+
+/** The action that takes a LAN-door verdict back to the doors themselves. */
+const val ABOUT_LAN_DOOR_RETRY: String = "Try the LAN door again"
 
 /** The sentence for one fault; see [ABOUT_LAN_DOOR_TRANSPORT]. */
 private fun lanDoorNote(fault: DoorFault): String = when (fault) {

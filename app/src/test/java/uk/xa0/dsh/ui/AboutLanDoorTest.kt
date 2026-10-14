@@ -31,7 +31,11 @@ class AboutLanDoorTest {
     @get:Rule
     val rule = createComposeRule()
 
-    private fun about(fault: DoorFault?) {
+    private fun about(
+        fault: DoorFault?,
+        lanRouteConfigured: Boolean = true,
+        onRetryLanRoute: (() -> Unit)? = null,
+    ) {
         rule.setContent {
             DshTheme {
                 AboutContent(
@@ -45,6 +49,8 @@ class AboutLanDoorTest {
                     activeUrl = "https://host.example/",
                     activeRouteLan = false,
                     lanDoorFault = fault,
+                    lanRouteConfigured = lanRouteConfigured,
+                    onRetryLanRoute = onRetryLanRoute,
                 )
             }
         }
@@ -71,5 +77,33 @@ class AboutLanDoorTest {
         about(null)
         rule.onNodeWithText(ABOUT_LAN_DOOR_TRANSPORT).assertDoesNotExist()
         rule.onNodeWithText(ABOUT_LAN_DOOR_WRONG_ANSWER).assertDoesNotExist()
+    }
+
+    @Test
+    fun `a missing LAN address is named as a setting, not a failure`() {
+        // The two facts a public route can mean, and the page must not conflate
+        // them: a door that answered wrongly, and no door to try at all. The second
+        // has no fault to explain, so without this note it would read as an app that
+        // simply prefers the tunnel.
+        about(null, lanRouteConfigured = false)
+        rule.onNodeWithText(ABOUT_LAN_DOOR_UNCONFIGURED).assertExists()
+        rule.onNodeWithText(ABOUT_LAN_DOOR_TRANSPORT).assertDoesNotExist()
+    }
+
+    @Test
+    fun `a wrong answer offers the one action that can revisit it`() {
+        // The verdict no automatic path may lift, and the reader's own "try again":
+        // a fault the reader can never revisit is indistinguishable from an app that
+        // has stopped trying.
+        about(DoorFault.WrongAnswer, onRetryLanRoute = {})
+        rule.onNodeWithText(ABOUT_LAN_DOOR_RETRY).assertExists()
+    }
+
+    @Test
+    fun `no retry is offered when there is no fault to revisit`() {
+        // A missing address needs a setting rather than a retry, and the field that
+        // takes one is on the same page.
+        about(null, lanRouteConfigured = false, onRetryLanRoute = {})
+        rule.onNodeWithText(ABOUT_LAN_DOOR_RETRY).assertDoesNotExist()
     }
 }

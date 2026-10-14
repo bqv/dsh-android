@@ -850,6 +850,16 @@ data class UiState(
      * app is deliberately working around.
      */
     val lanDoorFault: DoorFault? = null,
+    /**
+     * Whether a LAN candidate exists for the configured address at all.
+     *
+     * A different fact from [lanDoorFault], and the one a reader on the public
+     * route cannot otherwise see: with no LAN address set — and a public `baseUrl`,
+     * which is the case the fallback does not cover — nothing is ever probed, so no
+     * fault can be recorded and no amount of reconnecting changes the answer. The
+     * app would look exactly like one whose LAN door keeps failing.
+     */
+    val lanRouteConfigured: Boolean = true,
     val socketConnected: Boolean = false,
     /**
      * The mux's real four-state value, carried beside [socketConnected] so every
@@ -1123,6 +1133,17 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Failed connect attempts since the last success, for [scheduleReconnect]. */
     private var connectRetries = 0
+
+    /**
+     * Whether the connect about to run was asked for by a person, and may therefore
+     * lift a door hold the resolver recorded — including a wrong-answer verdict.
+     *
+     * Armed by [connect] and consumed by the one attempt it starts: the retries
+     * [scheduleReconnect] schedules are the app's own, and they keep every hold, so
+     * a door that is being avoided is not re-chosen once per attempt. See
+     * [DshClient.dialRoute] and [uk.xa0.dsh.net.EndpointResolver.forgiveByUser].
+     */
+    private var routeForgives = false
 
     /**
      * One silent re-login per auth episode.
@@ -2396,14 +2417,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (config.isConfigured) {
-            viewModelScope.launch {
-                // Resolve the door before dialling, so the first connect already
-                // prefers the LAN rather than starting public and rerouting.
-                client.refreshRoute()
-                publishRoute()
-                ensureMuxWiring()
-                connect()
-            }
+            // The dial owns the route question: [attemptConnect] probes the doors in
+            // LAN-first order before the multiplexer and the socket are built on the
+            // answer. Resolving here as well would only make a fresh open ask the
+            // same two doors twice.
+            connect()
         } else {
             _ui.value = _ui.value.copy(phase = AppPhase.SETUP)
         }
@@ -2591,11 +2609,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * Store a config, re-seed the client's route candidates, and dial.
      *
      * [DshClient.applyConfig] drops the multiplexer whatever the route turns out
-     * to be, so the rewire below is unconditional; the resolution runs first so
-     * both the mux's event URL and the unary calls use the door that actually
-     * answers. [DshClient.refreshRoute] deliberately does not notify here — this
-     * method owns the reconnect, and a second nudge from the route hook would
-     * race it.
+     * to be, so the rewire below is unconditional — and it belongs to the dial,
+     * which probes the doors first and builds the multiplexer on the answer rather
+     * than on the unresolved address. Resolving here as well would ask the same two
+     * doors twice; [DshClient.refreshRoute] deliberately does not notify here, and
+     * neither does the dial, because this method owns the reconnect.
      */
     private fun applySetupConfig(config: DshConfig) {
         client.applyConfig(config)
@@ -2610,14 +2628,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             acceptedCerts = config.acceptedCerts,
         )
         viewModelScope.launch {
-            // Resolve *before* rebuilding the wiring: the mux's own URL comes
-            // from baseUrl(), so a mux built on the unresolved primary would keep
-            // the event socket on the public door while unary calls went over the
-            // LAN. connect() then dials the door the resolution chose.
-            client.refreshRoute()
-            publishRoute()
-            rewireMux()
-            connect()
+            // A setup save is a person's own action, so it may lift a door hold;
+            // and the client's multiplexer has just gone, so the wiring is rebuilt
+            // whatever the route turns out to be.
+            reconnect(rebuildWiring = true)
         }
     }
 
@@ -2709,8 +2723,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val url = client.baseUrl()?.toString().orEmpty()
         val lan = client.isLanRoute()
         val fault = client.lanDoorFault()
-        if (_ui.value.activeUrl == url && _ui.value.activeRouteLan == lan && _ui.value.lanDoorFault == fault) return
-        _ui.value = _ui.value.copy(activeUrl = url, activeRouteLan = lan, lanDoorFault = fault)
+        val lanConfigured = client.hasLanCandidate()
+        if (_ui.value.activeUrl == url && _ui.value.activeRouteLan == lan &&
+            _ui.value.lanDoorFault == fault && _ui.value.lanRouteConfigured == lanConfigured
+        ) {
+            return
+        }
+        _ui.value = _ui.value.copy(
+            activeUrl = url,
+            activeRouteLan = lan,
+            lanDoorFault = fault,
+            lanRouteConfigured = lanConfigured,
+        )
     }
 
     /**
@@ -3501,17 +3525,42 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * An explicit connect: a person's own "try again", and the app's only way to
+     * hear one.
+     *
+     * It is stronger than anything the app can work out for itself. The clock
+     * cannot excuse a door that answered with something which was not DSH — a
+     * captive portal answers a probe exactly as it answered the first — and neither
+     * can an automatic retry, which is why the resolver keeps a wrong-answer verdict
+     * against every path but this one. A reader who taps is holding the phone: they
+     * may have walked into the house, swapped the router, or restarted the host, and
+     * none of that is guaranteed to reach a connectivity callback.
+     */
     fun connect() {
-        // An explicit connect starts the retry budget over, and it is also the
-        // one action that clears the "already tried silently" latch: the user has
-        // just supplied (possibly corrected) credentials.
-        connectRetries = 0
-        authHealSpent = false
-        attemptConnect()
+        reconnect(rebuildWiring = false)
     }
 
-    private fun attemptConnect() {
-        ensureMuxWiring()
+    /**
+     * The one way a dial begins, so every route into the app asks the same question
+     * the same way.
+     *
+     * [rebuildWiring] is for a caller that has just changed the config:
+     * [DshClient.applyConfig] drops its multiplexer whatever the route turns out to
+     * be, so the wiring cannot be left to a route *move* to rebuild.
+     */
+    private fun reconnect(rebuildWiring: Boolean) {
+        // An explicit connect starts the retry budget over, and it is also the
+        // one action that clears the "already tried silently" latch.
+        connectRetries = 0
+        authHealSpent = false
+        // Consumed by the one attempt this starts; the retries [scheduleReconnect]
+        // schedules afterwards are the app's own and keep every hold.
+        routeForgives = true
+        attemptConnect(rebuildWiring)
+    }
+
+    private fun attemptConnect(rebuildWiring: Boolean = false) {
         viewModelScope.launch {
             val wasReady = _ui.value.phase == AppPhase.READY
             _ui.value = _ui.value.copy(
@@ -3530,11 +3579,27 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                     StartupStep.CHECKING_SIGN_IN
                 },
             )
+
+            // The route question comes before anything is built on the answer, and
+            // before the credentials go anywhere: a dial is a question about the wire
+            // as it is now, and the cached winner is an answer about the wire as it
+            // was — possibly on a network this process has not seen a callback for.
+            // This is what a reconnect and a fresh open have in common with each
+            // other and not with the previous attempt.
+            val forgive = routeForgives
+            routeForgives = false
+            val moved = runCatching { client.dialRoute(forgive) }.getOrDefault(false)
+            publishRoute()
+            // A config change has already had the client's multiplexer dropped, so
+            // that case rebuilds whatever the route turns out to be; a dial that
+            // moved the route has had its socket dropped by the client itself.
+            if (moved || rebuildWiring) rewireMux() else ensureMuxWiring()
+
             client.installManualCookie()
 
-            // The route was resolved before this coroutine existed; what is waited on
-            // here is the host's answer to the sign-in probe, and `onSignIn` moves the
-            // step on to SIGNING_IN if that probe turns out to want credentials.
+            // What is waited on here is the host's answer to the sign-in probe, and
+            // `onSignIn` moves the step on to SIGNING_IN if that probe turns out to
+            // want credentials.
             val auth = client.ensureAuthenticated()
             if (auth.isFailure) {
                 onConnectFailure(auth.exceptionOrNull(), wasReady)

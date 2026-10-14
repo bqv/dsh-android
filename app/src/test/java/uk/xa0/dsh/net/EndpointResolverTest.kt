@@ -553,4 +553,108 @@ class EndpointResolverTest {
         assertEquals(public, r.resolve().url)
         assertEquals(DoorFault.WrongAnswer, r.lanDoorFault)
     }
+
+    @Test
+    fun `a person asking again lifts a wrong answer`() = runBlocking {
+        // The verdict is not reversible by the clock — a captive portal answers a
+        // probe exactly as it answered the first — but a person holding the phone is
+        // evidence the app cannot obtain on its own. Without this the verdict would
+        // be one no reader could ever revisit, which is indistinguishable from an app
+        // that has stopped trying.
+        var now = 0L
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(
+            isDshHost = { it.host in answering },
+            localIpv4 = { null },
+            clock = { now },
+        )
+        r.update(primary = public, lan = lan)
+
+        r.noteFailure(lan, DoorFault.WrongAnswer)
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertEquals(DoorFault.WrongAnswer, r.lanDoorFault)
+
+        // Days later the clock still has no opinion.
+        now = 86_400_000L
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+
+        // The person does.
+        r.forgiveByUser()
+        r.invalidate()
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
+        assertNull(r.lanDoorFault)
+    }
+
+    @Test
+    fun `forgiving is not a cadence, so a door that answers wrongly again is avoided again`() =
+        runBlocking {
+            // What stops the human override becoming a loop: the re-ask costs the
+            // failed attempt that follows it, and that attempt records the verdict
+            // afresh. Two resolutions inside one forgiveness cannot bounce between
+            // the doors.
+            val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+            val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+            r.update(primary = public, lan = lan)
+
+            r.noteFailure(lan, DoorFault.WrongAnswer)
+            r.forgiveByUser()
+            r.invalidate()
+            assertEquals(lan, r.resolve().url)
+
+            // The call that followed failed the same way, which is what a real
+            // exchange records; the door is out again, and no further resolution on
+            // its own puts it back.
+            r.noteFailure(lan, DoorFault.WrongAnswer)
+            r.invalidate()
+            assertEquals(public, r.resolve().url)
+            r.grantRetry()
+            r.invalidate()
+            assertEquals(public, r.resolve().url)
+            assertFalse(r.isLan)
+        }
+
+    @Test
+    fun `a config with no LAN candidate says so`() = runBlocking {
+        // The other reason a reader can be sitting on the public route: nothing to
+        // try. A fault cannot be recorded against a candidate that does not exist, so
+        // this fact has to be readable somewhere else.
+        val probed = mutableListOf<String>()
+        // Both doors answer; the point is that with no LAN candidate the LAN is
+        // never *asked*, so the public door is the only answer there can be.
+        val r = resolver(answering = setOf("192.168.1.110", "cloud.xa0.uk"), probed = probed)
+        r.update(primary = public, lan = null)
+
+        assertFalse(r.hasLanCandidate)
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+        assertTrue("nothing to probe, so nothing was probed", probed == listOf("cloud.xa0.uk"))
+
+        r.update(primary = public, lan = lan)
+        assertTrue(r.hasLanCandidate)
+        assertEquals(lan, r.resolve().url)
+    }
+
+    @Test
+    fun `a forced resolution cannot lift a wrong answer by itself`() = runBlocking {
+        // What makes the dial's forced probe safe: a dial re-asks the doors, and the
+        // resolver still answers with the hold rather than the probe. Only the
+        // network changing or a person's action moves it.
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+        r.update(primary = public, lan = lan)
+        r.noteFailure(lan, DoorFault.WrongAnswer)
+
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+
+        r.forgiveByUser()
+        r.invalidate()
+        assertEquals(lan, r.resolve().url)
+    }
 }
