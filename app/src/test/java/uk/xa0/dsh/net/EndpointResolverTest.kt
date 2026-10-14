@@ -1,5 +1,6 @@
 package uk.xa0.dsh.net
 
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -299,6 +300,57 @@ class EndpointResolverTest {
         r.update(primary = public, lan = corrected)
 
         assertEquals(corrected, r.resolve().url)
+        assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `a slow LAN door still beats a fast public one`() = runBlocking {
+        // Selection is by candidate order, never by which answer arrived first:
+        // the candidates are probed concurrently and the first *preferred* door
+        // that answered is taken, so no timing asymmetry between the doors can
+        // hand the route to a slower public one. The probe timeout can only
+        // disqualify a LAN door that answers more slowly than the timeout
+        // allows — it can never promote the public door past a LAN that replied.
+        val r = EndpointResolver(
+            isDshHost = { url ->
+                if (url.host == "192.168.1.110") delay(300)
+                true
+            },
+        )
+        r.update(primary = public, lan = lan)
+
+        assertEquals(lan, r.refresh())
+        assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `only a network change forgives a door, not a fresh resolution`() = runBlocking {
+        // The residue the quarantine leaves is deliberate and load-bearing: a
+        // door that failed in real traffic stays suspect across `invalidate()`,
+        // which is exactly what the foreground resume path does
+        // (`DshClient.recheckRoute`). So a resume re-probes, finds the LAN
+        // answering, and still lands on the public door. The consequence is
+        // that a *transient* LAN failure — a Wi-Fi roam within one SSID, a
+        // host-side blip — outlives the fault until a connectivity edge makes
+        // the network a different one. Nothing else clears the set.
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+        r.update(primary = public, lan = lan)
+
+        r.noteUnreachable(lan)
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+
+        // A fresh resolution, as a resume performs it. The LAN answers; it is
+        // still not preferred.
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+
+        // Only the wire changing forgives it.
+        r.networkChanged()
+        assertEquals(lan, r.resolve().url)
         assertTrue(r.isLan)
     }
 }
