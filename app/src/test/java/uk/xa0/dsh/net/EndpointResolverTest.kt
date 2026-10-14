@@ -237,11 +237,12 @@ class EndpointResolverTest {
         assertEquals(lan, r.resolve().url)
         assertTrue(r.isLan)
 
-        // The LAN answered the cheap probe, then a real call failed on it: a
-        // captive portal that answers every address, or another machine that has
-        // taken the host's address on this network. The next resolution must land
-        // on the door that works rather than bouncing back onto this one.
-        r.noteUnreachable(lan)
+        // The LAN answered the cheap probe, then a real call failed on it at the
+        // transport: a stale socket, or a host that has stopped answering since
+        // the probe. The resolution that failure triggers must land on the door
+        // that works rather than bouncing straight back onto this one, so the
+        // first hold is short but not zero.
+        r.noteFailure(lan, DoorFault.Transport)
         r.invalidate()
         val choice = r.resolve()
         assertEquals(public, choice.url)
@@ -255,7 +256,7 @@ class EndpointResolverTest {
         val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
         r.update(primary = public, lan = lan)
 
-        r.noteUnreachable(lan)
+        r.noteFailure(lan, DoorFault.Transport)
         r.invalidate()
         assertEquals(public, r.resolve().url)
 
@@ -267,8 +268,8 @@ class EndpointResolverTest {
     }
 
     @Test
-    fun `a suspect door is still used when nothing else answers`() = runBlocking {
-        // Suspicion reorders the candidates; it must never make the app prefer a
+    fun `an avoided door is still used when nothing else answers`() = runBlocking {
+        // A hold reorders the candidates; it must never make the app prefer a
         // door that did not answer at all over the one door that did.
         val probed = mutableListOf<String>()
         val r = EndpointResolver(
@@ -276,7 +277,7 @@ class EndpointResolverTest {
             localIpv4 = { null },
         )
         r.update(primary = public, lan = lan)
-        r.noteUnreachable(lan)
+        r.noteFailure(lan, DoorFault.Transport)
         r.invalidate()
 
         assertEquals(lan, r.resolve().url)
@@ -289,7 +290,7 @@ class EndpointResolverTest {
         val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
         val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
         r.update(primary = public, lan = lan)
-        r.noteUnreachable(lan)
+        r.noteFailure(lan, DoorFault.Transport)
         r.invalidate()
         assertEquals(public, r.resolve().url)
 
@@ -324,33 +325,232 @@ class EndpointResolverTest {
     }
 
     @Test
-    fun `only a network change forgives a door, not a fresh resolution`() = runBlocking {
-        // The residue the quarantine leaves is deliberate and load-bearing: a
-        // door that failed in real traffic stays suspect across `invalidate()`,
-        // which is exactly what the foreground resume path does
-        // (`DshClient.recheckRoute`). So a resume re-probes, finds the LAN
-        // answering, and still lands on the public door. The consequence is
-        // that a *transient* LAN failure — a Wi-Fi roam within one SSID, a
-        // host-side blip — outlives the fault until a connectivity edge makes
-        // the network a different one. Nothing else clears the set.
+    fun `a transport hold runs out on the clock, but a wrong answer waits for the network`() = runBlocking {
+        // Rewritten deliberately, from `only a network change forgives a door, not
+        // a fresh resolution`. That test pinned the old contract — nothing but a
+        // connectivity edge ever cleared a failure — and it had been protecting a
+        // real defect: a *transient* LAN failure (a Wi-Fi roam inside one SSID, a
+        // host-side blip) outlived the fault and left the app on the public route
+        // for the life of that network, foreground resumes included. The contract
+        // now splits on the kind of failure, and this states what replaced it.
+        var now = 0L
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(
+            isDshHost = { it.host in answering },
+            localIpv4 = { null },
+            clock = { now },
+        )
+        r.update(primary = public, lan = lan)
+
+        r.noteFailure(lan, DoorFault.Transport)
+        r.invalidate()
+        // The failure's own re-resolution has to land on the other door, or the
+        // retry inside the call that just failed goes straight back to the door
+        // that broke.
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+
+        // Still inside the short hold: a fresh resolution, of the kind a resume
+        // performs, does not put the door back.
+        now = 4_000L
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+
+        // The hold is over. Nothing was forgiven and no network changed: the clock
+        // alone readmits the door, and nothing anywhere is scheduled to notice.
+        now = 6_000L
+        r.invalidate()
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
+
+        // The other kind is a verdict on the door, not on the wire, so no amount
+        // of time makes a fresh probe of it into evidence.
+        now = 6_000L + 86_400_000L
+        r.noteFailure(lan, DoorFault.WrongAnswer)
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+
+        // Only the wire changing forgives that one.
+        r.networkChanged()
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `a resume lifts a transport hold early`() = runBlocking {
+        // The foreground path is a deliberate "ask again after an absence", so it
+        // does not have to wait the hold out — which is what makes a transient
+        // failure recoverable without a network change.
         val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
         val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
         r.update(primary = public, lan = lan)
 
-        r.noteUnreachable(lan)
+        r.noteFailure(lan, DoorFault.Transport)
         r.invalidate()
         assertEquals(public, r.resolve().url)
-        assertFalse(r.isLan)
 
-        // A fresh resolution, as a resume performs it. The LAN answers; it is
-        // still not preferred.
+        r.grantRetry()
         r.invalidate()
-        assertEquals(public, r.resolve().url)
-        assertFalse(r.isLan)
-
-        // Only the wire changing forgives it.
-        r.networkChanged()
         assertEquals(lan, r.resolve().url)
         assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `a resume never lifts a wrong answer`() = runBlocking {
+        // The whole reason the two kinds are apart: a captive portal answers the
+        // resume's probe exactly as it answered the first one.
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+        r.update(primary = public, lan = lan)
+
+        r.noteFailure(lan, DoorFault.WrongAnswer)
+        r.grantRetry()
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+    }
+
+    @Test
+    fun `a resume stops lifting the hold once its bounded retries are spent`() = runBlocking {
+        // "Forgiving on every resume" is the other way this goes wrong: an app
+        // resumed repeatedly would be put back onto a door that fails every
+        // attempt, one failed action at a time. Two liftings per run of failures
+        // is the bound, and a door that keeps failing reaches it at once.
+        var now = 0L
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(
+            isDshHost = { it.host in answering },
+            localIpv4 = { null },
+            clock = { now },
+        )
+        r.update(primary = public, lan = lan)
+
+        // First failure, first resume: the retry is granted, and the door is
+        // chosen and fails again.
+        r.noteFailure(lan, DoorFault.Transport)
+        r.grantRetry()
+        r.invalidate()
+        assertEquals(lan, r.resolve().url)
+
+        now = 6_000L
+        r.noteFailure(lan, DoorFault.Transport)
+        r.grantRetry()
+        r.invalidate()
+        assertEquals(lan, r.resolve().url)
+
+        // Third failure: the run has had both of its liftings, so this resume is
+        // refused and the lengthened hold stands.
+        now = 70_000L
+        r.noteFailure(lan, DoorFault.Transport)
+        r.grantRetry()
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+
+        // And the re-resolution the failing call triggers cannot bounce back
+        // either, which is what stops the app alternating between the two routes.
+        now = 70_500L
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+    }
+
+    @Test
+    fun `a failure that is already being avoided does not escalate itself`() = runBlocking {
+        // An outage fails every call. Counting each report would drive a door to
+        // the long hold in the first second of an outage it might recover from, so
+        // a report arriving while the hold is still running is the same fault
+        // saying the same thing.
+        var now = 0L
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(
+            isDshHost = { it.host in answering },
+            localIpv4 = { null },
+            clock = { now },
+        )
+        r.update(primary = public, lan = lan)
+
+        r.noteFailure(lan, DoorFault.Transport)
+        now = 1_000L
+        r.noteFailure(lan, DoorFault.Transport)
+        now = 2_000L
+        r.noteFailure(lan, DoorFault.Transport)
+
+        // The first, short hold — not one lengthened by the two extra reports.
+        now = 5_001L
+        r.invalidate()
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `a quiet spell starts the strike count over`() = runBlocking {
+        // Without this a door that blipped once a day would climb to the longest
+        // hold and stay there, which is the stranding this change exists to
+        // remove, only slower.
+        var now = 0L
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(
+            isDshHost = { it.host in answering },
+            localIpv4 = { null },
+            clock = { now },
+        )
+        r.update(primary = public, lan = lan)
+
+        // Two failures close together: the second earns the minute-long hold.
+        r.noteFailure(lan, DoorFault.Transport)
+        now = 6_000L
+        r.noteFailure(lan, DoorFault.Transport)
+
+        now = 60_000L
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
+
+        // Long enough quiet later the next failure is a fresh one, not a third
+        // strike, so it earns the short hold again.
+        now = 1_000_000L
+        r.noteFailure(lan, DoorFault.Transport)
+        now = 1_006_000L
+        r.invalidate()
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `the avoided LAN door is named while it is being avoided`() = runBlocking {
+        // The readout the About page draws: a public route with a LAN address
+        // configured has a reason, and the reader cannot infer it.
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+        r.update(primary = public, lan = lan)
+        assertEquals(lan, r.resolve().url)
+        assertNull("nothing has failed yet", r.lanDoorFault)
+
+        r.noteFailure(lan, DoorFault.Transport)
+        assertNull("still the door in use, so not being avoided yet", r.lanDoorFault)
+
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertEquals(DoorFault.Transport, r.lanDoorFault)
+
+        // A fault on the public door is not the LAN door's story.
+        r.noteFailure(public, DoorFault.Transport)
+        assertEquals(DoorFault.Transport, r.lanDoorFault)
+
+        // Back in use, nothing is being avoided and there is nothing to explain.
+        r.grantRetry()
+        r.invalidate()
+        assertEquals(lan, r.resolve().url)
+        assertNull(r.lanDoorFault)
+
+        // The other kind reads as itself, because it is the one that does not
+        // come back until the network changes.
+        r.noteFailure(lan, DoorFault.WrongAnswer)
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertEquals(DoorFault.WrongAnswer, r.lanDoorFault)
     }
 }

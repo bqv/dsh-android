@@ -124,6 +124,7 @@ import uk.xa0.dsh.net.DeepSeekAccount
 import uk.xa0.dsh.net.AcceptedCert
 import uk.xa0.dsh.net.CertProbe
 import uk.xa0.dsh.net.CertReadout
+import uk.xa0.dsh.net.DoorFault
 import uk.xa0.dsh.net.DshAuthException
 import uk.xa0.dsh.net.DshCertificateException
 import uk.xa0.dsh.net.DshRpcException
@@ -837,6 +838,18 @@ data class UiState(
     val activeUrl: String = "",
     /** True when [activeUrl] is the LAN door; false for the public one. */
     val activeRouteLan: Boolean = false,
+    /**
+     * Why the LAN door is not the active route, when it is not: it failed a real
+     * call and is being avoided — see [uk.xa0.dsh.net.DoorFault]. Null when no LAN
+     * candidate has failed, or when the one that did is the door traffic is going
+     * through after all.
+     *
+     * Published because a reader on the public route has no other way to tell
+     * "the LAN is not reachable from here" from "the LAN answered, and the app is
+     * avoiding it" — the difference between an ordinary absence and a fault the
+     * app is deliberately working around.
+     */
+    val lanDoorFault: DoorFault? = null,
     val socketConnected: Boolean = false,
     /**
      * The mux's real four-state value, carried beside [socketConnected] so every
@@ -2688,12 +2701,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         client.setAcceptedCerts(entries)
     }
 
-    /** Publish the endpoint the client is actually using, when it has moved. */
+    /**
+     * Publish the endpoint the client is actually using, when it has moved — and
+     * with it why the LAN door is not the one in use, when it is not.
+     */
     private fun publishRoute() {
         val url = client.baseUrl()?.toString().orEmpty()
         val lan = client.isLanRoute()
-        if (_ui.value.activeUrl == url && _ui.value.activeRouteLan == lan) return
-        _ui.value = _ui.value.copy(activeUrl = url, activeRouteLan = lan)
+        val fault = client.lanDoorFault()
+        if (_ui.value.activeUrl == url && _ui.value.activeRouteLan == lan && _ui.value.lanDoorFault == fault) return
+        _ui.value = _ui.value.copy(activeUrl = url, activeRouteLan = lan, lanDoorFault = fault)
     }
 
     /**

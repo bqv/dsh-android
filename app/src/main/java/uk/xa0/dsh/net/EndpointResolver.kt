@@ -90,6 +90,30 @@ private fun parseIpv4(host: String): IntArray? {
 data class RouteChoice(val url: HttpUrl?, val changed: Boolean)
 
 /**
+ * How a door failed in real traffic, which decides how it comes back.
+ *
+ * The split is not a severity ordering: it is the difference between a fact about
+ * the wire and a fact about the door, and only the first can be hoped away by
+ * asking again.
+ */
+enum class DoorFault {
+    /**
+     * The connection, not the answer: a timeout, a dropped socket, no route. The
+     * door may well be the right host reached over a wire that has since healed,
+     * so this is forgiven by time and by a resume.
+     */
+    Transport,
+
+    /**
+     * It answered, and what it answered with was not a DSH envelope: a captive
+     * portal serving its own page for every address, or another machine that has
+     * taken the host's address. A probe is fooled by both in exactly the same way,
+     * so no amount of asking again is evidence — only a different network is.
+     */
+    WrongAnswer,
+}
+
+/**
  * Decides which door traffic goes through: the LAN address when the phone can
  * reach it, the public URL otherwise, and again whenever the network moves.
  *
@@ -107,10 +131,25 @@ data class RouteChoice(val url: HttpUrl?, val changed: Boolean)
  * `GET /` and still be the wrong door for real traffic — a captive portal that
  * answers every address with its own sign-in page, or a different machine that
  * took the host's address on another network — so a door that fails in use is
- * [noteUnreachable] and stops being preferred until [networkChanged] says the
- * network is not the one that produced the failure. That is what keeps the
- * recovery from being worse than the fault: a phone that switched onto a broken
- * LAN must not be switched back onto it on every retry.
+ * [noteFailure] and stops being preferred. What brings it back is decided by
+ * *how* it failed, which is the one distinction that keeps both halves honest:
+ *
+ * - A [DoorFault.Transport] failure is plausibly a blip — a stale pooled socket,
+ *   a host restarting, a roam inside one SSID that no callback ever reports — so
+ *   the door is only held for a while, and the hold lengthens each time a
+ *   re-admitted door fails again. [grantRetry], which the foreground resume path
+ *   calls, may lift a hold early, a bounded number of times.
+ * - A [DoorFault.WrongAnswer] — it answered, and the answer was not DSH — is a
+ *   verdict on the door itself. A fresh probe of it is fooled in exactly the same
+ *   way, so only [networkChanged] brings that door back.
+ *
+ * Holding every failure until the network changed, which is what this used to do,
+ * meant one transient failure left the LAN door avoided for the life of that
+ * network, foreground resumes included. Holding none of them would be worse: a
+ * phone that switched onto a broken LAN must not be switched back onto it on
+ * every retry. Nothing here is scheduled — every hold is compared against the
+ * injected clock when an event (a resolution, a resume, a failure) arrives, so
+ * the design stays event-driven.
  *
  * [peek] is the half that request construction calls, synchronously, from a
  * thread that must not block; [resolve] is the half that probes. They are split
@@ -163,26 +202,40 @@ class EndpointResolver(
     private val refreshLock = Mutex()
 
     /**
-     * Doors that answered a probe and then failed in use, until the network moves.
+     * One door's record of failing in real traffic, while it is being avoided.
      *
      * Concurrent because the failures arrive on OkHttp's threads while a
-     * resolution may be reading the set on another; the lock above is held for a
+     * resolution may be reading the map on another; the lock above is held for a
      * whole probe round and must not be the thing a request thread waits on.
      */
-    private val suspect: MutableSet<HttpUrl> = ConcurrentHashMap.newKeySet<HttpUrl>()
+    private data class Fault(
+        val kind: DoorFault,
+        /** True when the failed door is one of this resolver's LAN candidates. */
+        val isLan: Boolean,
+        /** Consecutive failures; a quiet spell starts the count over. */
+        val strikes: Int,
+        /** Resume-granted retries this run of failures has already had. */
+        val grants: Int,
+        /** Avoided while the clock reads before this. */
+        val avoidedUntil: Long,
+        /** When the failure happened, which is what the strike count decays from. */
+        val failedAt: Long,
+    )
+
+    private val faults: ConcurrentHashMap<HttpUrl, Fault> = ConcurrentHashMap()
 
     /**
      * Re-seed the candidates from a new configuration and drop the cached
      * winner: a changed address is not a reason to trust the old answer, and the
      * old winner may not even be among the new candidates.
      *
-     * Suspicion goes with it: it is attached to addresses, and these may be
-     * different ones.
+     * What the old addresses failed at goes with it: those are records attached to
+     * addresses, and these may be different ones, which start with a clean one.
      */
     fun update(primary: HttpUrl?, lan: HttpUrl?) {
         this.primary = primary
         this.lan = lan
-        suspect.clear()
+        faults.clear()
         winner = null
         winnerIsLan = false
         resolved = false
@@ -190,22 +243,107 @@ class EndpointResolver(
     }
 
     /**
-     * A door did not survive contact with real traffic: a dropped socket, or an
-     * answer that was not a DSH envelope at all.
+     * A door did not survive contact with real traffic, in the way [kind] names.
      *
      * Recorded rather than acted on — the caller invalidates and re-resolves, and
-     * this is what makes that re-resolution land somewhere else.
+     * this is what makes that re-resolution land somewhere else. The record is a
+     * [Fault] rather than a flag because *how* a door comes back is the whole
+     * question: a transport failure is avoided for a hold that lengthens with each
+     * repeat, and a wrong answer until the network changes.
+     *
+     * Reporting the same ongoing failure again does not escalate it — a door that
+     * is already being avoided has nothing new to say — so one outage cannot
+     * inflate its own reluctance into the ceiling on the first second.
      */
-    fun noteUnreachable(url: HttpUrl?) {
-        if (url != null) suspect += url
+    fun noteFailure(url: HttpUrl?, kind: DoorFault) {
+        val target = url ?: return
+        val now = clock()
+        val configuredLan = lan
+        val onLan = configuredLan != null &&
+            (target == configuredLan || target == subnetRewritten(configuredLan, localIpv4()))
+        faults.compute(target) { _, previous ->
+            when {
+                // A wrong answer is a verdict on the door, not on the wire, and no
+                // later spin of the same door changes it.
+                kind == DoorFault.WrongAnswer -> Fault(
+                    kind = DoorFault.WrongAnswer,
+                    isLan = onLan,
+                    strikes = 1,
+                    grants = 0,
+                    avoidedUntil = Long.MAX_VALUE,
+                    failedAt = now,
+                )
+
+                previous == null -> Fault(
+                    kind = kind,
+                    isLan = onLan,
+                    strikes = 1,
+                    grants = 0,
+                    avoidedUntil = now + TRANSIENT_HOLD_MS,
+                    failedAt = now,
+                )
+
+                previous.kind == DoorFault.WrongAnswer -> previous
+
+                // Long enough since the last one to count as a new fault rather
+                // than another strike in the same run.
+                now - previous.failedAt > STRIKE_DECAY_MS -> Fault(
+                    kind = kind,
+                    isLan = onLan,
+                    strikes = 1,
+                    grants = 0,
+                    avoidedUntil = now + TRANSIENT_HOLD_MS,
+                    failedAt = now,
+                )
+
+                // Still in the hold this failure began: the same fault reported
+                // again, so it keeps the hold and the strikes it already had.
+                now < previous.avoidedUntil -> previous
+
+                else -> {
+                    val strikes = previous.strikes + 1
+                    Fault(
+                        kind = kind,
+                        isLan = onLan,
+                        strikes = strikes,
+                        grants = previous.grants,
+                        avoidedUntil = now + transportHold(strikes),
+                        failedAt = now,
+                    )
+                }
+            }
+        }
     }
 
     /**
-     * The network itself changed, which is the one thing that excuses a door:
-     * the failure above happened on the wire that is now gone.
+     * A foreground resume is a deliberate "ask again after an absence", so it may
+     * lift a transport hold early rather than wait the hold out.
+     *
+     * Bounded deliberately: at most [RESUME_GRANTS] liftings per run of failures,
+     * and never for a wrong answer. Without the bound an app resumed repeatedly
+     * would be put back onto a door that fails on every attempt, one failed action
+     * at a time; with it, the retries the clock already allows are the only ones
+     * left, and each of those is longer than the last. A resume against a hold that
+     * has already run out spends nothing — there is nothing to lift, and charging
+     * it would let ordinary use use up the budget.
+     */
+    fun grantRetry() {
+        for (url in faults.keys) {
+            faults.computeIfPresent(url) { _, fault ->
+                val liftable = fault.kind == DoorFault.Transport &&
+                    fault.grants < RESUME_GRANTS &&
+                    clock() < fault.avoidedUntil
+                if (liftable) fault.copy(grants = fault.grants + 1, avoidedUntil = 0L) else fault
+            }
+        }
+    }
+
+    /**
+     * The network itself changed, which excuses every door at once: each failure
+     * above happened on the wire that is now gone.
      */
     fun networkChanged() {
-        suspect.clear()
+        faults.clear()
         invalidate()
     }
 
@@ -230,6 +368,36 @@ class EndpointResolver(
 
     /** True when [peek] is a LAN door — the configured one or its subnet rewrite. */
     val isLan: Boolean get() = winnerIsLan
+
+    /**
+     * Why the LAN door is being avoided right now, or null when it is not.
+     *
+     * This is the half of the decision a reader cannot otherwise see. The app
+     * prefers the LAN whenever it answers, so a public route with a LAN address
+     * configured has a reason, and "it works now, I do not know why" is exactly
+     * what an invisible reason sounds like. A door that is avoided but is still
+     * the one traffic is going through is not reported: it is not being avoided.
+     *
+     * Cheap and synchronous, like [peek]: it reads the failure records the
+     * failures already wrote, and probes nothing.
+     */
+    val lanDoorFault: DoorFault?
+        get() {
+            val current = winner
+            fun avoided(kind: DoorFault): Boolean = faults.entries.any { (url, fault) ->
+                fault.isLan && url != current && fault.kind == kind && clock() < fault.avoidedUntil
+            }
+            // Two LAN candidates can carry different records — the configured
+            // address and its subnet rewrite — so the answer is ordered rather
+            // than whichever the map happens to hand back first. A wrong answer is
+            // the one whose wording matters; it is the one that does not come back
+            // until the network changes.
+            return when {
+                avoided(DoorFault.WrongAnswer) -> DoorFault.WrongAnswer
+                avoided(DoorFault.Transport) -> DoorFault.Transport
+                else -> null
+            }
+        }
 
     /**
      * Probes the candidates concurrently and caches the preferred one that
@@ -260,14 +428,14 @@ class EndpointResolver(
             ordered.map { (url, _) -> async { url to answersAsDshHost(url) } }.awaitAll()
         }
         val answered = answers.filter { it.second }.map { it.first }
-        // An answering door that has not just failed in use wins; failing that, an
-        // answering door that has — a door that answers is still better than one
-        // that does not, so suspicion changes the order and never removes a
-        // candidate outright. With no answer at all the primary is the honest
-        // fallback, and the reported door is whichever candidate that fallback
-        // actually is (a private `baseUrl` is a LAN address even when only the LAN
-        // field named it).
-        val pick = answered.firstOrNull { it !in suspect } ?: answered.firstOrNull()
+        // An answering door that is not being avoided wins; failing that, an
+        // answering door that is — a door that answers is still better than one
+        // that does not, so a hold changes the order and never removes a candidate
+        // outright. With no answer at all the primary is the honest fallback, and
+        // the reported door is whichever candidate that fallback actually is (a
+        // private `baseUrl` is a LAN address even when only the LAN field named
+        // it).
+        val pick = answered.firstOrNull { !isAvoided(it) } ?: answered.firstOrNull()
         val chosen = pick ?: primary ?: ordered.last().first
         winnerIsLan = ordered.first { it.first == chosen }.second
         val changed = chosen != lastProbed
@@ -301,6 +469,36 @@ class EndpointResolver(
         return out
     }
 
+    /**
+     * Whether a door is being passed over because of a failure it has not yet
+     * lived down. There is no timer behind this: the clock is consulted here, when
+     * a resolution is happening anyway, and a hold that has run out simply stops
+     * counting.
+     */
+    private fun isAvoided(url: HttpUrl): Boolean {
+        val fault = faults[url] ?: return false
+        return clock() < fault.avoidedUntil
+    }
+
+    /**
+     * How long a transport failure keeps a door out of the running.
+     *
+     * The first hold is short but not zero: the failure itself triggers a
+     * re-resolution, and that one has to land on the other door or the retry
+     * inside the failing call goes straight back to the door that just broke. Each
+     * later failure in the same run holds the door longer, so an app whose user
+     * keeps coming back meets a door that is still being avoided instead of being
+     * put back on it — and the ceiling means a door that genuinely recovers is
+     * readmitted, with no timer and no network change, within half an hour at the
+     * very worst.
+     */
+    private fun transportHold(strikes: Int): Long = when {
+        strikes <= 1 -> TRANSIENT_HOLD_MS
+        strikes == 2 -> 60_000L
+        strikes == 3 -> 300_000L
+        else -> HOLD_CEILING_MS
+    }
+
     private suspend fun answersAsDshHost(url: HttpUrl): Boolean = try {
         withTimeoutOrNull(probeTimeoutMs) { isDshHost(url) } == true
     } catch (e: CancellationException) {
@@ -314,5 +512,30 @@ class EndpointResolver(
     companion object {
         const val DEFAULT_PROBE_TIMEOUT_MS = 1_000L
         const val DEFAULT_TTL_MS = 30_000L
+
+        /**
+         * The hold the first transport failure earns: long enough to keep the
+         * re-resolution that failure triggers off the door, short enough that a
+         * later probe — a resume's, or the next one the TTL allows — takes it.
+         */
+        private const val TRANSIENT_HOLD_MS = 5_000L
+
+        /** The longest a run of transport failures can hold a door. */
+        private const val HOLD_CEILING_MS = 1_800_000L
+
+        /**
+         * How quiet a door has to be for its next failure to count as a fresh one
+         * rather than another strike in the same run. Without this, a door that
+         * blipped once a day would climb to the ceiling and stay there.
+         */
+        private const val STRIKE_DECAY_MS = 600_000L
+
+        /**
+         * How many holds a foreground resume may lift per run of failures —
+         * enough for "ask again after an absence" to work, few enough that a
+         * resume loop cannot keep putting the app back on a door that keeps
+         * failing it.
+         */
+        private const val RESUME_GRANTS = 2
     }
 }

@@ -42,6 +42,7 @@ import uk.xa0.dsh.PermissionOption
 import uk.xa0.dsh.model.HostVersion
 import uk.xa0.dsh.net.AcceptedCert
 import uk.xa0.dsh.net.CertReadout
+import uk.xa0.dsh.net.DoorFault
 import uk.xa0.dsh.ui.components.CertificateSection
 import uk.xa0.dsh.ui.components.DshTextField
 import uk.xa0.dsh.ui.components.DshWordmark
@@ -107,6 +108,13 @@ fun AboutContent(
      */
     activeUrl: String = "",
     activeRouteLan: Boolean = false,
+    /**
+     * Why the LAN door is not in use, when it is not: the fault the app recorded
+     * against it. Defaulted to null — no LAN door has failed, or the one that did
+     * is the route in use anyway — so a caller that passes nothing sees the note
+     * omitted rather than a sentence about a fault that never happened.
+     */
+    lanDoorFault: DoorFault? = null,
     /**
      * The DSH version of the host this app is actually connected to, as that host
      * named it in its `$events` opening frame. Never this app's own version: the
@@ -209,6 +217,13 @@ fun AboutContent(
         if (activeUrl.isNotBlank() && activeUrl.trimEnd('/') != baseUrl.trimEnd('/')) {
             InfoRow("Active URL", activeUrl)
         }
+        // Why the LAN door is not the route in use, when it is not. The resolver
+        // prefers the LAN whenever it answers, so "Public" with a LAN address
+        // configured has a reason — and a reason that can only be inferred is
+        // exactly the "works now, I do not know why" this app's convention says to
+        // name instead. Omitted when there is nothing to explain: no fault, or a
+        // fault on a door that is nevertheless the one in use.
+        lanDoorFault?.let { fault -> SectionNote(lanDoorNote(fault)) }
 
         // The second door, edited where the other connection facts are read. Bound to
         // a stable local so the save lambda captures a non-null function rather than
@@ -417,6 +432,29 @@ private fun InfoRow(label: String, value: String?, valueTag: String? = null) {
  * than one row, so counting the word cannot tell them apart.
  */
 const val HOST_VERSION_VALUE_TAG = "about-host-dsh-version"
+
+/**
+ * What the About page says when the LAN door is being avoided, one sentence per
+ * fault. Named because the wording is the whole of what this page adds here, and a
+ * test that retyped the sentences would be free to drift from the ones drawn.
+ *
+ * The two faults read differently on purpose: the reader's question is not "what
+ * went wrong" but "does it come back", and the answer is not the same for a blip as
+ * for a door that answered with something which was not DSH.
+ */
+const val ABOUT_LAN_DOOR_TRANSPORT: String =
+    "The LAN door failed a real call, so it is set aside for now. It is tried again " +
+        "after a pause that grows each time it fails."
+
+const val ABOUT_LAN_DOOR_WRONG_ANSWER: String =
+    "The LAN door answered a real call with something that was not DSH, so it is set " +
+        "aside until the network changes."
+
+/** The sentence for one fault; see [ABOUT_LAN_DOOR_TRANSPORT]. */
+private fun lanDoorNote(fault: DoorFault): String = when (fault) {
+    DoorFault.Transport -> ABOUT_LAN_DOOR_TRANSPORT
+    DoorFault.WrongAnswer -> ABOUT_LAN_DOOR_WRONG_ANSWER
+}
 
 /**
  * What the About row prints for the host's own DSH version.

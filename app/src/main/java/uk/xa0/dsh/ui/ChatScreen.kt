@@ -1582,6 +1582,10 @@ fun ChatScreen(vm: DshViewModel) {
             // Which door traffic is really using — not always `baseUrl`.
             activeUrl = ui.activeUrl,
             activeRouteLan = ui.activeRouteLan,
+            // Why the LAN door is not the one in use, when it is not: the fault the
+            // app recorded against it. Nothing else on this page can tell "the LAN
+            // is not here" from "the LAN answered and the app is avoiding it".
+            lanDoorFault = ui.lanDoorFault,
             // The host's own DSH version, from its `$events` opening frame. Never
             // this app's version; see `model/HostVersion.kt`.
             hostVersion = ui.hostVersion,

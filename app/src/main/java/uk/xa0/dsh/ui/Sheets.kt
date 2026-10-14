@@ -58,6 +58,7 @@ import uk.xa0.dsh.model.HostVersion
 import uk.xa0.dsh.model.ModelChoice
 import uk.xa0.dsh.net.AcceptedCert
 import uk.xa0.dsh.net.CertReadout
+import uk.xa0.dsh.net.DoorFault
 import uk.xa0.dsh.ui.components.DshTextField
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
@@ -169,6 +170,8 @@ fun AboutSheet(
     /** The resolved endpoint and its door, which need not be [baseUrl]. */
     activeUrl: String = "",
     activeRouteLan: Boolean = false,
+    /** Why the LAN door is not the active route, when it is not; see [AboutContent]. */
+    lanDoorFault: DoorFault? = null,
     /** The DSH version the connected host named in its `$events` opening frame. */
     hostVersion: HostVersion = HostVersion.Unknown,
     /**
@@ -210,6 +213,7 @@ fun AboutSheet(
             selectedEffort = selectedEffort,
             activeUrl = activeUrl,
             activeRouteLan = activeRouteLan,
+            lanDoorFault = lanDoorFault,
             hostVersion = hostVersion,
             lanUrl = lanUrl,
             onLanUrl = onLanUrl,

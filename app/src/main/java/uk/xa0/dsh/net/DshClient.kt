@@ -219,15 +219,15 @@ class DshClient(context: Context) {
          * stream client must not reroute on every socket blip (it re-dials on its
          * own), and `httpClient` fetches internet pictures, whose failure says
          * nothing about the host. A call that *answered* something which is not a
-         * DSH envelope trips the same hook from [rpcRaw], because that is the
-         * other shape of a wrong door — see [onRouteFailure].
+         * DSH envelope trips the same hook from [rpcRaw], with the other kind,
+         * because that is the other shape of a wrong door — see [onRouteFailure].
          */
         val unary = base.newBuilder()
             .addInterceptor { chain ->
                 try {
                     chain.proceed(chain.request())
                 } catch (e: IOException) {
-                    onRouteFailure()
+                    onRouteFailure(DoorFault.Transport)
                     throw e
                 }
             }
@@ -390,6 +390,16 @@ class DshClient(context: Context) {
     fun isLanRoute(): Boolean = endpoint.isLan
 
     /**
+     * Why the LAN door is being avoided right now, or null when it is not; see
+     * [EndpointResolver.lanDoorFault].
+     *
+     * Published beside the route itself so a public route can say why it is
+     * public: the LAN door failed a real call. Synchronous and offline, so the
+     * About page can read it with the socket down like every other row there.
+     */
+    fun lanDoorFault(): DoorFault? = endpoint.lanDoorFault
+
+    /**
      * Re-resolve the endpoint now and prime the cache. Suspends for the probes,
      * so a caller with a connect to make can resolve first and dial the resolved
      * door rather than dial the public one and reroute a moment later.
@@ -417,8 +427,16 @@ class DshClient(context: Context) {
      * is told instead. Returns true when this resolution moved the route, in which
      * case it has already dropped the multiplexer every stream was bound to and
      * the caller must rebuild before it dials again.
+     *
+     * This is also the one path that forgives: a resume is a deliberate "ask again
+     * after an absence", so the LAN door's transport failure — the shape a stale
+     * socket or a host restart leaves — is retried now rather than after the hold
+     * it earned. A door that answered real traffic with something that was not DSH
+     * is never forgiven here, and the forgiveness itself is bounded; see
+     * [EndpointResolver.grantRetry].
      */
     suspend fun recheckRoute(): Boolean {
+        endpoint.grantRetry()
         endpoint.invalidate()
         return resolveRoute(notify = false)
     }
@@ -765,14 +783,14 @@ class DshClient(context: Context) {
                     // Content that is not JSON did not come from a DSH host. A
                     // captive portal answers this way, and the probe that chose
                     // the door cannot tell: see [onRouteFailure].
-                    onRouteFailure()
+                    onRouteFailure(DoorFault.WrongAnswer)
                     throw DshRpcException("http/${response.code}", text.take(400), null)
                 }
                 val result = parsed.optJSONObject("result")
                     ?: run {
                         // JSON, but not this protocol's envelope — the same
                         // conclusion as above, for an answer that parsed.
-                        onRouteFailure()
+                        onRouteFailure(DoorFault.WrongAnswer)
                         throw DshRpcException("protocol", "Malformed response envelope", null)
                     }
 
@@ -839,30 +857,34 @@ class DshClient(context: Context) {
         }
 
     /**
-     * The chosen door failed in use — at the socket, or by answering something a
-     * DSH host does not answer with.
+     * The chosen door failed in use — in the way [kind] names, which decides how it
+     * comes back.
      *
      * A timeout, a dropped socket, no route: that is precisely what a stale LAN
      * choice looks like, the address having answered a minute ago and the phone
-     * having since left the network. An unparseable answer is the *other* shape,
-     * and the one a captive portal produces: it answers every address with its own
-     * page, so the cheap `GET /` the resolver probes with succeeds and only a real
-     * gateway call reveals that nothing here speaks DSH.
+     * having since left the network, and it is [DoorFault.Transport]. An
+     * unparseable answer is the *other* shape, and the one a captive portal
+     * produces: it answers every address with its own page, so the cheap `GET /`
+     * the resolver probes with succeeds and only a real gateway call reveals that
+     * nothing here speaks DSH. That one is [DoorFault.WrongAnswer], and the
+     * resolver keeps such a door out until the network changes rather than
+     * pretending a fresh probe of it would know better.
      *
-     * Either way the door is recorded as suspect before the cache is dropped, so
-     * the re-resolution that follows lands on the other one instead of choosing
-     * the broken door again. A network change is what forgives it.
+     * Either way the door is recorded before the cache is dropped, so the
+     * re-resolution that follows lands on the other one instead of choosing the
+     * broken door again.
      *
-     * Rate-limited: an unreachable host fails *every* call, and invalidating per
-     * failure would turn one outage into a probe round per request. The resolver
-     * caches its answer anyway; this only bounds how often the cache is thrown
-     * away while nothing answers.
+     * Rate-limited, but only for the probe: an unreachable host fails *every*
+     * call, and invalidating per failure would turn one outage into a probe round
+     * per request. Recording per failure is deliberate and is not what this bounds
+     * — the resolver counts a failure it is already avoiding as the same one, and
+     * one outage must not be able to hide behind the cooldown.
      */
-    private fun onRouteFailure() {
+    private fun onRouteFailure(kind: DoorFault) {
+        endpoint.noteFailure(endpoint.peek(), kind)
         val now = System.currentTimeMillis()
         if (now - lastRouteFailureAt < ROUTE_FAILURE_COOLDOWN_MS) return
         lastRouteFailureAt = now
-        endpoint.noteUnreachable(endpoint.peek())
         endpoint.invalidate()
         requestRouteRefresh()
     }
