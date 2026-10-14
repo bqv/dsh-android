@@ -43,7 +43,7 @@ import uk.xa0.dsh.SessionItem
  *    and `assistant/attempt` and nothing else, and a child's settlements are written to
  *    the child's log. Measured on this machine: `session-c9b44b3a`'s log held 5,710 usage
  *    samples, all on its own assistant messages and none in any `tool/result`, and its
- *    only `subagent/*` events were `subagent/catalog` (identity).
+ *    only `subagent/<method>` events were `subagent/catalog` (identity).
  *  * A **forked** child's `tokenUsage` includes its parent's history. The `fork` provider
  *    seeds the child's log with a copy of the parent's prefix (`dsh-session`'s
  *    `buildForkSeed`), and `tokenUsage` has **no reset at that cut** — its `init` ignores
