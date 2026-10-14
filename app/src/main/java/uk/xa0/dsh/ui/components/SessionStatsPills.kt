@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import uk.xa0.dsh.model.PRICE_SOURCE
+import uk.xa0.dsh.model.FamilyUsage
 import uk.xa0.dsh.model.TokenRates
 import uk.xa0.dsh.model.SessionStats
 import uk.xa0.dsh.model.formatCompactDuration
@@ -96,6 +97,14 @@ fun SessionStatsPills(
      * provider's prices.
      */
     rates: TokenRates? = null,
+    /**
+     * The open session's whole subagent family, or null when there is no open session. A
+     * family with no members draws no block at all, which is what keeps "this session has
+     * no subagents" from reading like "its subagents' usage has not arrived": the block
+     * exists exactly when there is a family to report, and when it exists it always says
+     * how many of that family its figures cover. See [FamilyUsage].
+     */
+    family: FamilyUsage? = null,
     /** Opens the account balance and top-up screen, from the usage panel. */
     onBalance: () -> Unit = {},
     modifier: Modifier = Modifier,
@@ -191,21 +200,39 @@ fun SessionStatsPills(
                         StatRow("Cache write", exactCount(stats.cacheWriteTokens))
                     }
                     StatRow("Output", exactCount(stats.outputTokens))
-                    // The estimate, last and clearly labelled: the rows above are what
-                    // the host counted, this one is arithmetic on a published price
-                    // list that can change.
-                    if (rates != null) {
-                        val cost = costRange(
+                    // The session's own estimate: the rows above are what the host
+                    // counted, this one is arithmetic on a published price list that can
+                    // change. Drawn for the session alone, before the family below, so
+                    // the two figures are never mistaken for one another.
+                    val priced = rates?.let {
+                        costRange(
                             cacheHitTokens = stats.cacheReadTokens,
                             // A cache write is an input token that did not come from
                             // the cache, and the published list has no third input rate.
                             cacheMissTokens = stats.uncachedInputTokens + stats.cacheWriteTokens,
                             outputTokens = stats.outputTokens,
-                            rates = rates,
+                            rates = it,
                         )
-                        StatRow("Cost (off-peak – peak)", formatCostRange(cost))
-                        StatNote(PRICE_SOURCE)
                     }
+                    if (priced != null) StatRow("Cost (off-peak – peak)", formatCostRange(priced))
+
+                    // The family, under the session's own rows and never in place of
+                    // them: the rows above are the host's count for *this* log, and the
+                    // web has no such reading at all. Only drawn when there is a family.
+                    if (family != null && family.members > 0) {
+                        // Named for what it is rather than for how big the family is: the
+                        // sum is of what the host reported, and a figure that claimed to
+                        // be the family's own work would be wrong whenever a member was
+                        // forked. See [uk.xa0.dsh.model.FamilyUsage].
+                        StatRow(family.label, exactCount(family.tokens))
+                        // Always drawn, and always present-tense about coverage: "3 of 4"
+                        // is how the reader learns the figure has a boundary at all.
+                        StatRow("Subagents", family.memberCountText)
+                        family.cost?.let { StatRow("Family cost (off-peak – peak)", formatCostRange(it)) }
+                        family.notes.forEach { StatNote(it) }
+                    }
+
+                    if (priced != null) StatNote(PRICE_SOURCE)
                     // The way up from a session's cost to the account's balance, which
                     // is the same question one level out. Shown whether or not a price
                     // table matched: topping up is useful even for an unpriced route.

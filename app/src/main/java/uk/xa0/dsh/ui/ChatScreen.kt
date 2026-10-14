@@ -119,6 +119,7 @@ import uk.xa0.dsh.model.LiveAttempt
 import uk.xa0.dsh.model.SessionFiles
 import uk.xa0.dsh.model.SessionTarget
 import uk.xa0.dsh.model.tokenRatesFor
+import uk.xa0.dsh.model.familyUsage
 import uk.xa0.dsh.model.SubagentComposerState
 import uk.xa0.dsh.model.SubagentReadOnlyReason
 import uk.xa0.dsh.model.TurnDeliverables
@@ -516,6 +517,33 @@ fun ChatScreen(vm: DshViewModel) {
     // rather than a one-way trip back to the drawer.
     val subagentParent = remember(ui.sessions, ui.currentSessionId) {
         subagentParentOf(ui.sessions, ui.currentSessionId)
+    }
+
+    // The whole subagent family's tokens and cost, for the usage panel. Folded from
+    // the same roster the drawer and the lineage chip read, so the three cannot
+    // disagree about who is in the family; recomputed when the roster moves, when the
+    // open session's own projections land, or when the panel's price table changes.
+    // Priced routes only: the open session's share is priced at the same route the
+    // panel's own cost row uses, so the two rows cannot price one session two ways.
+    //
+    // Read out of `ui` *before* the `remember`, keys included: a value read inside the
+    // lambda would be captured on the first composition and never re-read, which is how
+    // a family keeps a child the roster has since dropped.
+    val usageRates = tokenRatesFor(ui.selectedModel?.provider, ui.selectedModel?.model)
+    val usageSessions = ui.sessions
+    val usageSessionId = ui.currentSessionId
+    val usageStats = ui.sessionStats
+    val usageCatalog = usageSessionId?.let { ui.subagentCatalogs[it] }
+    val family = remember(usageSessions, usageSessionId, usageStats, usageRates, usageCatalog) {
+        usageSessionId?.let { id ->
+            familyUsage(
+                sessions = usageSessions,
+                rootId = id,
+                own = usageStats,
+                ownRates = usageRates,
+                catalog = usageCatalog,
+            )
+        }
     }
 
     // Back walks *up* the screen before it is allowed anywhere near the app's exit.
@@ -1471,7 +1499,8 @@ fun ChatScreen(vm: DshViewModel) {
                     },
                     // Priced routes only. The rates follow the session's *current*
                     // model, which is also what the host bills the next turn at.
-                    rates = tokenRatesFor(ui.selectedModel?.provider, ui.selectedModel?.model),
+                    rates = usageRates,
+                    family = family,
                     modifier = Modifier.padding(
                         start = DshSpacing.xl,
                         end = DshSpacing.xl,
