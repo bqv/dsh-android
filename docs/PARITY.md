@@ -437,6 +437,17 @@ host settings write stays a value with a disabled control.
 
 ## Host traps that shape the client
 
+- **The host exposes no DSH version through any read-only surface.** There is no
+  `hello`/`version` Remote method in the descriptor set and no version header on the mux
+  handshake. The only identity frame is the `$events` stream's opening `ready` item, and
+  0.2.0-rc.2 builds it as `host: { home }` and nothing else (`dsh-api-gateway/lib/index.js`,
+  `openRemoteEvents`; `dsh-api-remotes/lib/index.js`, `registerRemoteEvents`). A plugin's
+  `runtimeVersion` appears only inside `incompatible` diagnostics, and the web UI's "Current
+  version" row is a string embedded in the client bundle at build time, not something it asks
+  the host for. About's "DSH version" row therefore reads `Not reported` for every
+  shipped host and `Unknown` before the first frame; it folds a `version` out of that same
+  `host` object and nowhere else, so a host that starts sending one is named without an app
+  update. It never prints this app's own version (`model/HostVersion.kt`, `ui/AboutScreen.kt`)
 - **Argument names are exact.** The gateway rejects both extra and missing keys with
   `gateway/arguments-invalid`, so `agent` where the host declares `agentId` kills the call
   loudly rather than silently.

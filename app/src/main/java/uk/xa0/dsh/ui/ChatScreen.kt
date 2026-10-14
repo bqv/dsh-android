@@ -1553,6 +1553,9 @@ fun ChatScreen(vm: DshViewModel) {
             // Which door traffic is really using — not always `baseUrl`.
             activeUrl = ui.activeUrl,
             activeRouteLan = ui.activeRouteLan,
+            // The host's own DSH version, from its `$events` opening frame. Never
+            // this app's version; see `model/HostVersion.kt`.
+            hostVersion = ui.hostVersion,
             // The other door, and what this app accepts as the host's identity. Here
             // rather than in Settings: a signed-in session has no way back to setup,
             // and a certificate that can only be pinned before signing in is one

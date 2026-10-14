@@ -64,6 +64,7 @@ import uk.xa0.dsh.model.SettingsApply
 import uk.xa0.dsh.model.SettingsWritePlan
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.HostSettings
+import uk.xa0.dsh.model.HostVersion
 import uk.xa0.dsh.model.RouterProbeRecord
 import uk.xa0.dsh.model.LocalProvider
 import uk.xa0.dsh.model.RouterProbeResult
@@ -816,6 +817,18 @@ data class UiState(
      * wording at all.
      */
     val muxState: MuxState = MuxState.IDLE,
+    /**
+     * The DSH version the connected host named in its `$events` opening frame.
+     *
+     * Read from that frame and nowhere else: the app talks to a remote host, so the
+     * version of the package installed on this machine is not the answer and must
+     * never be printed as one. [HostVersion.Unknown] covers both "not connected" and
+     * "connected but the frame has not arrived yet", and the row reads as `Unknown`
+     * for either; [HostVersion.NotReported] is the host's frame arriving without a
+     * version, which every 0.2.0-rc.2 host does. See
+     * [uk.xa0.dsh.model.hostVersionFromReadyFrame] for the wire evidence.
+     */
+    val hostVersion: HostVersion = HostVersion.Unknown,
     val approval: PendingApproval? = null,
     /** An agent is waiting on an answer; the app must answer or the call fails. */
     val questions: PendingQuestionSet? = null,
@@ -2368,6 +2381,22 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
         mux.postEventResult = { args -> client.rpc("\$events/result", args) }
         mux.onLog = { message -> _ui.value = _ui.value.copy(status = message) }
+        // The host names its own DSH version in the `$events` opening frame, which is
+        // the only identity frame the wire offers; see the `hostVersion` field. Bound
+        // to the mux instance the callback is set on, because a frame from a mux the
+        // client has already replaced speaks for a host this app has left.
+        val wiredMux = mux
+        mux.onHostVersion = { version ->
+            if (client.mux === wiredMux) _ui.value = _ui.value.copy(hostVersion = version)
+        }
+        // The connection service opens the `$events` stream from `AttentionCenter`
+        // before any ViewModel exists, so this generation's `ready` frame may already
+        // have been folded and the callback above would never hear it. Seed from what
+        // the mux retained — only while its socket is the live one, so a value left
+        // behind by a socket that has since dropped is not resurrected.
+        if (mux.state.value == MuxState.OPEN && mux.hostVersion != HostVersion.Unknown) {
+            _ui.value = _ui.value.copy(hostVersion = mux.hostVersion)
+        }
         // The socket's own handshake can be refused (401/403, or a redirect to
         // the sign-in page). Nothing else observes that: the supervisor just
         // re-dials on a backoff while every screen still looks READY. Route it
@@ -2446,7 +2475,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // `socketConnected` false either way but changes the word the
                 // pill shows, so the guard is on the four-state value.
                 if (_ui.value.muxState != state) {
-                    _ui.value = _ui.value.copy(muxState = state, socketConnected = open)
+                    _ui.value = _ui.value.copy(
+                        muxState = state,
+                        socketConnected = open,
+                        // A version named by one host must not outlive the socket
+                        // that carried it: the next generation may be the other door,
+                        // or the same host after a restart. Until its opening frame
+                        // arrives the app does not know, and `Unknown` says exactly
+                        // that rather than keeping a previous host's number on screen.
+                        hostVersion = if (open) _ui.value.hostVersion else HostVersion.Unknown,
+                    )
                 }
                 // The widget's reading of what is running is renewed from here for as long
                 // as this process can see the socket. A widget on a phone whose app has
@@ -2468,6 +2506,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun rewireMux() {
         teardownStreams()
         muxWired = false
+        // The socket that carried the last host's identity is gone and the new one
+        // has said nothing yet, so the version goes with it. The poll loop would also
+        // clear it on the state change, but a swap that lands OPEN would show the old
+        // host's number until the new opening frame arrives.
+        _ui.value = _ui.value.copy(hostVersion = HostVersion.Unknown)
         ensureMuxWiring()
     }
 

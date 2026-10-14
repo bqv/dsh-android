@@ -25,6 +25,8 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import uk.xa0.dsh.model.AnswerDelivery
+import uk.xa0.dsh.model.HostVersion
+import uk.xa0.dsh.model.hostVersionFromReadyFrame
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -229,6 +231,38 @@ class RemoteMux(
     @Volatile
     var onEventsGeneration: ((clientId: String) -> Unit)? = null
 
+    /**
+     * Called with the host's own DSH version from the `$events` stream's opening
+     * `ready` item, once per connection generation.
+     *
+     * Separate from [onEventsGeneration] because the two answer different questions
+     * and have different owners: that one names the waterfall roster and belongs to
+     * [uk.xa0.dsh.AttentionCenter], while this one is a fact about the host that the
+     * About page prints. On 0.2.0-rc.2 the frame carries `host: { home }` and nothing
+     * else, so the handler is told [HostVersion.NotReported] rather than nothing at
+     * all — see [uk.xa0.dsh.model.HostVersion] for the evidence and why the two
+     * "absent" cases are kept apart.
+     *
+     * A reader that arrives after the frame has already been folded ([hostVersion])
+     * has missed this callback, and that is the common case: the connection service
+     * opens the stream before any ViewModel exists.
+     */
+    @Volatile
+    var onHostVersion: ((HostVersion) -> Unit)? = null
+
+    /**
+     * The last version a host named in a `ready` frame, retained so a reader that
+     * wires [onHostVersion] after the frame has already arrived can seed itself
+     * rather than showing "not known" until the next reconnect.
+     *
+     * It lives and dies with the instance, and [uk.xa0.dsh.DshClient] builds a fresh
+     * mux whenever the endpoint moves: a replacement mux is a different host to ask,
+     * so it starts at [HostVersion.Unknown] rather than inheriting the previous one's.
+     */
+    @Volatile
+    var hostVersion: HostVersion = HostVersion.Unknown
+        private set
+
     @Volatile
     var onLog: ((String) -> Unit)? = null
 
@@ -377,6 +411,13 @@ class RemoteMux(
                                 // on the stream.
                                 onEventsGeneration?.invoke(id)
                             }
+                            // The same item is the whole of the host's identity
+                            // frame, so the version is folded from it here rather
+                            // than from a call of its own. Retained as well as
+                            // announced: a reader may not be listening yet.
+                            val version = hostVersionFromReadyFrame(value)
+                            hostVersion = version
+                            onHostVersion?.invoke(version)
                         }
                         "waterfall" -> handleWaterfall(value)
                         // The host withdraws a settled waterfall as a stream ITEM

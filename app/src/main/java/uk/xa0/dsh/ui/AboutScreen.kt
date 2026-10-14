@@ -32,12 +32,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import uk.xa0.dsh.BuildConfig
 import uk.xa0.dsh.ModelOption
 import uk.xa0.dsh.PermissionOption
+import uk.xa0.dsh.model.HostVersion
 import uk.xa0.dsh.net.AcceptedCert
 import uk.xa0.dsh.net.CertReadout
 import uk.xa0.dsh.ui.components.CertificateSection
@@ -69,9 +71,11 @@ import java.security.cert.X509Certificate
  *
  * Every row here is local, and every one stays truthful with the socket down. The
  * one action that reaches the network is **Check certificate**, which reads what the
- * host presents and is explicit about doing so. Facts that would need a host call to
- * *print* — the host's own build, the machine it runs on — are deliberately absent
- * rather than guessed.
+ * host presents and is explicit about doing so. The one row that is neither local
+ * nor a call of its own is the host's DSH version: it is folded from the `$events`
+ * opening frame the app already receives, and a host that names no version is said
+ * to have named none. Facts that would need a host call to *print* — the host's own
+ * build, the machine it runs on — are deliberately absent rather than guessed.
  *
  * No row prints a bare dash. A value the host has not reported reads as
  * `Unknown`, and a state that has a name of its own (`Not configured`, `None`,
@@ -103,6 +107,14 @@ fun AboutContent(
      */
     activeUrl: String = "",
     activeRouteLan: Boolean = false,
+    /**
+     * The DSH version of the host this app is actually connected to, as that host
+     * named it in its `$events` opening frame. Never this app's own version: the
+     * host is a remote machine and the two releases move independently. Defaulted
+     * to [HostVersion.Unknown], so a caller that never had a connection prints the
+     * usual `Unknown` rather than omitting the row.
+     */
+    hostVersion: HostVersion = HostVersion.Unknown,
     /**
      * The LAN door's own address, and where an edit goes. Committed by the Save
      * action rather than per keystroke: a new LAN address re-resolves the endpoint
@@ -243,6 +255,11 @@ fun AboutContent(
         InfoRow("Session cookie", local.sessionCookie?.let { if (it) "Present" else "None" })
         // Web shell connection copy: connected / disconnected.
         InfoRow("Status", if (socketConnected) "Connected" else "Disconnected")
+        // The host's own DSH version, folded from its `$events` opening frame — the
+        // only identity frame the wire carries. An `Unknown` here is "not connected,
+        // or no opening frame yet"; a connected host whose frame named none says so
+        // in words rather than being left blank or filled in with this app's version.
+        InfoRow("DSH version", hostVersionLabel(hostVersion), HOST_VERSION_VALUE_TAG)
 
         // What this host is pinned to, or what it presented when it was refused. Bound
         // to locals because a nullable parameter does not smart-cast inside a lambda.
@@ -368,9 +385,13 @@ private fun SupportRow() {
  * value, and the vendored web copy has no placeholder of its own to borrow.
  *
  * The label column is fixed so every section's values line up as one column.
+ *
+ * [valueTag] names the value's seat for a test that has to read this row
+ * specifically; `Unknown` is drawn by more than one row, so counting the word
+ * cannot tell them apart.
  */
 @Composable
-private fun InfoRow(label: String, value: String?) {
+private fun InfoRow(label: String, value: String?, valueTag: String? = null) {
     val colors = DshTheme.colors
     Row(Modifier.fillMaxWidth().padding(horizontal = DshSpacing.xxl, vertical = DshSpacing.xs)) {
         Text(
@@ -381,12 +402,35 @@ private fun InfoRow(label: String, value: String?) {
         )
         Text(
             value ?: "Unknown",
+            modifier = if (valueTag == null) Modifier else Modifier.testTag(valueTag),
             style = DshType.bodyMedium,
             color = if (value == null) colors.labelCaption else colors.labelPrimary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/**
+ * Names the host-version row's value for `AboutHostVersionTest`, which lives in the
+ * unit-test source set and has to address this one node: `Unknown` is drawn by more
+ * than one row, so counting the word cannot tell them apart.
+ */
+const val HOST_VERSION_VALUE_TAG = "about-host-dsh-version"
+
+/**
+ * What the About row prints for the host's own DSH version.
+ *
+ * `null` is this screen's existing "not known" (see [InfoRow]), and it is what
+ * [HostVersion.Unknown] means: no opening frame has arrived on this connection, so
+ * there is nothing to name. A connected host whose opening frame carried no version
+ * is named as having reported none, in the same shape as `Not configured` / `None` /
+ * `Untitled` — never blank, and never this app's own version.
+ */
+private fun hostVersionLabel(version: HostVersion): String? = when (version) {
+    HostVersion.Unknown -> null
+    HostVersion.NotReported -> "Not reported"
+    is HostVersion.Reported -> version.version
 }
 
 /** The Android release and the API level this build is running on. */
