@@ -263,9 +263,6 @@ class RemoteMux(
     var hostVersion: HostVersion = HostVersion.Unknown
         private set
 
-    @Volatile
-    var onLog: ((String) -> Unit)? = null
-
     suspend fun ensureConnected() {
         if (closed) return
         if (_state.value == MuxState.OPEN) return
@@ -375,9 +372,16 @@ class RemoteMux(
         registrations[streamId]?.channel?.trySend(event)
     }
 
+    /**
+     * Records one line of the mux's own trace.
+     *
+     * Logcat only, deliberately. This text is diagnostics — stream ids, frame
+     * types, socket generations — and it is not a description of what the app is
+     * doing that any screen may show; it was once wired into the loading screen and
+     * told a reader starting the app `item s2 baseline (#1)`.
+     */
     private fun log(message: String) {
         Log.d(TAG, message)
-        onLog?.invoke(message)
     }
 
     private inner class Listener : WebSocketListener() {

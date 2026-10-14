@@ -262,6 +262,18 @@ class DshClient(context: Context) {
     var onRouteChanged: (() -> Unit)? = null
 
     /**
+     * Called just before the stored username and password go to the host.
+     *
+     * The client owns the fact; the caller owns the words. Without this the two
+     * halves of a sign-in were one wait to the screen — "asking whether this device
+     * is still signed in" and "the host asked for credentials and they are on their
+     * way" happen inside the same call and are different things to be waiting on.
+     * Invoked on the caller's dispatcher, before the request is dispatched.
+     */
+    @Volatile
+    var onSignIn: (() -> Unit)? = null
+
+    /**
      * The event socket's client, from the current family.
      *
      * Read through the family rather than captured, so a client rebuilt for a new
@@ -704,6 +716,7 @@ class DshClient(context: Context) {
                 if (config.username.isBlank()) {
                     Result.failure(DshAuthException("The host requires a login."))
                 } else {
+                    onSignIn?.invoke()
                     login(config.username, config.password).mapCatching { }
                 }
             }

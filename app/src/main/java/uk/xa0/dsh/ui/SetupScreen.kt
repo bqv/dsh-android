@@ -22,6 +22,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import uk.xa0.dsh.model.StartupCopy
+import uk.xa0.dsh.model.StartupStep
 import uk.xa0.dsh.net.AcceptedCert
 import uk.xa0.dsh.net.CertReadout
 import uk.xa0.dsh.ui.components.CertificateSection
@@ -46,7 +48,14 @@ fun SetupScreen(
     initialUsername: String,
     error: String?,
     busy: Boolean,
-    status: String?,
+    /**
+     * What the connect attempt is waiting on, or null when none is in flight.
+     *
+     * A step rather than a sentence for the same reason the loading screen takes
+     * one: this line used to be whatever the event multiplexer last wrote, so a
+     * reader connecting from here could be told `item s2 baseline (#1)`.
+     */
+    startupStep: StartupStep?,
     onConnect: (url: String, lanUrl: String, username: String, password: String, cookie: String) -> Unit,
     initialLanUrl: String = "",
     /**
@@ -180,7 +189,7 @@ fun SetupScreen(
 
             DshPrimaryButton(
                 text = when {
-                    busy -> status ?: "Connecting…"
+                    busy -> startupStep?.let { StartupCopy.title(it) } ?: "Connecting…"
                     else -> "Connect"
                 },
                 enabled = !busy && url.isNotBlank(),
@@ -189,7 +198,7 @@ fun SetupScreen(
 
             if (busy) {
                 Text(
-                    text = status.orEmpty(),
+                    text = startupStep?.let { StartupCopy.detail(it) }.orEmpty(),
                     style = DshType.micro,
                     color = colors.labelCaption,
                 )

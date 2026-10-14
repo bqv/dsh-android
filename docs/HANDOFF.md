@@ -349,6 +349,19 @@ editing the live copy. There is no install step to forget.
     So a family total sums what the host reported and says what the sum is rather than
     deciding; see `model/FamilyUsage.kt`.
 
+24. **A mux stream id is whatever won a race, so `s2` names a different endpoint per run.**
+    `RemoteMux.openStream` hands out `"s" + nextId` in the order the collectors happen to be
+    scheduled, and the app opens four or five of them around start-up (`$events`,
+    `job/list`, `session/follow`, `workspace/follow`, `session/control`). Measured on the
+    handset on 2026-10-14: the cold start at 13:27 assigned `s1` = `job/list`,
+    `s2` = `session/follow`, `s3` = `$events`, while the process running beside it had
+    `s70` = `workspace/follow`, `s71` = `session/control`, `s72` = `session/follow`.
+    Read `open sN -> <endpoint>`, which is logged when the registration is first sent,
+    rather than inferring the endpoint from the id. **That trace is logcat only**
+    (`adb logcat -s DshMux:D`): it was once wired straight into `UiState` and drawn on the
+    loading screen verbatim — a reader starting the app was told `item s2 baseline (#1)` —
+    which is what `model/StartupCopy.kt` and `ui/StartupScreen.kt` replaced.
+
 ## Host behaviour: model selection (probed on 0.2.0-rc.2)
 
 Measured, not inferred. These are host facts, so a change to the chip that contradicts

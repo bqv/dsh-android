@@ -10,30 +10,22 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.systemBarsPadding
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import uk.xa0.dsh.model.StartupStep
 import uk.xa0.dsh.ui.BackGate
 import uk.xa0.dsh.ui.ChatScreen
 import uk.xa0.dsh.ui.SetupScreen
-import uk.xa0.dsh.ui.components.DshMark
-import uk.xa0.dsh.ui.theme.DshSpacing
+import uk.xa0.dsh.ui.StartupScreen
 import uk.xa0.dsh.ui.markdown.LocalImageBytes
 import uk.xa0.dsh.ui.theme.DshTheme
-import uk.xa0.dsh.ui.theme.DshType
 
 import android.net.Uri
 
@@ -135,7 +127,9 @@ class MainActivity : ComponentActivity() {
                         .background(DshTheme.colors.bgBase),
                 ) {
                     when (ui.phase) {
-                        AppPhase.LOADING -> LoadingScreen(ui.status)
+                        AppPhase.LOADING -> StartupScreen(
+                            step = ui.startupStep ?: StartupStep.FINDING_HOST,
+                        )
 
                         AppPhase.SETUP -> Box(Modifier.systemBarsPadding()) {
                             SetupScreen(
@@ -143,7 +137,7 @@ class MainActivity : ComponentActivity() {
                                 initialUsername = ui.username,
                                 error = ui.error,
                                 busy = ui.busy,
-                                status = ui.status,
+                                startupStep = ui.startupStep,
                                 onConnect = vm::saveSetup,
                                 initialLanUrl = ui.lanUrl,
                                 acceptedCerts = ui.acceptedCerts,
@@ -303,18 +297,3 @@ data class Provisioning(
     val password: String,
     val cookie: String,
 )
-
-@Composable
-private fun LoadingScreen(status: String?) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            DshMark(size = 40.dp)
-            Spacer(Modifier.height(DshSpacing.xl))
-            Text(
-                text = status ?: "Connecting…",
-                style = DshType.bodyMedium,
-                color = DshTheme.colors.labelTertiary,
-            )
-        }
-    }
-}

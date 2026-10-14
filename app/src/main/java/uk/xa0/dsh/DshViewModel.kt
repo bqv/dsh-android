@@ -63,6 +63,7 @@ import uk.xa0.dsh.model.sessionRowTitle
 import uk.xa0.dsh.model.SettingsApply
 import uk.xa0.dsh.model.SettingsWritePlan
 import uk.xa0.dsh.model.SessionSearchHit
+import uk.xa0.dsh.model.StartupStep
 import uk.xa0.dsh.model.HostSettings
 import uk.xa0.dsh.model.HostVersion
 import uk.xa0.dsh.model.RouterProbeRecord
@@ -587,7 +588,21 @@ data class DraftRestore(val text: String, val nonce: Long)
 data class UiState(
     val phase: AppPhase = AppPhase.LOADING,
     val busy: Boolean = false,
-    val status: String? = null,
+    /**
+     * What the loading screen is waiting on, or null when nothing is.
+     *
+     * A step rather than a sentence, and it exists because the sentence used to be
+     * whatever the event multiplexer last wrote into it — its own socket trace,
+     * shown to a reader verbatim as `item s2 baseline (#1)`. The words for a step
+     * live in [uk.xa0.dsh.model.StartupCopy] and the step is set where the work
+     * happens, so the two cannot drift apart.
+     *
+     * It starts at [StartupStep.FINDING_HOST] because that is what a configured
+     * cold start does first: the route is resolved before anything is asked of the
+     * host. Null means no start-up is in flight, and the screen that draws this is
+     * not on screen then.
+     */
+    val startupStep: StartupStep? = StartupStep.FINDING_HOST,
     val error: String? = null,
     /**
      * The banner's failure is an expired/refused session rather than a failed
@@ -2393,7 +2408,12 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         muxWired = true
 
         mux.postEventResult = { args -> client.rpc("\$events/result", args) }
-        mux.onLog = { message -> _ui.value = _ui.value.copy(status = message) }
+        // The mux's own trace is left in logcat and nowhere else. It used to be
+        // copied verbatim into `UiState` and shown on the start-up screen, which is
+        // how a reader came to be told "item s2 baseline (#1)": a stream id and a
+        // frame type are facts about the protocol, not about what the app is doing.
+        // The loading screen now names a `StartupStep` instead.
+        client.onSignIn = { _ui.value = _ui.value.copy(startupStep = StartupStep.SIGNING_IN) }
         // The host names its own DSH version in the `$events` opening frame, which is
         // the only identity frame the wire offers; see the `hostVersion` field. Bound
         // to the mux instance the callback is set on, because a frame from a mux the
@@ -3099,7 +3119,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _ui.value = _ui.value.copy(
             phase = AppPhase.SETUP,
             busy = false,
-            status = null,
+            startupStep = null,
             error = AUTH_ERROR,
             errorNeedsSignIn = false,
             baseUrl = config.baseUrl,
@@ -3165,7 +3185,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             _ui.value = _ui.value.copy(
                 phase = AppPhase.SETUP,
                 busy = false,
-                status = null,
+                startupStep = null,
                 error = error.message,
                 errorNeedsSignIn = false,
                 certReadout = CertProbe.readoutOf(
@@ -3182,9 +3202,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             else -> error.message ?: error.javaClass.simpleName
         }
         _ui.value = if (wasReady) {
-            _ui.value.copy(phase = AppPhase.READY, busy = false, status = null, error = message, errorNeedsSignIn = false)
+            _ui.value.copy(phase = AppPhase.READY, busy = false, startupStep = null, error = message, errorNeedsSignIn = false)
         } else {
-            _ui.value.copy(phase = AppPhase.SETUP, busy = false, status = null, error = message, errorNeedsSignIn = false)
+            _ui.value.copy(phase = AppPhase.SETUP, busy = false, startupStep = null, error = message, errorNeedsSignIn = false)
         }
         scheduleReconnect()
     }
@@ -3267,7 +3287,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun onAuthHealed(source: String) {
         Log.d(TAG, "silent re-login healed an auth failure from $source")
         ensureMuxWiring()
-        _ui.value = _ui.value.copy(error = null, errorNeedsSignIn = false, status = null, busy = false)
+        _ui.value = _ui.value.copy(error = null, errorNeedsSignIn = false, startupStep = null, busy = false)
         if (_ui.value.phase != AppPhase.READY) {
             // The refusal landed while connecting; run the ordinary connect path.
             connectRetries = 0
@@ -3298,7 +3318,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _ui.value = _ui.value.copy(
             phase = AppPhase.SETUP,
             busy = false,
-            status = null,
+            startupStep = null,
             error = message,
             errorNeedsSignIn = false,
             baseUrl = config.baseUrl,
@@ -3315,14 +3335,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun offerSignIn(message: String) {
         _ui.value = if (_ui.value.phase == AppPhase.READY) {
-            _ui.value.copy(error = message, errorNeedsSignIn = true, busy = false, status = null)
+            _ui.value.copy(error = message, errorNeedsSignIn = true, busy = false, startupStep = null)
         } else {
             _ui.value.copy(
                 phase = AppPhase.SETUP,
                 error = message,
                 errorNeedsSignIn = false,
                 busy = false,
-                status = null,
+                startupStep = null,
             )
         }
     }
@@ -3482,17 +3502,28 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 busy = !wasReady,
                 error = null,
                 errorNeedsSignIn = false,
-                status = if (wasReady) "Reconnecting…" else "Connecting…",
+                // A retry is not a first attempt, and the reader who has just been
+                // sent back here by a refusal is owed the difference. `connectRetries`
+                // is only ever non-zero on the retry path, and it is cleared the
+                // moment an attempt gets as far as the session list.
+                startupStep = if (connectRetries > 0) {
+                    StartupStep.RECONNECTING
+                } else {
+                    StartupStep.CHECKING_SIGN_IN
+                },
             )
             client.installManualCookie()
 
+            // The route was resolved before this coroutine existed; what is waited on
+            // here is the host's answer to the sign-in probe, and `onSignIn` moves the
+            // step on to SIGNING_IN if that probe turns out to want credentials.
             val auth = client.ensureAuthenticated()
             if (auth.isFailure) {
                 onConnectFailure(auth.exceptionOrNull(), wasReady)
                 return@launch
             }
 
-            _ui.value = _ui.value.copy(status = "Loading sessions…")
+            _ui.value = _ui.value.copy(startupStep = StartupStep.READING_SESSIONS)
             val sessions = runCatching { fetchSessions() }
             if (sessions.isFailure) {
                 onConnectFailure(sessions.exceptionOrNull(), wasReady)
@@ -3503,7 +3534,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             _ui.value = _ui.value.copy(
                 phase = AppPhase.READY,
                 busy = false,
-                status = null,
+                startupStep = null,
                 sessions = sessions.getOrThrow(),
             )
 
