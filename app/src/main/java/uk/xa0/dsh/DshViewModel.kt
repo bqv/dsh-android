@@ -55,6 +55,7 @@ import uk.xa0.dsh.model.durableRunningOf
 import uk.xa0.dsh.model.providerRank
 import uk.xa0.dsh.model.withRunning
 import uk.xa0.dsh.model.warrantsIdleAlert
+import uk.xa0.dsh.model.landingSessionId
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.SessionHeader
 import uk.xa0.dsh.model.SessionSearch
@@ -3545,21 +3546,28 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { loadAgentPresets() }
 
             // Reopen the session the user explicitly asked for, else the most
-            // recent one that actually has content; a blank (provisional) session
-            // is not worth landing in, and the host reports several of them near
-            // the top of the list.
+            // recent conversation — a blank (provisional) session is not worth
+            // landing in, and the host reports several of them near the top of
+            // the list.
+            //
+            // "Conversation" is [uk.xa0.dsh.model.landingSessionId]'s rule, and it
+            // is more than "the first row": the roster is ordered by `updatedAt`
+            // descending, so a scheduled automation run — which is what the
+            // automations are for — outranks every chat on the host for as long as
+            // the schedule keeps firing, and a fresh open would land on one every
+            // time. The rule passes over runs and subagents; nothing is hidden by
+            // it, and a run is still what opens when there is nothing else with
+            // content.
             //
             // The explicit pick is read (and consumed) here, in the same
             // uninterrupted main-thread block as the open below, so it cannot be
             // overwritten by this auto-open whichever order the two arrive in.
             val current = _ui.value.currentSessionId
-            val candidates = sessions.getOrThrow().filter { !it.isSubagent }
             val explicit = explicitSession
             explicitSession = null
             val target = explicit
                 ?: current
-                ?: candidates.firstOrNull { !it.blank }?.id
-                ?: candidates.firstOrNull()?.id
+                ?: landingSessionId(sessions.getOrThrow())
             if (target != null) {
                 if (explicit != null) Log.d(TAG, "connect honoured explicit session $explicit")
                 openSession(target)
