@@ -295,6 +295,17 @@ of where the app stands against them.
       second) and a total-tokens chip with cache hit (panel: uncached/cached input, cache
       write, output). Laid out as a wrapping row because a phone is not wide enough for the
       web's single line (`model/SessionStats.kt`, `ui/components/SessionStatsPills.kt`)
+- [x] **A family total in that panel, which the web has no equivalent of.** The panel adds
+      the whole subagent family — the session, its subagents and theirs, however deep — as a
+      token figure and, when every member is priced, a cost. Membership is the roster's own
+      `parentSessionId` chain (`model/SubagentTree.kt`), and each member's figure is its own
+      `tokenUsage` off its `session/list` row. The row is labelled `Family, as reported`
+      rather than as the family's own work: 669 of the 1,287 live subagent rows carry no
+      `tokenUsage` at all, and a *forked* subagent's figure includes the history it
+      inherited. The omission is disclosed by the `N of M` subagents row plus a note, and
+      the double count by a method note shown with every reading, because no `session/list`
+      field identifies a forked child. An unpriced member withholds the family cost
+      entirely rather than showing a money-shaped subtotal (`model/FamilyUsage.kt`)
 - [x] Attachments: files and pictures through `fileUploads/upload`; a picture the host
       recognises is sent inline as `{type:'image', mediaType, data, name}` with no upload
 - [x] Slash commands (`commands/list` → `commands/execute`)

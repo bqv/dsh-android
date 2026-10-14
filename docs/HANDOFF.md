@@ -306,6 +306,49 @@ editing the live copy. There is no install step to forget.
     use the `session/list` row, or the `session/follow` snapshot, which is what the app
     itself reads. One evening was lost to probes that used the other endpoint.
 
+23. **A subagent's `tokenUsage` is its own log's, and a *forked* one's is not.** The
+    `tokenUsage` fold (`dsh-token-meter`'s `usage-projection.ts`) handles
+    `assistant/message` and `assistant/attempt` and nothing else, and a child's
+    settlements are written to the child's own log — measured on `session-c9b44b3a`,
+    whose 5,710 usage samples were all on its own assistant messages and none in any
+    `tool/result`, and whose only `subagent/*` events were `subagent/catalog` (identity).
+    So summing a session with its spawned children is **not** a double count. A child
+    created by the `fork` provider is the exception: its log is seeded with a copy of the
+    parent's prefix (`dsh-session`'s `buildForkSeed`), and `tokenUsage` has **no reset at
+    that cut** — unlike `subagentCatalog` (which guards on `inheritedEventCount`) and
+    `subagentTiming` (which resets on the child's own descriptor, precisely because a fork
+    seed may carry an ancestor's). Measured twice over: folding fork subagent `630d0054`'s
+    own log gives 40,847,940 inherited tokens over 126 settled steps against 7,373,046 of
+    its own over 13, and the host's live `session/list` row for it reports
+    808,431 + 280,139 + 47,132,416 = **48,220,986** — the whole-log fold exactly.
+
+    **Which projections ride a `session/list` row.** Live on 0.2.0-rc.2, 2,514 rows:
+    1,411 carry the full block (`title`, `tokenUsage`, `sessionStats`, `subagent`,
+    `subagentTiming`, `subagentCatalog`, `modelSelection`, `sessionListMetadata`,
+    `contextPressure`, `contextBreakdown`, `turnOutline`, `permissions`, `plan`, `inbox`,
+    `todos`, `goal`, `userQuestions`, `agentPreset`, `imageLimits`) and 1,103 carry
+    `title` alone — the legacy `session.v3` records, so the block is all-or-nothing and
+    never partial. Among the 1,287 subagent rows, **618 carry `tokenUsage` and 669 do
+    not**; an aggregate over subagents therefore has to say what it is missing.
+
+    **No `session/list` field identifies a forked child, and two candidate detectors were
+    built, tested against all 618 live subagent rows, and rejected.** `SessionSummary`
+    carries no `isSeeded`, and the `subagent` identity projection publishes
+    `{mode, label, seq}` and drops the descriptor's `provider` (`identityValueSchema` is
+    `.strict()` on those keys). The two that looked sound and are not:
+    `subagent.seq > 0` (all three forks sit at `1047`/`3122`/`3214`, but **116 of the 615
+    unseeded children also sit above 0** — two at 5, 114 at 6 — because a `one-shot`
+    child's delegation setup, `sandbox/mode` through `turn/start`, lands before its
+    descriptor; the rule would discard 19% of subagents' usage), and
+    `sessionStats.llmMs > subagentTiming.settledMs` (whole-log model time against
+    post-descriptor turn time; it separates the three forks by 12x to 44x but also fires
+    for **4 of 615 unseeded children**, including any child still inside its first turn,
+    where `settledMs` is 0 — it would drop exactly the running children a live panel
+    shows). There is no cheap header read either — `session` exposes no `get`/`header`,
+    and `session/projections` answers empty where `session/list` does not (note 22).
+    So a family total sums what the host reported and says what the sum is rather than
+    deciding; see `model/FamilyUsage.kt`.
+
 ## Host behaviour: model selection (probed on 0.2.0-rc.2)
 
 Measured, not inferred. These are host facts, so a change to the chip that contradicts

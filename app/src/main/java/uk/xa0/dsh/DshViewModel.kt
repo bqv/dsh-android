@@ -213,6 +213,19 @@ data class SessionItem(
     val subagentLabel: String? = null,
     /** `one-shot` | `continuable`; required by the subagent address form. */
     val subagentMode: String? = null,
+    /**
+     * This session's own `sessionStats` / `tokenUsage` projections, when the row carried
+     * them. Null covers both "the payload had neither key" and "the fold has not been
+     * materialized for this session yet" — a member whose usage the host has not given,
+     * which [uk.xa0.dsh.model.FamilyUsage] reports rather than spending as a zero.
+     */
+    val usage: SessionStats? = null,
+    /**
+     * The route this session's last turn actually ran (`modelSelection.lastUsed`), which
+     * is what a family cost prices its tokens at. Not the same fact as the model chip's
+     * `next`, which is what the *next* turn will run.
+     */
+    val lastUsedModel: ModelRef? = null,
 )
 
 /**
@@ -4781,6 +4794,8 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             parentSessionId = parentSessionId,
             subagentLabel = subagent?.first?.takeIf { it.isNotBlank() },
             subagentMode = subagent?.second?.takeIf { it.isNotBlank() },
+            usage = parseSessionStats(projections),
+            lastUsedModel = parseHostModelSelection(projections.obj("modelSelection"))?.lastUsed,
         ).withCatalog(held)
     }
 
