@@ -293,8 +293,9 @@ of where the app stands against them.
 - [x] Statistic pills folded from the `sessionStats` and `tokenUsage` projections: a
       turns/steps chip with `tok/s` (panel: LLM time, tool time, average TTFT, tokens per
       second) and a total-tokens chip with cache hit (panel: uncached/cached input, cache
-      write, output). Laid out as a wrapping row because a phone is not wide enough for the
-      web's single line (`model/SessionStats.kt`, `ui/components/SessionStatsPills.kt`)
+      write, output). One row rather than the web's wrapping line, with each chip anchored
+      to its own end of the composer card and staying there when only one of the two has a
+      reading (`model/SessionStats.kt`, `ui/components/SessionStatsPills.kt`)
 - [x] **A family total in that panel, which the web has no equivalent of.** The panel adds
       the whole subagent family — the session, its subagents and theirs, however deep — as a
       token figure and, when every member is priced, a cost. Membership is the roster's own

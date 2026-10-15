@@ -30,6 +30,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -56,6 +57,17 @@ import uk.xa0.dsh.ui.theme.DshType
 
 /** The two readings in the row, and which one currently owns the open panel. */
 private enum class StatPill { TIME, USAGE }
+
+/**
+ * Test addresses for the row's two chips.
+ *
+ * Public rather than internal because the unit-test source set is not a friend of
+ * `main`: an `internal` symbol is unresolved from a test, whatever its package.
+ * They address the chips *as placed* — the direct children of the row — so a test
+ * compares a chip's end with the row's own, not with the text inside it.
+ */
+const val STATS_COUNTS_CHIP_TAG = "stats-chip-counts"
+const val STATS_USAGE_CHIP_TAG = "stats-chip-usage"
 
 /**
  * The web's session-stat pills (`ui-chat/src/client/chat/StatsPills.tsx`):
@@ -137,13 +149,26 @@ fun SessionStatsPills(
     // abbreviated to "Cache" for the same reason — 20dp of headroom — and the
     // panel spells the full wording out.
     //
-    // Each chip is also pinned to its own end of the card: the counts chip begins
-    // at the composer card's left edge and the usage chip ends at its right edge,
-    // with the slack absorbed between them. Two chips left-aligned with dead space
-    // to their right read as a stranded pair rather than as the card's own footer,
-    // and centring the pair was measured worse still — ~103dp of dead space on
-    // each side. The fill only exists while both chips are drawn: a lone chip
-    // keeps the left edge rather than being pushed right by an empty middle.
+    // Each chip is also pinned to its own end of the card, and stays there
+    // whichever of the two is drawn: the counts chip begins at the composer
+    // card's left edge and the usage chip ends at its right edge, with the slack
+    // absorbed between them. Two chips left-aligned with dead space to their right
+    // read as a stranded pair rather than as the card's own footer, and centring
+    // the pair was measured worse still — ~103dp of dead space on each side.
+    //
+    // The slack is one flexible slot and it belongs to the usage chip's side of
+    // the row, so it is drawn whenever *that* chip is — with or without the counts
+    // chip in front of it. It used to be drawn only while both chips existed,
+    // which left a lone counts chip at the left edge (correct) but pushed a lone
+    // usage chip there as well: a session with billing and no counts reading drew
+    // "16.3K tok · Cache 48%" at the counts chip's end, which reads as the wrong
+    // pill rather than as one pill. That pairing is not hypothetical — the counts
+    // chip's gate is `steps > 0`, and the connected host serves blocks with a
+    // settled `tokenUsage` and no `sessionStats` at all: session `395fa4c3`'s live
+    // row carries 21,096 billed tokens and no statistics block, and its projection
+    // cache holds 18 rows and no `sessionStats` row where 2,659 of the host's 2,668
+    // hold one. Anchoring each chip to its own end makes the two positions
+    // independent, so neither moves when the other appears or vanishes.
     val showCounts = stats.steps > 0
     val showUsage = stats.hasTokenActivity
     Row(
@@ -161,6 +186,7 @@ fun SessionStatsPills(
                 expandable = stats.hasTiming,
                 expanded = open == StatPill.TIME,
                 onToggle = { open = if (open == StatPill.TIME) null else StatPill.TIME },
+                modifier = Modifier.testTag(STATS_COUNTS_CHIP_TAG),
             ) {
                 StatPanel(title = "Session statistics") {
                     // A row is absent, not zeroed: an untimed figure is not the
@@ -176,8 +202,10 @@ fun SessionStatsPills(
                 }
             }
         }
-        if (showCounts && showUsage) Spacer(Modifier.weight(1f))
         if (showUsage) {
+            // The slack comes *before* the chip it belongs to, so the chip lands
+            // on the card's right edge whether or not a counts chip precedes it.
+            Spacer(Modifier.weight(1f))
             val cacheHit = stats.cacheHitPercent
             StatPillButton(
                 icon = Icons.Rounded.Storage,
@@ -187,6 +215,7 @@ fun SessionStatsPills(
                 expandable = true,
                 expanded = open == StatPill.USAGE,
                 onToggle = { open = if (open == StatPill.USAGE) null else StatPill.USAGE },
+                modifier = Modifier.testTag(STATS_USAGE_CHIP_TAG),
             ) {
                 StatPanel(
                     title = "Token usage",
