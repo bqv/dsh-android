@@ -24,10 +24,12 @@ class DoorFaultForAnswerTest {
     @Test
     fun `a success that is not a DSH envelope is a verdict on the door`() {
         // The captive-portal shape: it answers as though the request were fine and
-        // serves its own page, so no probe of it will ever know better.
+        // serves its own page, so no probe of it will ever know better. (A genuinely
+        // empty 2xx body never reaches this rule — `rpcRaw` refuses it as an empty
+        // response first — so the status here always carries something.)
         assertEquals(DoorFault.WrongAnswer, doorFaultForAnswer(200))
         assertEquals(DoorFault.WrongAnswer, doorFaultForAnswer(201))
-        assertEquals(DoorFault.WrongAnswer, doorFaultForAnswer(204))
+        assertEquals(DoorFault.WrongAnswer, doorFaultForAnswer(202))
     }
 
     @Test
