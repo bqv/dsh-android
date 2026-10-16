@@ -108,22 +108,28 @@ fun FilesPanel(
     /** On-demand workspace read; null means "use [cached] only". */
     loader: WorkspaceFileLoader? = null,
     /**
-     * Path to open straight away, for a caller that arrived from a file link
-     * rather than from this list. A path the session never touched is ignored.
+     * Path to open straight away, for a caller that arrived from a file link or a
+     * deliverable card rather than from this list. It is opened even when the
+     * derivation has no row for it: such a path is a fact about the transcript,
+     * not about this list, and [loader] resolves it against the session all the
+     * same. Discarding it was the silent no-op the reader met — the panel came up
+     * on its list and the file never opened.
      */
     initialPath: String? = null,
     /** Fired when a file row is selected, for a parent that wants to observe it. */
     onSelect: ((SessionFile) -> Unit)? = null,
 ) {
     val colors = DshTheme.colors
-    var selected by remember(initialPath) {
-        mutableStateOf(initialPath?.takeIf { path -> files.any { it.path == path } })
-    }
+    // The path on screen: [initialPath], or a row the reader tapped.
+    var selected by remember(initialPath) { mutableStateOf(initialPath) }
+    // True once the *list* has held the current selection, so a path that was a row
+    // and is no longer one (a transcript reload) is still dropped, while a path only
+    // an outside caller knew is not.
+    var listed by remember(initialPath) { mutableStateOf(false) }
 
-    // A selected path can vanish when the transcript reloads; drop it rather
-    // than previewing a file the list no longer holds.
-    LaunchedEffect(files) {
-        if (selected != null && files.none { it.path == selected }) selected = null
+    LaunchedEffect(files, selected) {
+        val held = selected != null && files.any { it.path == selected }
+        if (held) listed = true else if (listed) selected = null
     }
 
     // Workspace reads are memoized for the panel's lifetime: re-selecting a file
@@ -157,7 +163,10 @@ fun FilesPanel(
     val shown: FilePreview? = selected?.let { path -> cached[path] ?: fetched[path] }
     val retry: (String) -> Unit = { path -> fetched.remove(path); reloadKey += 1 }
 
-    if (files.isEmpty()) {
+    // Nothing to list *and* nothing asked for: the panel's own empty state. A path
+    // an outside caller asked for goes on to the preview instead, which is the one
+    // thing this panel can still show for a session whose derivation holds nothing.
+    if (files.isEmpty() && selected == null) {
         Box(modifier.fillMaxSize().background(colors.bgBase), contentAlignment = Alignment.Center) {
             FilesEmptyState()
         }
