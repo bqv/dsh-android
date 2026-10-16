@@ -57,7 +57,9 @@ import uk.xa0.dsh.model.withRunning
 import uk.xa0.dsh.model.warrantsIdleAlert
 import uk.xa0.dsh.model.landingSessionId
 import uk.xa0.dsh.model.activeTaskCounts
-import uk.xa0.dsh.model.automationTasksFrom
+import uk.xa0.dsh.model.AutomationCatalog
+import uk.xa0.dsh.model.readAutomationCatalog
+import uk.xa0.dsh.model.ScheduleSignalLatch
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.ExplorerState
 import uk.xa0.dsh.model.WorkspaceEntry
@@ -2345,6 +2347,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private var scheduleCounts: Map<String, Int> = emptyMap()
 
     /**
+     * Keeps a lost `schedule/catalog` signal to one logcat line per episode.
+     *
+     * See [ScheduleSignalLatch] for the rule: the first loss is written, the rest are
+     * quiet, and a whole read clears it. One process holds one latch, because the
+     * flooding it prevents is a property of the app's lifetime, not of one pull.
+     */
+    private val scheduleSignal = ScheduleSignalLatch()
+
+    /**
      * Re-reads the host's scheduled-task catalog.
      *
      * `schedule/catalog` takes no arguments and returns a bare array, so it rides
@@ -2354,13 +2365,94 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * (`createCatalogSource`: a refresh republishes loading over the last successful
      * read). That matters because the read is issued from [fetchSessions], and a
      * transient host hiccup must not read as "every task vanished".
+     *
+     * Every way this signal can be lost is reported through [noteScheduleSignal] rather
+     * than discarded: the call failing (a transport fault, an expired session, or the
+     * host no longer registering the method), an answer that is not the task array, and
+     * rows inside the array that name no task id or session or carry no `status` this
+     * build knows. A catalog that is simply empty is none of those, and is not reported
+     * at all. The reports never change the marks: a failure still keeps the last sample
+     * and a partial answer still marks only the rows it could read, exactly as before the
+     * feature existed.
      */
     private suspend fun refreshScheduleCounts() {
         runCatching {
             val value = client.rpcRaw("schedule/catalog")
-            activeTaskCounts(automationTasksFrom(value as? JSONArray))
-        }.onSuccess { counts ->
+            val catalog = value as? JSONArray
+            val sample: Pair<Map<String, Int>, String?> = if (catalog == null) {
+                // The call answered, but not with the array. The marks read as none, so
+                // this is a loss and not a "no schedules exist" answer.
+                emptyMap<String, Int>() to
+                    "the host answered schedule/catalog with ${scheduleAnswerShape(value)}, not the task array it returns"
+            } else {
+                val read = readAutomationCatalog(catalog)
+                activeTaskCounts(read.tasks) to scheduleCatalogLoss(read)
+            }
+            sample
+        }.onSuccess { (counts, loss) ->
             scheduleCounts = counts
+            noteScheduleSignal(loss)
+        }.onFailure { error ->
+            noteScheduleSignal(
+                "the schedule/catalog call failed (${describe(error)}), so the host was never asked",
+            )
+        }
+    }
+
+    /**
+     * The reason a *successful* `schedule/catalog` answer still leaves rows unmarked, or
+     * null when every row was read.
+     *
+     * The two halves are stated apart because they are different faults with different
+     * fixes: rows that are not there at all point at the call or its envelope, while rows
+     * that are present but unreadable point at a field inside the answer. Both leave
+     * sessions unmarked, which is the part the log has to make plain.
+     */
+    private fun scheduleCatalogLoss(read: AutomationCatalog): String? {
+        val clauses = ArrayList<String>(2)
+        if (read.droppedRows > 0) {
+            clauses += "${read.droppedRows} of ${read.rows} rows named no task id or no sessionId"
+        }
+        if (read.unknownStatusRows > 0) {
+            clauses += "${read.unknownStatusRows} of ${read.rows} tasks carried a status this build does not know (active or inactive)"
+        }
+        if (clauses.isEmpty()) return null
+        return clauses.joinToString("; ")
+    }
+
+    /**
+     * The shape of a `schedule/catalog` answer that was not the task array, named so the
+     * log line can say what arrived instead of only that something did.
+     */
+    private fun scheduleAnswerShape(value: Any?): String = when (value) {
+        null -> "no value"
+        is JSONObject -> "a JSON object"
+        is JSONArray -> "a JSON array"
+        is String -> "a string"
+        is Number -> "a number"
+        is Boolean -> "a boolean"
+        else -> value.javaClass.simpleName
+    }
+
+    /**
+     * Writes the one line a lost schedule signal earns, or clears the latch when the
+     * signal is whole again.
+     *
+     * The tag is the app's own ([SCHEDULE_TAG]) and the level is a warning, matching the
+     * route resolver, whose invisibility on success is the same problem: without a line,
+     * "the host replaced the Schedule bundle and the clock marks quietly stopped" is
+     * unanswerable after the fact. [ScheduleSignalLatch] holds the flooding rule, so this
+     * is one line per outage and not one per roster pull.
+     *
+     * This path must never throw and must never touch the read it reports on. The marks
+     * degrade exactly as they did before the line existed — a failed read keeps the last
+     * sample, an unreadable one leaves its rows unmarked — and the roster is never held up
+     * by a string being built.
+     */
+    private fun noteScheduleSignal(loss: String?) {
+        val line = scheduleSignal.accept(loss) ?: return
+        runCatching {
+            Log.w(SCHEDULE_TAG, "schedule marks lost: $line")
         }
     }
 
@@ -7755,6 +7847,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         const val TAG = "DshVm"
         /** Sidebar diagnostics: Workspace membership against the session list. */
         const val SIDEBAR_TAG = "DshSidebar"
+
+        /**
+         * The tag a lost scheduled-task signal is left under.
+         *
+         * The clock mark is invisible when it works and invisible when it breaks, which is
+         * the same problem the route tag answers: without a line, "the host stopped
+         * answering `schedule/catalog` and the marks quietly vanished" can only be guessed
+         * at from the screen. See [refreshScheduleCounts].
+         */
+        const val SCHEDULE_TAG = "DshSchedule"
         const val APPROVAL_TIMEOUT_MS = 5 * 60 * 1000L
 
         /**

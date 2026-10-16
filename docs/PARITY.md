@@ -393,7 +393,12 @@ of where the app stands against them.
       and wrong now that each is the reader's own session; the lift-out, the section and
       the synthetic `__automations__` key are gone. A host without the bundle answers the
       call with an error, no row is marked, and the drawer renders exactly as it did before
-      the feature existed (pinned by `AutomationsTest`). The **landing** rule
+      the feature existed (pinned by `AutomationsTest`). A lost signal is no longer silent:
+      `refreshScheduleCounts` warns once under the `DshSchedule` tag when the call fails,
+      when the answer is not the task array, or when rows carry no task id, no `sessionId`
+      or no `status` this build knows, and stays quiet until a whole read clears it (one
+      boolean, no timer). A catalog that is legitimately empty is not a fault and is not
+      logged. The **landing** rule
       (`model/LandingSession.kt`) is the same preference re-keyed from the dead id prefix
       to the catalog: a session with an active task is passed over while a conversation
       exists, and is still what opens when nothing else has content.

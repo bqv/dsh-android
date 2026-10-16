@@ -44,6 +44,13 @@ import org.json.JSONArray
 const val AUTOMATION_TASK_ACTIVE: String = "active"
 
 /**
+ * The only other `status` the host's schema defines. A row carrying neither this nor
+ * [AUTOMATION_TASK_ACTIVE] is one this build cannot read a mark from at all, which is
+ * what a renamed `status` field or a new status value looks like from here.
+ */
+const val AUTOMATION_TASK_INACTIVE: String = "inactive"
+
+/**
  * One task from the `schedule/catalog` answer, reduced to what a client needs.
  *
  * [id] is the host's task identity (`schedule-…`), [sessionId] the session it delivers
@@ -58,28 +65,102 @@ data class AutomationTask(
 )
 
 /**
+ * What one `schedule/catalog` answer held, and what could not be read from it.
+ *
+ * [tasks] is exactly the list [automationTasksFrom] returns, so a caller that only wants
+ * the marks still reads that and gets them unchanged. The counts exist for the one caller
+ * that has to *say* why a mark is missing: [rows] is the answer's length, [droppedRows]
+ * counts rows that named no task id or no owning session and were skipped, and
+ * [unknownStatusRows] counts tasks that were kept but carried no `status` this build knows
+ * ([AUTOMATION_TASK_ACTIVE] or [AUTOMATION_TASK_INACTIVE]). A task in that last state is
+ * never `active`, so it can never mark its session — a renamed `status` field would put
+ * every row there. Neither count repairs anything: which marks appear is unchanged.
+ */
+data class AutomationCatalog(
+    val tasks: List<AutomationTask>,
+    val rows: Int,
+    val droppedRows: Int,
+    val unknownStatusRows: Int,
+)
+
+/**
+ * Reads one `schedule/catalog` answer, reporting the tasks and what reading them lost.
+ *
+ * The parse is the one the marks have always used, and the counts are diagnostics only: a
+ * row with no task id or no owning session is skipped rather than repaired, because a mark
+ * on the wrong row is worse than a missing one and the host's schema requires both fields
+ * anyway. A null answer is the "no catalog" case and loses nothing — it is a whole answer
+ * with no rows, not a fault.
+ */
+fun readAutomationCatalog(catalog: JSONArray?): AutomationCatalog {
+    if (catalog == null) return AutomationCatalog(emptyList(), 0, 0, 0)
+    val tasks = ArrayList<AutomationTask>(catalog.length())
+    var dropped = 0
+    var unknownStatus = 0
+    for (i in 0 until catalog.length()) {
+        val row = catalog.optJSONObject(i)
+        if (row == null) {
+            dropped++
+            continue
+        }
+        val id = row.optString("id")
+        val sessionId = row.optString("sessionId")
+        if (id.isEmpty() || sessionId.isEmpty()) {
+            dropped++
+            continue
+        }
+        val status = row.optString("status")
+        if (status != AUTOMATION_TASK_ACTIVE && status != AUTOMATION_TASK_INACTIVE) unknownStatus++
+        tasks += AutomationTask(
+            id = id,
+            sessionId = sessionId,
+            active = status == AUTOMATION_TASK_ACTIVE,
+        )
+    }
+    return AutomationCatalog(tasks, catalog.length(), dropped, unknownStatus)
+}
+
+/**
  * Reads the `schedule/catalog` answer.
  *
  * The answer is a bare JSON *array* — hence `DshClient.rpcRaw` rather than `rpc`, which
  * reads `value` as an object and would quietly hand back an empty one. A row with no
  * task id or no owning session is skipped rather than repaired: a mark on the wrong row
  * is worse than a missing one, and the host's schema requires both fields anyway.
+ *
+ * This is [readAutomationCatalog]'s tasks and nothing else, kept as the name the marks
+ * have always been read through.
  */
-fun automationTasksFrom(catalog: JSONArray?): List<AutomationTask> {
-    if (catalog == null) return emptyList()
-    val out = ArrayList<AutomationTask>(catalog.length())
-    for (i in 0 until catalog.length()) {
-        val row = catalog.optJSONObject(i) ?: continue
-        val id = row.optString("id")
-        val sessionId = row.optString("sessionId")
-        if (id.isEmpty() || sessionId.isEmpty()) continue
-        out += AutomationTask(
-            id = id,
-            sessionId = sessionId,
-            active = row.optString("status") == AUTOMATION_TASK_ACTIVE,
-        )
+fun automationTasksFrom(catalog: JSONArray?): List<AutomationTask> =
+    readAutomationCatalog(catalog).tasks
+
+/**
+ * Decides which `schedule/catalog` read losses earn a log line, so logcat is not flooded.
+ *
+ * The read is issued from every roster pull, so a host that has renamed the method, the
+ * answer or a field would otherwise draw a line per pull, for as long as the app runs.
+ * [accept] reports the first loss of an episode and then stays quiet. A whole read resets
+ * it — the task array, every row carrying the fields a mark needs, and **including one
+ * that legitimately holds no tasks at all** — so a loss after a healthy read is reported
+ * again. That is one boolean and no timer, which is the whole mechanism; a fresh instance
+ * has reported nothing, which is the correct state at startup.
+ */
+class ScheduleSignalLatch {
+    private var reported = false
+
+    /**
+     * Returns [loss] the first time it is offered in this episode, else null. A null
+     * [loss] means the read was whole: it clears the latch, so the next loss reports.
+     */
+    fun accept(loss: String?): String? {
+        if (loss == null) {
+            reported = false
+            return null
+        }
+        if (reported) return null
+        reported = true
+        return loss
     }
-    return out
 }
 
 /**
