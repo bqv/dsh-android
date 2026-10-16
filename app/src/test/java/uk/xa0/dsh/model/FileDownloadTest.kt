@@ -22,14 +22,33 @@ import org.junit.Test
 class FileDownloadTest {
 
     /** A reader over a fixed byte array, honouring "short read means end of file". */
+    /**
+     * A reader over a fixed byte array, honouring "at most the requested length, and a
+     * short answer means end of file".
+     *
+     * It keeps **two** logs, because the two are different facts and one test below
+     * turns on the difference:
+     *
+     *  - [requests] is what the loop *asked* for. With a known length the loop can bound
+     *    its last request to the remaining bytes; with no known length it can only ask
+     *    for a full window and find out from the answer.
+     *  - [granted] is what the reader actually handed back. The last entry is the short
+     *    window that ended the read.
+     */
     private class FakeReader(private val data: ByteArray) : FileWindowReader {
-        val windows = mutableListOf<Pair<Long, Int>>()
+        val requests = mutableListOf<Pair<Long, Int>>()
+        val granted = mutableListOf<Int>()
 
         override suspend fun read(path: String, offset: Long, length: Int): ByteArray {
-            windows += offset to length
-            if (offset >= data.size) return ByteArray(0)
+            requests += offset to length
+            if (offset >= data.size) {
+                granted += 0
+                return ByteArray(0)
+            }
             val end = minOf(offset + length, data.size.toLong()).toInt()
-            return data.copyOfRange(offset.toInt(), end)
+            val chunk = data.copyOfRange(offset.toInt(), end)
+            granted += chunk.size
+            return chunk
         }
     }
 
@@ -58,21 +77,35 @@ class FileDownloadTest {
         val (result, reader) = read(data, size = 10, window = 4)
 
         assertArrayEquals(data, ready(result))
-        assertEquals(listOf(0L to 4, 4L to 4, 8L to 2), reader.windows)
+        // A known length lets the loop bound its own last request to the two bytes left.
+        assertEquals(listOf(0L to 4, 4L to 4, 8L to 2), reader.requests)
+        assertEquals(listOf(4, 4, 2), reader.granted)
     }
 
     /**
-     * With no reported size the loop has only the host's short window to go on — which
-     * is exactly the case `workspaceFiles/stat` failing produces, and it must not
-     * change the answer.
+     * With no reported size the loop has only the host's short window to go on — which is
+     * exactly the case `workspaceFiles/stat` failing produces, and it must not change the
+     * answer.
+     *
+     * This is the test that would catch a loop advancing by the length it *asked* for
+     * rather than by the bytes it got: here the third request is a full window (nothing
+     * has said how long the file is), the reader grants two, and the read ends there — so
+     * **three requests**, and `granted` ends at two. A loop that advanced by the request
+     * would overshoot to offset 12, ask a fourth time, and still return ten bytes, which
+     * is why the request count and the granted bytes are both asserted rather than the
+     * result alone.
      */
     @Test
     fun `a file with no reported size pages until a short window`() {
         val data = bytes(10)
-        val (result, reader) = read(data, size = null, window = 4)
+        val progress = mutableListOf<Pair<Long, Long?>>()
+        val (result, reader) = read(data, size = null, window = 4) { done, total -> progress += done to total }
 
         assertArrayEquals(data, ready(result))
-        assertEquals(listOf(0L to 4, 4L to 4, 8L to 2), reader.windows)
+        assertEquals(listOf(0L to 4, 4L to 4, 8L to 4), reader.requests)
+        assertEquals(listOf(4, 4, 2), reader.granted)
+        // The advance is by what was granted, which is what makes the end exact.
+        assertEquals(listOf(4L to null, 8L to null, 10L to null), progress)
     }
 
     @Test
@@ -80,7 +113,8 @@ class FileDownloadTest {
         val (result, reader) = read(ByteArray(0), size = 0, window = 4)
 
         assertEquals(0, ready(result).size)
-        assertEquals(emptyList<Pair<Long, Int>>(), reader.windows)
+        assertEquals(emptyList<Pair<Long, Int>>(), reader.requests)
+        assertEquals(emptyList<Int>(), reader.granted)
     }
 
     /** A size exactly at the ceiling is ordinary when the host stated it: no probe. */
@@ -90,7 +124,7 @@ class FileDownloadTest {
         val (result, reader) = read(data, size = 8, window = 4, ceiling = 8)
 
         assertArrayEquals(data, ready(result))
-        assertEquals(listOf(0L to 4, 4L to 4), reader.windows)
+        assertEquals(listOf(0L to 4, 4L to 4), reader.requests)
     }
 
     /**
@@ -103,7 +137,10 @@ class FileDownloadTest {
         val (result, reader) = read(data, size = null, window = 4, ceiling = 8)
 
         assertArrayEquals(data, ready(result))
-        assertEquals(listOf(0L to 4, 4L to 4, 8L to 1), reader.windows)
+        // The probe asks for exactly one byte: the only question left is "is there
+        // anything after the ceiling".
+        assertEquals(listOf(0L to 4, 4L to 4, 8L to 1), reader.requests)
+        assertEquals(listOf(4, 4, 0), reader.granted)
     }
 
     @Test
@@ -114,7 +151,7 @@ class FileDownloadTest {
         val message = (result as DownloadResult.Refused).message
         assertTrue(message, message.contains("100 B"))
         assertTrue(message, message.contains("download limit"))
-        assertEquals(emptyList<Pair<Long, Int>>(), reader.windows)
+        assertEquals(emptyList<Pair<Long, Int>>(), reader.requests)
     }
 
     /** The unknown-size overflow: refused, with nothing handed back to be saved. */
@@ -123,7 +160,9 @@ class FileDownloadTest {
         val (result, reader) = read(bytes(12), size = null, window = 4, ceiling = 8)
 
         assertTrue(result is DownloadResult.Refused)
-        assertEquals(listOf(0L to 4, 4L to 4, 8L to 1), reader.windows)
+        assertEquals(listOf(0L to 4, 4L to 4, 8L to 1), reader.requests)
+        // The probe is granted one byte, which is what proves there is more to come.
+        assertEquals(listOf(4, 4, 1), reader.granted)
     }
 
     /**
@@ -136,7 +175,9 @@ class FileDownloadTest {
         val (result, reader) = read(bytes(4), size = 10, window = 4)
 
         assertEquals(4, ready(result).size)
-        assertEquals(listOf(0L to 4, 4L to 4), reader.windows)
+        assertEquals(listOf(0L to 4, 4L to 4), reader.requests)
+        // The second request is granted nothing: the file is shorter than it said.
+        assertEquals(listOf(4, 0), reader.granted)
     }
 
     @Test
