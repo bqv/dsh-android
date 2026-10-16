@@ -258,6 +258,47 @@ class WorkspaceGroupTest {
         )
     }
 
+    // ------------------------------------------------- no rows drawn vs a dimmed title
+
+    @Test
+    fun `no rows drawn and a dimmed title are independent facts, not one condition`() {
+        // The two are easy to conflate because one cause — a member the roster never
+        // delivered — can produce both, but they are separate derivations. A group can
+        // have no rows and still be a confirmed idle one, and a group can be drawing rows
+        // and still be unable to claim that nothing is running.
+        //
+        // No rows, every member known: the reader's Archived switch hid the group's only
+        // member. No rows are drawn, and yet "nothing is running in here" is a fact, so the
+        // header title keeps its ordinary colour — it is not dimmed.
+        val allHidden = workspaceGroupState(
+            memberIds = listOf("archived"),
+            visibleIds = emptyList(),
+            knownIds = setOf("archived"),
+        )
+        assertEquals(WorkspaceGroupState.Filtered, allHidden)
+        assertEquals(
+            "no rows drawn, and still a confirmed idle group",
+            WorkspaceRunState.Idle,
+            workspaceRunState(listOf("archived"), emptySet(), setOf("archived")),
+        )
+
+        // A row on screen *and* a member the roster never delivered: rows are drawn, and the
+        // header is still dimmed, because the missing member leaves "nothing is running"
+        // unconfirmed. On screen this is a blue folder (the open session is a member) under a
+        // dimmed title.
+        val partlyDelivered = workspaceGroupState(
+            memberIds = listOf("here", "missing"),
+            visibleIds = listOf("here"),
+            knownIds = setOf("here"),
+        )
+        assertEquals(WorkspaceGroupState.Members, partlyDelivered)
+        assertEquals(
+            "rows drawn, and still not a confirmed idle group",
+            WorkspaceRunState.Unknown,
+            workspaceRunState(listOf("here", "missing"), emptySet(), setOf("here")),
+        )
+    }
+
     @Test
     fun `the header speaks its run state, and idle says nothing`() {
         // The blue is invisible to a screen reader, so the same fact is spoken. Idle has no
