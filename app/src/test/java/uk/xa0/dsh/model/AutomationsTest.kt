@@ -1,63 +1,101 @@
 package uk.xa0.dsh.model
 
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The automation split, and the property that matters most about it: **with no runs,
- * nothing changes**.
+ * The host's scheduled-task catalog, and the two things this client reads off it.
  *
- * The drawer lifts these sessions into a section of their own, and the requirement is
- * that a host with no automations renders exactly as it did before the feature existed
- * — no empty header, no disabled row, no hint that the app knows the word. That is a
- * property of the split (an empty set partitions to identity) plus the section being
- * built only when there is something to put in it, and the first half is testable here.
+ * The plugin change this file guards against is not a rename: the old rule recognised a
+ * run by an id prefix (`dsh-automation-session-…`) that no longer exists, and the
+ * replacement signal is a *field* — each task in `schedule/catalog` names the session it
+ * delivers into. These pin that the mark comes from the field and not from the id, that
+ * an ended task stops marking, and that a malformed row is skipped rather than repaired.
  */
 class AutomationsTest {
 
-    private fun id(name: String) = name
+    /** One catalog row, in the host's own shape (the fields this client reads plus noise). */
+    private fun row(id: String, sessionId: String, status: String) = """
+        {"id":"$id","kind":"daily","title":"t","prompt":"p","time":"09:00:00.000",
+         "timeZone":"Europe/Helsinki","scheduledAt":"2026-10-17T06:00:00.000Z",
+         "sessionId":"$sessionId","status":"$status"}
+    """.trimIndent()
+
+    private fun catalog(vararg rows: String) = JSONArray("[${rows.joinToString(",")}]")
 
     @Test
-    fun `no automation sessions means no change at all`() {
-        val roster = listOf("session-a", "session-b", "session-c")
-        val (runs, rest) = partitionAutomations(roster, ::id)
-        assertEquals("nothing is lifted out", emptyList<String>(), runs)
-        assertEquals("and the order is untouched", roster, rest)
-    }
-
-    @Test
-    fun `runs are lifted out, and both sides keep their order`() {
-        val roster = listOf(
-            "session-a",
-            "$AUTOMATION_SESSION_PREFIX-1",
-            "session-b",
-            "$AUTOMATION_SESSION_PREFIX-2",
+    fun `a plain session id is the signal, not any prefix`() {
+        val tasks = automationTasksFrom(
+            catalog(row("schedule-1", "session-523588f5", "active")),
         )
-        val (runs, rest) = partitionAutomations(roster, ::id)
-        assertEquals(listOf("$AUTOMATION_SESSION_PREFIX-1", "$AUTOMATION_SESSION_PREFIX-2"), runs)
-        assertEquals(listOf("session-a", "session-b"), rest)
-    }
-
-    /**
-     * A run's own subagent is not a run. Its id is a plain `session-…`, so the prefix
-     * test already says so — this pins it, because pulling a run's subagent into the
-     * section on its own would list the work twice, once without its parent.
-     */
-    @Test
-    fun `a subagent of a run is not itself a run`() {
-        assertFalse(isAutomationSessionId("session-1234-5678"))
-        assertFalse(isAutomationSessionId("session-deadbeef"))
+        assertEquals(1, tasks.size)
+        assertEquals("session-523588f5", tasks[0].sessionId)
+        assertTrue(tasks[0].active)
     }
 
     @Test
-    fun `only the prefix counts, and only at the start`() {
-        assertTrue(isAutomationSessionId("$AUTOMATION_SESSION_PREFIX-7eaa1963"))
-        // A name that merely contains it is not a run: this is a prefix test, not a
-        // search, and the host's ids are the thing being recognised.
-        assertFalse(isAutomationSessionId("session-x-$AUTOMATION_SESSION_PREFIX-1"))
-        assertFalse(isAutomationSessionId(""))
-        assertFalse(isAutomationSessionId("dsh-automation"))
+    fun `the retired dsh-automation prefix is just an ordinary session id`() {
+        // The id shape no longer means anything: what marks the session is the task's
+        // `sessionId` field. A task bound to a legacy-shaped id still counts, and a
+        // session with no task does not become special by looking like one.
+        val tasks = automationTasksFrom(
+            catalog(row("schedule-1", "dsh-automation-session-7eaa1963", "active")),
+        )
+        assertEquals("dsh-automation-session-7eaa1963", tasks[0].sessionId)
+        assertEquals(mapOf("dsh-automation-session-7eaa1963" to 1), activeTaskCounts(tasks))
+    }
+
+    @Test
+    fun `active only, and both statuses are read`() {
+        val tasks = automationTasksFrom(
+            catalog(
+                row("schedule-1", "session-a", "active"),
+                row("schedule-2", "session-a", "inactive"),
+                row("schedule-3", "session-b", "active"),
+            ),
+        )
+        assertEquals(3, tasks.size)
+        // An ended one-shot task must stop marking its session, which is what keeps the
+        // single reminder a reader set once from leaving a permanent clock on the row.
+        assertEquals(mapOf("session-a" to 1, "session-b" to 1), activeTaskCounts(tasks))
+    }
+
+    @Test
+    fun `several tasks in one session are counted, not collapsed`() {
+        val tasks = automationTasksFrom(
+            catalog(
+                row("schedule-1", "session-a", "active"),
+                row("schedule-2", "session-a", "active"),
+            ),
+        )
+        assertEquals(mapOf("session-a" to 2), activeTaskCounts(tasks))
+    }
+
+    @Test
+    fun `a row with no task id or no session is skipped, not repaired`() {
+        val tasks = automationTasksFrom(
+            catalog(
+                row("", "session-a", "active"),
+                row("schedule-2", "", "active"),
+                row("schedule-3", "session-b", "active"),
+            ),
+        )
+        assertEquals(1, tasks.size)
+        assertEquals("session-b", tasks[0].sessionId)
+    }
+
+    @Test
+    fun `no catalog at all marks nothing`() {
+        assertEquals(emptyList<AutomationTask>(), automationTasksFrom(null))
+        assertEquals(emptyMap<String, Int>(), activeTaskCounts(emptyList()))
+    }
+
+    @Test
+    fun `the mark is singular for one task and plural otherwise`() {
+        assertEquals("", scheduledTaskMarkLabel(0))
+        assertEquals("1 scheduled task", scheduledTaskMarkLabel(1))
+        assertEquals("2 scheduled tasks", scheduledTaskMarkLabel(2))
     }
 }

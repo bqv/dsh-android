@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import org.junit.Rule
 import org.junit.Test
@@ -42,6 +43,7 @@ class SessionsDrawerRunningTest {
         running: Boolean = false,
         parentSessionId: String? = null,
         subagent: Boolean = false,
+        tasks: Int = 0,
     ) = SessionItem(
         id = id,
         title = id,
@@ -49,6 +51,7 @@ class SessionsDrawerRunningTest {
         updatedAt = 1_000L,
         running = running,
         isSubagent = subagent,
+        scheduledTaskCount = tasks,
         parentSessionId = parentSessionId,
     )
 
@@ -196,5 +199,54 @@ class SessionsDrawerRunningTest {
         rule.onNode(hasState(WorkspaceCopy.RUNNING)).assertDoesNotExist()
         rule.onNode(hasState(WorkspaceCopy.RUNNING_UNKNOWN)).assertExists()
         rule.onNodeWithText(WorkspaceCopy.UNKNOWN).assertExists()
+    }
+
+    /**
+     * The clock mark, which `AutomationsTest` cannot see: the pure test pins the parse and
+     * the count, this pins that the drawer *draws* it on a row whose host task count is
+     * non-zero. The pixels are not measurable here, so the assertion is the mark's spoken
+     * label — the same fact a screen reader announces in place of the glyph.
+     */
+    @Test
+    fun `a session an active task delivers into wears the clock mark`() {
+        rule.setContent {
+            DshTheme {
+                drawer(listOf(session("s1", tasks = 1)), collapsed = emptySet())
+            }
+        }
+        rule.waitForIdle()
+
+        rule.onNodeWithContentDescription("1 scheduled task").assertExists()
+    }
+
+    @Test
+    fun `a session with no task wears no mark`() {
+        rule.setContent {
+            DshTheme {
+                drawer(listOf(session("s1")), collapsed = emptySet())
+            }
+        }
+        rule.waitForIdle()
+
+        rule.onNodeWithContentDescription("1 scheduled task").assertDoesNotExist()
+        rule.onNodeWithContentDescription("2 scheduled tasks").assertDoesNotExist()
+    }
+
+    /**
+     * The mark and the status dot share the row's one leading cell, and the web offers it
+     * to the mark only while the row's own primary state is idle. A live turn must keep
+     * the dot there; the count is not lost, it is simply not drawn until the row rests,
+     * which is also when a clock is worth reading.
+     */
+    @Test
+    fun `a running session keeps its status dot rather than the mark`() {
+        rule.setContent {
+            DshTheme {
+                drawer(listOf(session("s1", running = true, tasks = 1)), collapsed = emptySet())
+            }
+        }
+        rule.waitForIdle()
+
+        rule.onNodeWithContentDescription("1 scheduled task").assertDoesNotExist()
     }
 }
