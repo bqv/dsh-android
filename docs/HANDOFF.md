@@ -229,7 +229,9 @@ editing the live copy. There is no install step to forget.
     `write`/`edit` named it absolutely, and 378 because the file was produced by
     something that is not a mutation at all (a shell redirect, a subagent, or it
     already existed). Paths keep their exact spelling, so one file under two
-    spellings is two rows.
+    spellings is two rows. The panel no longer *needs* the row to open a focus:
+    `initialPath` is kept even when the derivation has none, and only a selection
+    the list itself once held is dropped when the list stops holding it.
 12. **Content search latches off per deployment.** A host with no content index
     ("session search is unavailable/disabled") fails every call the same way; the
     ViewModel latches that and stops sending the RPC. It is also not reachable
