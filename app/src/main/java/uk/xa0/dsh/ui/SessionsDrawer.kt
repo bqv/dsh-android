@@ -86,10 +86,10 @@ import uk.xa0.dsh.model.WorkspaceCopy
 import uk.xa0.dsh.model.WorkspaceGroupState
 import uk.xa0.dsh.model.WorkspaceListPhase
 import uk.xa0.dsh.model.WorkspaceRunState
-import uk.xa0.dsh.model.headerCount
 import uk.xa0.dsh.model.liveWorkIds
 import uk.xa0.dsh.model.placeholder
 import uk.xa0.dsh.model.ungroupedTitle
+import uk.xa0.dsh.model.workspaceCountLabel
 import uk.xa0.dsh.model.workspaceGroupState
 import uk.xa0.dsh.model.workspaceRunState
 import uk.xa0.dsh.diag.DiagLazyList
@@ -156,20 +156,28 @@ private data class Section(
      */
     val containsCurrent: Boolean = false,
     /**
-     * Whether this group holds live work, or whether that cannot be told yet.
+     * Whether this group holds live work.
      *
      * A second, independent fact from [containsCurrent], and deliberately drawn on a second
      * element: the folder glyph carries "the open session is in here" and the title carries
-     * "something here is running", so every one of the six combinations of the two is
-     * distinguishable on screen — two glyph states times the three [WorkspaceRunState]s,
-     * including the one that reads oddly at first glance: [WorkspaceRunState.Unknown] together
-     * with [containsCurrent], a dimmed title under a blue folder. See
-     * `model/WorkspaceGroups.kt` for the rule and for why an undelivered member makes
-     * "nothing is running" not a fact.
+     * "something here is running", so all four combinations of the two are distinguishable on
+     * screen — two glyph states times the two [WorkspaceRunState]s.
+     *
+     * There is no third, "we cannot tell" title colour. An accounted member the roster never
+     * delivered is *absent* for this question, and the incompleteness of the membership is
+     * said in the header's count instead ([countLabel]): a dimmed title was a colour whose
+     * legend was nowhere on screen, which is not a signal. See `model/WorkspaceGroups.kt`.
      *
      * Required rather than defaulted, so a group added later cannot quietly claim [WorkspaceRunState.Idle].
      */
     val run: WorkspaceRunState,
+    /**
+     * The header's count column, already decided: the sessions drawn under this header, or
+     * "[shown] of [accounted]" when the roster has not delivered every member the registry
+     * accounts. Null for the groups that are not a Workspace (the flat list and the catch-all),
+     * whose count is always the rows drawn. See `workspaceCountLabel`.
+     */
+    val countLabel: String? = null,
 )
 
 /** A session plus its nesting depth, so subagents indent under their parent. */
@@ -485,7 +493,7 @@ fun SessionsDrawer(
                     key = FLAT,
                     title = "Sessions",
                     rows = ordered.flatMap { disclose(it) },
-                    run = workspaceRunState(ordered.map { it.id }, live, known.keys),
+                    run = workspaceRunState(ordered.map { it.id }, live),
                 ),
             )
             return@remember sections
@@ -536,8 +544,14 @@ fun SessionsDrawer(
                 containsCurrent = currentId != null && currentId in workspace.sessionIds,
                 // Read from the members the *section* accounts for. Unfiltered on
                 // purpose: a running member the Archived switch has hidden still makes
-                // this directory a place where work is happening.
-                run = workspaceRunState(claimedIds, live, known.keys),
+                // this directory a place where work is happening. A member the roster never
+                // delivered is absent for this question — see `workspaceRunState`.
+                run = workspaceRunState(claimedIds, live),
+                // The one place incomplete membership is stated. Decided from the same
+                // unfiltered membership as the run state, and drawn whether the group is folded
+                // or open, so the reader never has to open a directory to learn that the client
+                // is not showing all of it.
+                countLabel = workspaceCountLabel(items.size, workspace.sessionIds, known.keys),
             )
         }
 
@@ -555,7 +569,7 @@ fun SessionsDrawer(
                 // files them under a bucket rather than a directory, and the glyph says
                 // so instead of showing a folder that names nothing.
                 icon = Icons.Rounded.Inbox,
-                run = workspaceRunState(rest.map { it.id }, live, known.keys),
+                run = workspaceRunState(rest.map { it.id }, live),
             )
         }
         result
@@ -871,11 +885,11 @@ fun SessionsDrawer(
                 // Top-level sessions only: a disclosed subagent belongs to its
                 // parent's row, it is not another session in the group.
                 val topLevel = section.rows.count { it.depth == 0 }
-                // A group is only allowed to print a count that is a fact: a Workspace
-                // whose members have not reached the roster does not know its own
-                // figure, and "0" beside "Sessions not loaded" would be that lie.
-                val state = section.state
-                val count = if (state == null) topLevel else state.headerCount(topLevel)
+                // A Workspace's label was decided beside the state it belongs to: the plain
+                // figure, or "[shown] of [accounted]" when the roster has not delivered every
+                // member the registry accounts. The buckets with no registry row behind them
+                // always draw the rows they hold. See `workspaceCountLabel`.
+                val count = section.countLabel ?: topLevel.toString()
 
                 // Sticky so the workspace a session belongs to stays named while
                 // you scroll its rows.
@@ -1088,16 +1102,16 @@ private fun LazyListScope.searchResults(
  *  * **The folder glyph** is [containsCurrent] — "the session you have open lives here" (the
  *    web's `folderActive`). Unchanged.
  *  * **The title** is [run] — "something in here is running". `Running` is the accent blue, so a
- *    folded folder with live work inside it cannot be missed; `Unknown` is the caption tint,
- *    because a blue the client cannot back would be a lie and an ordinary title would read as a
- *    confirmed nothing. `Idle` is the title's normal colour.
+ *    folded folder with live work inside it cannot be missed; [WorkspaceRunState.Idle] is the
+ *    title's ordinary colour. There is no third title colour: an accounted member the roster
+ *    never delivered is absent for this question, and the incompleteness of the membership is
+ *    carried by the count beside the title ([count]), in words that can be counted.
  *
- * Every combination of the two therefore draws differently: an ordinary title (idle), a blue title
- * (running) or a dimmed caption title (unknown), each under either a tertiary folder (the open
- * session is elsewhere) or an accent folder (the open session is here). The blue is one token used
- * on one element per meaning, and the caption grey is the *only* title colour that is neither the
- * ordinary one nor blue: a subdued title here means "membership incomplete", never "empty" and
- * never "nothing is running".
+ * Every combination of the two therefore draws differently: an ordinary title (idle) or a blue
+ * title (running), each under either a tertiary folder (the open session is elsewhere) or an
+ * accent folder (the open session is here). The blue is one token used on one element per
+ * meaning, and it now has exactly one legend — "blue means something here is running" — which is
+ * a sentence about something the reader can see.
  *
  * The title is tinted whether the group is folded or open, not only when collapsed. Folded is
  * the case that prompted this, but an open group is capped at six rows until "Show N more", and
@@ -1105,21 +1119,20 @@ private fun LazyListScope.searchResults(
  * the fold of an expanded group too — and the header is sticky, so the tint is the one part of
  * the group that stays on screen while its rows are scrolled through.
  *
- * [run] is also *spoken* (`stateDescription`), because the blue is invisible to a screen
- * reader: "Running", or "Running: unknown" when membership has not arrived.
+ * [run] is also *spoken* (`stateDescription`) when it is `Running`, because the blue is invisible
+ * to a screen reader. Idle stays silent, as an idle session row draws no "not running" either.
  */
 @Composable
 private fun ProjectRow(
     title: String,
     /**
-     * How many top-level sessions the group holds, or null when that is not yet a fact
-     * — a Workspace whose members the roster has not delivered. A null draws the word the
-     * widget uses for a reading it could not confirm ([WorkspaceCopy.UNKNOWN]) where the number
-     * would be, rather than nothing and rather than a zero the group cannot support: the note
-     * that says the same thing in words only draws when the group is open, and a folded
-     * Workspace whose members are missing must not look like one that has none.
+     * The count column, already decided: the sessions drawn under this header, or
+     * "[shown] of [accounted]" when the roster has not delivered every member the registry
+     * accounts. Never blank, which is the whole point: a folded group shows this without its
+     * own "Sessions not loaded" note, and a bare figure or a word like `unknown` would leave
+     * the reader to guess what it left out. See `workspaceCountLabel`.
      */
-    count: Int?,
+    count: String,
     collapsed: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1153,7 +1166,6 @@ private fun ProjectRow(
             .semantics {
                 when (run) {
                     WorkspaceRunState.Running -> stateDescription = WorkspaceCopy.RUNNING
-                    WorkspaceRunState.Unknown -> stateDescription = WorkspaceCopy.RUNNING_UNKNOWN
                     WorkspaceRunState.Idle -> Unit
                 }
             },
@@ -1174,17 +1186,13 @@ private fun ProjectRow(
         Text(
             text = title,
             style = DshType.bodyMedium.copy(fontWeight = FontWeight.Medium),
-            color = when (run) {
-                WorkspaceRunState.Running -> colors.accent
-                WorkspaceRunState.Unknown -> colors.labelCaption
-                WorkspaceRunState.Idle -> colors.labelSecondary
-            },
+            color = if (run == WorkspaceRunState.Running) colors.accent else colors.labelSecondary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
         Text(
-            text = count?.toString() ?: WorkspaceCopy.UNKNOWN,
+            text = count,
             style = DshType.micro,
             color = colors.labelCaption,
         )

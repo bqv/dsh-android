@@ -42,11 +42,11 @@ import uk.xa0.dsh.SessionItem
  *    under this header: the Archived switch is off, or they are subagent sessions (never
  *    top-level rows).
  *
- * They therefore draw different words — see [placeholder] — and they differ in the header's
- * count as well: a group whose membership has not arrived prints no figure at all
- * ([headerCount]). That is this app's standing convention for "nothing" versus "not told"
- * (`WidgetCopy.NEEDS_NOTHING` / `NEEDS_UNKNOWN`, and the Router tab's "not asked" rule): a
- * group number that is not yet a fact is not drawn.
+ * They therefore draw different words — see [placeholder] — and their header figures differ
+ * as well: a group whose membership has not arrived draws "[shown] of [accounted]" rather
+ * than a bare number ([workspaceCountLabel]), so the members the roster has not delivered
+ * are a figure the reader can see and count, not an absence to be inferred from a blank or
+ * from a quieter colour.
  *
  * **Every one of the three draws a header**, and that is a deliberate divergence from the
  * web: its `deriveGroups` drops a group with no visible members
@@ -164,54 +164,74 @@ val WorkspaceGroupState.placeholder: String?
     }
 
 /**
- * The header's count when that number is a fact, or null when the header must not print
- * one.
+ * The figure a Workspace header draws where its count goes.
  *
- * A group whose members have not arrived cannot say "0": the count column would then be
- * making the claim the placeholder beside it is refusing to make.
+ * Normally this is the number of sessions drawn under the header. When the roster has not
+ * delivered every session the registry accounts to this Workspace — and some of them are
+ * therefore not drawn — it is instead "[shown] of [accounted]": the same number, plus the
+ * figure the registry holds, so the gap is *stated* in the column where a number belongs. It
+ * used to be the word [WorkspaceCopy.UNKNOWN], and before that the dimmed title said it in
+ * colour: an absence the reader could not count, in the one place a count is read. "3 of 13"
+ * needs no legend.
+ *
+ * Both halves must hold for the "of" form. A Workspace whose every member is delivered and
+ * drawn prints the plain number, even if a filter — the Archived switch — is what removed
+ * rows, because that is a fact about this drawer rather than about the registry, and the
+ * group's own placeholder says so when it is open. A Workspace whose members are all drawn
+ * but whose roster has not *confirmed* them prints the plain number too: the reader can see
+ * every accounted session, so there is no gap on screen to report.
+ *
+ * @param shown the top-level rows the drawer would draw under this header.
+ * @param memberIds the Workspace's accounted membership, as the host last reported it.
+ *   Deliberately the *unfiltered* set, matching [workspaceGroupState].
+ * @param knownIds every session id the roster has delivered, filters ignored.
  */
-fun WorkspaceGroupState.headerCount(visibleRows: Int): Int? =
-    if (this == WorkspaceGroupState.Loading) null else visibleRows
+fun workspaceCountLabel(
+    shown: Int,
+    memberIds: Collection<String>,
+    knownIds: Set<String>,
+): String {
+    val accounted = memberIds.size
+    val missing = memberIds.count { it !in knownIds }
+    return if (missing > 0 && shown < accounted) "$shown of $accounted" else shown.toString()
+}
 
 /**
- * Whether anything in a group is running, and — the half that is easy to get wrong — whether
- * this client is entitled to say that nothing is.
+ * Whether anything in a group is running.
  *
  * This is the fact the group header's blue means, and it is deliberately *not*
  * `containsCurrent`: that one means "the session you have open lives here", which is a fact
  * about the reader's own position in the list. A Workspace can hold the open session and no
  * work, or work and not the open session, or both, or neither, and the four draw differently.
  *
- * The three states are mutually exclusive and are read off one field, `SessionItem.running`
- * — `RunningBook`'s answer and nothing else (see `model/LiveRunning.kt`). The journal
- * projection `subagentTiming.active` is *not* read as liveness anywhere here: a killed turn
- * leaves it set forever, and a header that stayed blue over a dead child would be worse than
- * no signal at all.
+ * The two states are read off one field, `SessionItem.running` — `RunningBook`'s answer and
+ * nothing else (see `model/LiveRunning.kt`). The journal projection `subagentTiming.active`
+ * is *not* read as liveness anywhere here: a killed turn leaves it set forever, and a header
+ * that stayed blue over a dead child would be worse than no signal at all.
+ *
+ * **There is no third state.** A member the roster never delivered is treated as absent for
+ * this question: the client cannot observe its work, so it must not make the reader's glance
+ * at the header into a question. The blue answers what is happening *here*; the fact that the
+ * membership is incomplete is a different fact and is said in words — the header's count,
+ * [workspaceCountLabel] — never in hue. A colour whose legend is not on screen is not a
+ * signal, and the reader who asked "why is this grey" had nothing to read.
  */
 enum class WorkspaceRunState {
     /** At least one accounted member is live work. A positive fact; sends the header blue. */
     Running,
 
-    /** Every accounted member has been delivered, and none of them is live work. The resting state. */
+    /** Nothing this client can see is running. The resting state, with the ordinary title colour. */
     Idle,
-
-    /**
-     * The registry names a member the roster has not delivered, and nothing known is running.
-     *
-     * "Nothing is running in here" is therefore **not a fact**, and the header must not be left
-     * looking like the [Idle] one: the app's standing rule is that a reading it cannot confirm is
-     * neither claimed nor drawn as a confirmed nothing (the widget's `(known, value, asOf)` and
-     * its `Running: unknown`; the Router tab's "not asked"). So this state is untinted *and*
-     * spoken — see [WorkspaceCopy.RUNNING_UNKNOWN].
-     */
-    Unknown,
 }
 
 /**
- * Decide one group's run state from the three things that are actually known about it.
+ * Decide one group's run state from the two things that are actually known about it.
  *
- * A running member outranks an undelivered one, because "something is running" stays true
- * however many members have not arrived — only the *negative* needs the whole membership.
+ * A member the roster never delivered is treated as absent here, deliberately. The negative
+ * — "nothing here is running" — is a fact about the work the client can see; withholding the
+ * colour because a *different* fact is unknown would put an unreadable legend in the one
+ * channel the reader reads at a glance. That other fact, incomplete membership, is stated
+ * plainly in the header's count instead ([workspaceCountLabel]); see [WorkspaceRunState].
  *
  * @param memberIds the ids the group accounts for, as the host last reported them. Deliberately
  *   the *unfiltered* set, for the same reason [workspaceGroupState] takes it: a member the
@@ -220,17 +240,12 @@ enum class WorkspaceRunState {
  *   blue because a filter hid its row.
  * @param liveIds every id the roster reports as live work — its own running turn, or a running
  *   descendant; see [liveWorkIds].
- * @param knownIds every session id the roster has delivered, filters ignored.
  */
 fun workspaceRunState(
     memberIds: Collection<String>,
     liveIds: Set<String>,
-    knownIds: Set<String>,
-): WorkspaceRunState {
-    if (memberIds.any { it in liveIds }) return WorkspaceRunState.Running
-    if (memberIds.any { it !in knownIds }) return WorkspaceRunState.Unknown
-    return WorkspaceRunState.Idle
-}
+): WorkspaceRunState =
+    if (memberIds.any { it in liveIds }) WorkspaceRunState.Running else WorkspaceRunState.Idle
 
 /**
  * Every id the roster reports as live work, for [workspaceRunState].
@@ -286,7 +301,8 @@ object WorkspaceCopy {
      * doing. "Loading…" would be the wrong sentence twice over — it promises an arrival
      * that a roster which omitted the member may never make, and it describes the app's
      * own activity where the reader needs the state of the fact (`WidgetCopy.STAMP_OLDEST`
-     * carries the same lesson). The word matches the widget's "Running: unknown".
+     * carries the same lesson). The header's count beside it says the same thing as a figure
+     * ([workspaceCountLabel]), so the note and the number agree.
      */
     const val SESSIONS_NOT_LOADED = "Sessions not loaded"
 
@@ -304,14 +320,14 @@ object WorkspaceCopy {
     const val SESSIONS_HIDDEN = "Sessions hidden by filters"
 
     /**
-     * The figure drawn where a group's count would go, when the number is not known: the whole
-     * registry before any baseline has arrived, and a Workspace whose members the roster has not
-     * delivered. The same word the widget uses for a reading it could not confirm.
+     * The word drawn where the whole registry's figure would go, before any baseline has
+     * arrived: the pending "Workspaces" row's count. The registry is unknown rather than empty,
+     * so there is no number to print, and the same word the widget uses for a reading it could
+     * not confirm is the honest one.
      *
-     * It is drawn rather than left blank for the second case because a Workspace's own
-     * "Sessions not loaded" note sits under the header, so a *folded* group would otherwise show
-     * nothing at all where the missing members are — which is the one thing the pending-registry
-     * row above the groups already refuses to do.
+     * This is the only caller left. A Workspace whose members the roster has not delivered no
+     * longer draws it: that header prints "[shown] of [accounted]" instead, which says the
+     * same thing and, unlike "unknown", can be read down to a figure ([workspaceCountLabel]).
      */
     const val UNKNOWN = "unknown"
 
@@ -326,14 +342,6 @@ object WorkspaceCopy {
      * authority.
      */
     const val RUNNING = "Running"
-
-    /**
-     * What a group header says when membership has not arrived and nothing known is running.
-     *
-     * The blue is withheld — the client cannot confirm it — and this is what stops the absence
-     * of blue reading as a confirmed nothing. The widget's own sentence for the same situation.
-     */
-    const val RUNNING_UNKNOWN = "Running: unknown"
 
     /** What the catch-all is while the registry is unknown. */
     const val SESSIONS = "Sessions"

@@ -29,7 +29,10 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * The blue itself cannot be measured here — the JVM harness has no text metrics and no pixels
  * — so the assertion is the same fact spoken: the header's `stateDescription`, which is what a
  * screen reader announces in place of the colour. A header that stops speaking its run state
- * therefore fails even though a colour change alone would pass unnoticed.
+ * therefore fails even though a colour change alone would pass unnoticed. The other half of the
+ * rule is words rather than colour, so it *is* measurable here: a Workspace whose registry row
+ * names a member the roster never delivered draws "shown of accounted" in its count column, and
+ * does not dim its title or speak an "unknown" state at all.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = HarnessApplication::class)
@@ -145,9 +148,9 @@ class SessionsDrawerRunningTest {
     @Test
     fun `a folded Workspace with nothing running makes no running claim at all`() {
         // Not "not running": the header says nothing, exactly as a session row draws no dot for
-        // an idle turn. What matters is that it does not say "Running" and does not say
-        // "Running: unknown" either — an idle group is a confirmed nothing, and the two must
-        // stay apart.
+        // an idle turn. There is no "Running: unknown" left to say either: an idle group is a
+        // confirmed nothing for the work that is on screen, and the only other fact — the
+        // completeness of the roster — is said in the count, not in the spoken state.
         rule.setContent {
             DshTheme {
                 drawer(listOf(session("s1")), collapsed = setOf("ws1"))
@@ -156,17 +159,15 @@ class SessionsDrawerRunningTest {
         rule.waitForIdle()
 
         rule.onNode(hasState(WorkspaceCopy.RUNNING)).assertDoesNotExist()
-        rule.onNode(hasState(WorkspaceCopy.RUNNING_UNKNOWN)).assertDoesNotExist()
     }
 
     @Test
-    fun `a folded Workspace whose members never arrived is unknown, and never reads as idle`() {
+    fun `a folded Workspace whose members never arrived states the gap in its count`() {
         // The registry accounts a member the roster has not delivered, so "nothing is running
-        // in here" is not a fact. The header must not go blue (it cannot back it) and must not
-        // fall silent (that is the confirmed-nothing it is not): it says "Running: unknown", and
-        // the figure it cannot supply is drawn as the word rather than left blank — the
-        // "Sessions not loaded" note that would otherwise say so only draws when the group is
-        // open, and this group is folded.
+        // in here" is a statement about the work the client can see, and the header makes it
+        // without apology (no spoken "unknown", no dimmed-title rule to speak of). The fact the
+        // reader needs — that this directory is not showing everything — is the count: "0 of 1",
+        // which is visible folded, where the "Sessions not loaded" note under the header is not.
         rule.setContent {
             DshTheme {
                 SessionsDrawer(
@@ -197,8 +198,47 @@ class SessionsDrawerRunningTest {
         rule.waitForIdle()
 
         rule.onNode(hasState(WorkspaceCopy.RUNNING)).assertDoesNotExist()
-        rule.onNode(hasState(WorkspaceCopy.RUNNING_UNKNOWN)).assertExists()
-        rule.onNodeWithText(WorkspaceCopy.UNKNOWN).assertExists()
+        rule.onNodeWithText("0 of 1").assertExists()
+        rule.onNodeWithText(WorkspaceCopy.UNKNOWN).assertDoesNotExist()
+    }
+
+    @Test
+    fun `a Workspace with a missing member still reads running when a delivered one works`() {
+        // The positive fact does not depend on the whole membership, and the gap does not
+        // suppress it: the header goes blue and speaks "Running" while the count states
+        // "1 of 2". This is the split the rule exists for — colour for what is running here,
+        // words for what the roster left out.
+        rule.setContent {
+            DshTheme {
+                SessionsDrawer(
+                    sessions = listOf(session("s1", running = true)),
+                    workspaces = listOf(workspace("s1", "gone")),
+                    workspacesPhase = WorkspaceListPhase.Ready,
+                    archivedSessionIds = emptySet(),
+                    completedSessionIds = emptySet(),
+                    currentId = null,
+                    drawerOpen = true,
+                    loading = false,
+                    onSelect = {},
+                    onNew = {},
+                    onRefresh = {},
+                    onSettings = {},
+                    onAbout = {},
+                    groupByWorkspace = true,
+                    orderByUpdated = false,
+                    showArchived = false,
+                    collapsedSections = setOf("ws1"),
+                    onGroupByWorkspace = {},
+                    onOrderByUpdated = {},
+                    onShowArchived = {},
+                    onCollapsedSections = {},
+                )
+            }
+        }
+        rule.waitForIdle()
+
+        rule.onNode(hasState(WorkspaceCopy.RUNNING)).assertExists()
+        rule.onNodeWithText("1 of 2").assertExists()
     }
 
     /**

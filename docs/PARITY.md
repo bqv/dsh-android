@@ -60,18 +60,21 @@ of where the app stands against them.
       nothing on screen to say the directory (or the filter) existed. A drawn group with no
       rows says which absence it is: "No sessions" (the registry accounts none), "Sessions
       hidden by filters" (every member is known and the drawer's own view rules hide them),
-      or "Sessions not loaded" (the roster has not delivered them), the last of which prints
-      no count at all (`model/WorkspaceGroups.kt`, `WorkspaceGroupTest`). The header tap
+      or "Sessions not loaded" (the roster has not delivered them), the last of which also
+      states the gap in its header figure as "[shown] of [accounted]"
+      (`model/WorkspaceGroups.kt`, `WorkspaceGroupTest`). The header tap
       keeps its one meaning — fold/unfold — and never clears a filter
       (`ui/SessionsDrawer.kt`); see the rationale in `docs/research/sidebar-workspace-groups.md`
 - [x] **A group header holding live work reads blue**, and says `Running` to a screen reader. The
       blue is `WorkspaceRunState.Running` over the group's accounted members — `SessionItem.running`,
       plus a member with a running descendant, because a subagent is never a Workspace member — and
       never `containsCurrent`, which keeps the folder glyph's own "you are here" meaning on its own
-      element, so the four combinations of the two facts draw differently. A group holding a member
-      the roster has not delivered is **not** tinted and is not silently drawn as idle: its title
-      takes the caption tint rather than any blue, it says `Running: unknown`, and where it has no
-      figure at all its count column prints `unknown` rather than nothing (`model/WorkspaceGroups.kt`,
+      element, so the four combinations of the two facts draw differently. **That is the only
+      meaning the title colour carries**: an accounted member the roster never delivered is treated
+      as absent for the running question rather than as an `Unknown` that dims the title, because a
+      colour whose legend is not on screen is not a signal. The incompleteness of the membership is
+      said in words instead — the header's count prints "[shown] of [accounted]" — while the
+      whole-registry pending row keeps its `unknown` figure (`model/WorkspaceGroups.kt`,
       `ui/SessionsDrawer.kt`, `SessionsDrawerRunningTest`); see
       `docs/research/sidebar-workspace-groups.md`
 - [x] **Ungrouped** bucket for sessions outside every workspace

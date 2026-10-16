@@ -16,6 +16,11 @@ import uk.xa0.dsh.SessionItem
  * whose sessions this drawer's own view rules have all hidden. The drawer's own `remember`
  * block cannot be reached from the JVM harness, so the rules live in `WorkspaceGroups.kt`
  * and are pinned here.
+ *
+ * The run-state rules have a second job here too: a colour is only allowed to mean something
+ * a reader can see. `WorkspaceRunState` therefore has no "cannot tell" member — an undelivered
+ * member is absent for the running question — and the fact that membership is incomplete is
+ * pinned as *words* ([workspaceCountLabel]) rather than as a tint.
  */
 class WorkspaceGroupTest {
 
@@ -30,11 +35,15 @@ class WorkspaceGroupTest {
         )
         assertEquals(WorkspaceGroupState.Empty, state)
         assertEquals(WorkspaceCopy.NO_SESSIONS, state.placeholder)
-        assertEquals("zero visible sessions is a fact here", 0, state.headerCount(0))
+        assertEquals(
+            "zero visible sessions is a fact here, and the plain figure says it",
+            "0",
+            workspaceCountLabel(0, emptyList(), emptySet()),
+        )
     }
 
     @Test
-    fun `a Workspace whose members have not arrived is loading, and says so`() {
+    fun `a Workspace whose members have not arrived is loading, and says so in words`() {
         val state = workspaceGroupState(
             memberIds = listOf("a", "b"),
             visibleIds = emptyList(),
@@ -42,9 +51,10 @@ class WorkspaceGroupTest {
         )
         assertEquals(WorkspaceGroupState.Loading, state)
         assertEquals(WorkspaceCopy.SESSIONS_NOT_LOADED, state.placeholder)
-        assertNull(
-            "a group that does not know its membership must not print a count",
-            state.headerCount(0),
+        assertEquals(
+            "the count states what is shown of what the registry accounts, not a blank and not 'unknown'",
+            "0 of 2",
+            workspaceCountLabel(0, listOf("a", "b"), setOf("a")),
         )
     }
 
@@ -64,10 +74,11 @@ class WorkspaceGroupTest {
             3,
             words.toSet().size,
         )
-        assertNotEquals(empty.headerCount(0), loading.headerCount(0))
-        // Empty and Filtered both draw a zero, and that zero is true of both — what is
-        // drawn under the header is what tells them apart.
-        assertEquals(empty.headerCount(0), filtered.headerCount(0))
+        // Empty and Filtered print the plain figure, which is true of both — what is drawn
+        // under the header is what tells them apart. Loading prints the accounting instead.
+        assertEquals("0", workspaceCountLabel(0, emptyList(), emptySet()))
+        assertEquals("0", workspaceCountLabel(0, listOf("a"), setOf("a")))
+        assertEquals("0 of 1", workspaceCountLabel(0, listOf("a"), emptySet()))
     }
 
     @Test
@@ -96,9 +107,9 @@ class WorkspaceGroupTest {
         assertEquals(WorkspaceGroupState.Filtered, state)
         assertEquals(WorkspaceCopy.SESSIONS_HIDDEN, state.placeholder)
         assertEquals(
-            "nothing is drawn under the header, so its figure is a fact",
-            0,
-            state.headerCount(0),
+            "every member is delivered, so the hidden rows are the filter's doing and the figure stays plain",
+            "0",
+            workspaceCountLabel(0, listOf("archived", "subagent"), setOf("archived", "subagent")),
         )
     }
 
@@ -127,7 +138,11 @@ class WorkspaceGroupTest {
         )
         assertEquals(WorkspaceGroupState.Members, state)
         assertNull("a group with rows draws no placeholder", state.placeholder)
-        assertEquals("the count is the visible rows the web counts too", 1, state.headerCount(1))
+        assertEquals(
+            "the count is the visible rows, and it says so in the accounting because one member is missing",
+            "1 of 2",
+            workspaceCountLabel(1, listOf("a", "b"), setOf("a")),
+        )
     }
 
     @Test
@@ -140,7 +155,11 @@ class WorkspaceGroupTest {
             knownIds = emptySet(),
         )
         assertEquals(WorkspaceGroupState.Members, state)
-        assertEquals(2, state.headerCount(2))
+        assertEquals(
+            "every accounted member is on screen, so there is no gap to report",
+            "2",
+            workspaceCountLabel(2, listOf("a", "b"), emptySet()),
+        )
     }
 
     // --------------------------------------------------------------- the registry itself
@@ -158,8 +177,41 @@ class WorkspaceGroupTest {
     fun `the registry's own figure is unknown, not a count`() {
         // The placeholder row has no count to print: it stands where the group headers
         // will be, and "0 Workspaces" would be the one thing the pending phase denies.
+        // This is the word's only remaining caller; a Workspace's missing members now draw
+        // a countable "shown of accounted" figure instead.
         assertEquals("unknown", WorkspaceCopy.UNKNOWN)
         assertNotEquals(WorkspaceCopy.UNKNOWN, WorkspaceGroupState.Empty.placeholder)
+    }
+
+    // ------------------------------------------------------- the count states the gap
+
+    @Test
+    fun `a Workspace with missing members states shown of accounted, in words`() {
+        // The measured case on the user's phone: a Workspace whose registry row holds
+        // thirteen members, two of which the roster serves. The old header dimmed the title
+        // and showed "unknown"; the reader could see neither the number nor the reason.
+        assertEquals(
+            "2 of 13",
+            workspaceCountLabel(2, (1..13).map { "m$it" }, setOf("m1", "m2")),
+        )
+    }
+
+    @Test
+    fun `a Workspace with a complete roster keeps the plain figure`() {
+        val members = (1..13).map { "m$it" }
+        assertEquals("13", workspaceCountLabel(13, members, members.toSet()))
+        // All delivered but some hidden by the filter: still the plain figure, because the
+        // missing rows are this drawer's own rule and its placeholder names them.
+        assertEquals("3", workspaceCountLabel(3, members, members.toSet()))
+    }
+
+    @Test
+    fun `the accounting appears only when the roster gap leaves something undrawn`() {
+        // A member the roster never delivered makes the label an accounting; a member the
+        // roster holds but the drawer filters out does not, because the reader can reach it.
+        val members = listOf("shown", "missing", "archived")
+        assertEquals("1 of 3", workspaceCountLabel(1, members, setOf("shown", "archived")))
+        assertEquals("3", workspaceCountLabel(3, members, setOf("shown", "archived")))
     }
 
     // ------------------------------------------------------------------- live work in a group
@@ -169,7 +221,6 @@ class WorkspaceGroupTest {
         val state = workspaceRunState(
             memberIds = listOf("a", "b"),
             liveIds = setOf("a"),
-            knownIds = setOf("a", "b"),
         )
         assertEquals(WorkspaceRunState.Running, state)
     }
@@ -179,39 +230,37 @@ class WorkspaceGroupTest {
         val state = workspaceRunState(
             memberIds = listOf("a", "b"),
             liveIds = emptySet(),
-            knownIds = setOf("a", "b", "elsewhere"),
         )
         assertEquals(WorkspaceRunState.Idle, state)
     }
 
     @Test
-    fun `a group holding a member the roster never delivered is unknown, not idle`() {
-        // The one that matters: "nothing is running in here" is not a fact while a member is
-        // missing, so the header must not be drawn as the confirmed-nothing it is not. The
-        // drawer reads this state as the untinted title plus the spoken `RUNNING_UNKNOWN`.
+    fun `a member the roster never delivered is absent for the running question, not an unknown`() {
+        // The rule that keeps the colour explicable. The registry accounts "b" and the roster
+        // never serves it, so the client cannot observe whether b is working — and it must not
+        // turn the reader's glance at the header into a question about a fact the reader cannot
+        // see. "Nothing here is running" is a statement about the work that *is* here, and the
+        // incomplete membership is stated in the count instead. There is deliberately no
+        // `Unknown` run state left to reach.
         val state = workspaceRunState(
             memberIds = listOf("a", "b"),
             liveIds = emptySet(),
-            knownIds = setOf("a"),
         )
-        assertEquals(WorkspaceRunState.Unknown, state)
-        assertNotEquals(
-            "an undelivered member must not be drawn as a quieter idle",
-            WorkspaceRunState.Idle,
-            state,
+        assertEquals(WorkspaceRunState.Idle, state)
+        assertEquals(
+            "the only run states are running and not-running",
+            2,
+            WorkspaceRunState.values().size,
         )
-        assertNotEquals(WorkspaceRunState.Running, state)
     }
 
     @Test
-    fun `work already seen outranks the members that have not arrived`() {
-        // "Something is running" stays true however much of the membership is still in flight —
-        // only the negative needs the whole list. A header that went quiet while a pull lagged
-        // would hide the one live row it had just been told about.
+    fun `work already seen is running however many members have not arrived`() {
+        // A running member is a positive fact and does not depend on the rest of the
+        // membership: only the negative would, and the negative no longer consults it.
         val state = workspaceRunState(
             memberIds = listOf("a", "b"),
             liveIds = setOf("a"),
-            knownIds = setOf("a"),
         )
         assertEquals(WorkspaceRunState.Running, state)
     }
@@ -219,10 +268,10 @@ class WorkspaceGroupTest {
     @Test
     fun `a workspace the registry accounts no member is idle rather than unknown`() {
         // Nothing is missing, because nothing was named: an empty directory is a fact the
-        // registry supplied, and its header is not "Running: unknown".
+        // registry supplied, and its header makes no running claim.
         assertEquals(
             WorkspaceRunState.Idle,
-            workspaceRunState(memberIds = emptyList(), liveIds = emptySet(), knownIds = emptySet()),
+            workspaceRunState(memberIds = emptyList(), liveIds = emptySet()),
         )
     }
 
@@ -254,38 +303,33 @@ class WorkspaceGroupTest {
         )
         assertEquals(
             WorkspaceRunState.Running,
-            workspaceRunState(listOf("parent", "other"), live, sessions.map { it.id }.toSet()),
+            workspaceRunState(listOf("parent", "other"), live),
         )
     }
 
-    // ------------------------------------------------- no rows drawn vs a dimmed title
+    // ------------------------------------------- no rows drawn vs a running title
 
     @Test
-    fun `no rows drawn and a dimmed title are independent facts, not one condition`() {
-        // The two are easy to conflate because one cause — a member the roster never
-        // delivered — can produce both, but they are separate derivations. A group can
-        // have no rows and still be a confirmed idle one, and a group can be drawing rows
-        // and still be unable to claim that nothing is running.
-        //
-        // No rows, every member known: the reader's Archived switch hid the group's only
-        // member. No rows are drawn, and yet "nothing is running in here" is a fact, so the
-        // header title keeps its ordinary colour — it is not dimmed.
-        val allHidden = workspaceGroupState(
-            memberIds = listOf("archived"),
-            visibleIds = emptyList(),
-            knownIds = setOf("archived"),
-        )
-        assertEquals(WorkspaceGroupState.Filtered, allHidden)
+    fun `no rows drawn and a running title are independent facts, not one condition`() {
+        // The two derivations share an input — a member the roster never delivered can make
+        // both the group state Loading and the count an accounting — but neither implies the
+        // other, and neither is read off the other. A group can draw no rows and be running
+        // (a running member hidden by the Archived switch); a group can draw rows and not be
+        // running. The title is decided only by the second half.
+        val runningHidden = workspaceRunState(listOf("archived"), setOf("archived"))
+        assertEquals(WorkspaceRunState.Running, runningHidden)
         assertEquals(
-            "no rows drawn, and still a confirmed idle group",
-            WorkspaceRunState.Idle,
-            workspaceRunState(listOf("archived"), emptySet(), setOf("archived")),
+            WorkspaceGroupState.Filtered,
+            workspaceGroupState(listOf("archived"), emptyList(), setOf("archived")),
+        )
+        assertEquals(
+            "a hidden running member still makes the group running, and its count stays plain",
+            "0",
+            workspaceCountLabel(0, listOf("archived"), setOf("archived")),
         )
 
-        // A row on screen *and* a member the roster never delivered: rows are drawn, and the
-        // header is still dimmed, because the missing member leaves "nothing is running"
-        // unconfirmed. On screen this is a blue folder (the open session is a member) under a
-        // dimmed title.
+        // Rows on screen, a member the roster never delivered, nothing running: the group is
+        // not running, and the gap is in the count where it can be read.
         val partlyDelivered = workspaceGroupState(
             memberIds = listOf("here", "missing"),
             visibleIds = listOf("here"),
@@ -293,19 +337,22 @@ class WorkspaceGroupTest {
         )
         assertEquals(WorkspaceGroupState.Members, partlyDelivered)
         assertEquals(
-            "rows drawn, and still not a confirmed idle group",
-            WorkspaceRunState.Unknown,
-            workspaceRunState(listOf("here", "missing"), emptySet(), setOf("here")),
+            WorkspaceRunState.Idle,
+            workspaceRunState(listOf("here", "missing"), emptySet()),
+        )
+        assertEquals(
+            "1 of 2",
+            workspaceCountLabel(1, listOf("here", "missing"), setOf("here")),
         )
     }
 
+    // ------------------------------------------------- what the header speaks
+
     @Test
-    fun `the header speaks its run state, and idle says nothing`() {
+    fun `the header speaks running, and idle says nothing`() {
         // The blue is invisible to a screen reader, so the same fact is spoken. Idle has no
         // sentence on purpose: the drawer's rows draw no "not running" either, and a header that
-        // announced it would be making the claim the whole rule exists to refuse.
+        // announced it would be making a claim the reader cannot check.
         assertEquals("Running", WorkspaceCopy.RUNNING)
-        assertEquals("Running: unknown", WorkspaceCopy.RUNNING_UNKNOWN)
-        assertNotEquals(WorkspaceCopy.RUNNING, WorkspaceCopy.RUNNING_UNKNOWN)
     }
 }
