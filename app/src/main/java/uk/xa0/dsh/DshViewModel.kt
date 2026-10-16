@@ -60,6 +60,8 @@ import uk.xa0.dsh.model.activeTaskCounts
 import uk.xa0.dsh.model.AutomationCatalog
 import uk.xa0.dsh.model.readAutomationCatalog
 import uk.xa0.dsh.model.ScheduleSignalLatch
+import uk.xa0.dsh.model.MissingMembersLatch
+import uk.xa0.dsh.model.omittedMembersWarning
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.ExplorerState
 import uk.xa0.dsh.model.WorkspaceEntry
@@ -5516,16 +5518,38 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Keeps the omitted-workspace-member warning to one line per episode.
+     *
+     * The pull runs on every roster refresh — a resume, the Refresh control and the 500 ms
+     * debounce behind the streams — and the missing set on this host is stable, so the old
+     * line re-listed the same ids every few seconds. See [MissingMembersLatch] for the rule
+     * and [omittedMembersWarning] for the bounded line.
+     */
+    private val missingMembers = MissingMembersLatch()
+
+    /**
      * An accounted member missing from a whole-world list pull is the shape of the
      * sidebar's vanishing group: the drawer groups by Workspace membership, so a
      * member that never arrives leaves its group with nothing to draw. The pull is
      * the authority and normally has it, so this only ever fires on a real
      * divergence — where knowing which id vanished is the whole diagnosis.
+     *
+     * The line is bounded and not repeated. Listed in full it was ~4 KB on the user's
+     * phone, once per pull, and drowned the log the app depends on; on this host the
+     * missing set is a stable block of retired automation ids the registry still names
+     * and the roster will never serve, so repeating it said nothing new. [MissingMembersLatch]
+     * writes the first pull of an episode, the [omittedMembersWarning] format prints the
+     * count and a few ids, and a pull that omits nothing clears the latch for a later
+     * recurrence.
      */
     private fun warnOnMissingMembers(list: List<SessionItem>) {
         val known = list.mapTo(HashSet()) { it.id }
-        val missing = _ui.value.workspaces.flatMap { it.sessionIds }.filterNot { it in known }
-        if (missing.isNotEmpty()) Log.w(SIDEBAR_TAG, "session/list omitted workspace member(s): $missing")
+        val missing = _ui.value.workspaces
+            .flatMap { it.sessionIds }
+            .filterNot { it in known }
+            .toSet()
+        val fresh = missingMembers.accept(missing) ?: return
+        Log.w(SIDEBAR_TAG, omittedMembersWarning(fresh))
     }
 
     /**
