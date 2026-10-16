@@ -160,9 +160,12 @@ private data class Section(
      *
      * A second, independent fact from [containsCurrent], and deliberately drawn on a second
      * element: the folder glyph carries "the open session is in here" and the title carries
-     * "something here is running", so all four combinations of the two are distinguishable on
-     * screen. See `model/WorkspaceGroups.kt` for the rule and for why an undelivered member
-     * makes "nothing is running" not a fact.
+     * "something here is running", so every one of the six combinations of the two is
+     * distinguishable on screen — two glyph states times the three [WorkspaceRunState]s,
+     * including the one that reads oddly at first glance: [WorkspaceRunState.Unknown] together
+     * with [containsCurrent], a dimmed title under a blue folder. See
+     * `model/WorkspaceGroups.kt` for the rule and for why an undelivered member makes
+     * "nothing is running" not a fact.
      *
      * Required rather than defaulted, so a group added later cannot quietly claim [WorkspaceRunState.Idle].
      */
@@ -1089,9 +1092,12 @@ private fun LazyListScope.searchResults(
  *    because a blue the client cannot back would be a lie and an ordinary title would read as a
  *    confirmed nothing. `Idle` is the title's normal colour.
  *
- * All four combinations of the two therefore draw differently: neither (grey folder, ordinary
- * title), current only (blue folder, ordinary title), running only (grey folder, blue title),
- * both (blue folder, blue title). The blue is one token used on one element per meaning.
+ * Every combination of the two therefore draws differently: an ordinary title (idle), a blue title
+ * (running) or a dimmed caption title (unknown), each under either a tertiary folder (the open
+ * session is elsewhere) or an accent folder (the open session is here). The blue is one token used
+ * on one element per meaning, and the caption grey is the *only* title colour that is neither the
+ * ordinary one nor blue: a subdued title here means "membership incomplete", never "empty" and
+ * never "nothing is running".
  *
  * The title is tinted whether the group is folded or open, not only when collapsed. Folded is
  * the case that prompted this, but an open group is capped at six rows until "Show N more", and
