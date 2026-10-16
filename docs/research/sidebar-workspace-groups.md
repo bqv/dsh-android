@@ -276,9 +276,11 @@ registry reports gets a section.
   Only `Loading` withholds its count — the count column must not make the claim the
   placeholder beside it refuses to make.
 * The copy does not say "your filters". The Archived switch is the reader's, but the other
-  two rules that can empty a group are the drawer's own — a subagent is reached through its
-  parent rather than as a top-level row, and an automation run is listed under Automations.
-  "hidden by filters" is true of all three; "your" would be a false claim in two of them.
+  rule that can empty a group is the drawer's own — a subagent is reached through its
+  parent rather than as a top-level row. "hidden by filters" is true of both; "your" would
+  be a false claim in one of them. (Sessions a schedule delivers into used to be a third
+  such rule, when they were lifted into an "Automations" section; they are no longer lifted,
+  so the rule is gone — see `docs/PARITY.md`.)
 * A tap does what a header tap does everywhere else — fold/unfold — and no more. Revealing
   the hidden members would mean clearing the global Archived filter, which on this client's
   own live registry (12 workspaces, 889 archived ids) would pour hundreds of rows into the
@@ -297,15 +299,24 @@ The divergence is recorded in `docs/PARITY.md`, both in the sidebar feature list
 another and pins that a `Filtered` group now draws with a 0 that is a fact.
 
 Read from the live registry rather than taken from the report: `~/.dsh/storages/workspace.json`
-— the durable store the running host projects, 12 workspaces, the same count as the
-`DshSidebar` logcat line in the section above — has `ref` with **20 members: 10 of them in
+— the durable store the running host projects — had `ref` with **20 members: 10 of them in
 `archivedSessionIds`, and the other 10 all beginning `dsh-automation-session-`**, which
-`partitionAutomations` lifts into the Automations section
-(`model/Automations.kt: AUTOMATION_SESSION_PREFIX`). So `ref` is `Filtered` on *both*
-non-reader causes at once: the archived half is hidden by the switch, the run half is listed
-somewhere else in the same list. The note therefore could not say "your filters" without
-being false about half of `ref` — and the reader's own account ("only has archived sessions")
-was itself half the story.
+`partitionAutomations` lifted into the Automations section
+(`model/Automations.kt: AUTOMATION_SESSION_PREFIX`). So `ref` was `Filtered` on *both*
+non-reader causes at once: the archived half was hidden by the switch, the run half was
+listed somewhere else in the same list. The note therefore could not say "your filters"
+without being false about half of `ref` — and the reader's own account ("only has archived
+sessions") was itself half the story.
+
+**That has since changed twice.** The `@michengai/dsh-automation` plugin that minted those
+ids was dropped (incompatible with dsh 0.2.0-rc.2) in favour of the host's Schedule
+subsystem, which reuses ordinary sessions instead of starting one per run, so there is no
+longer an id shape to lift on; and the app's lift-out was removed with it, leaving the
+Archived switch as the only rule that can empty a group besides the subagent rule. The
+durable registry still names one `dsh-automation-session-` member in `ref` that the live
+`session/list` no longer serves (those transcripts were staged out of the store on
+2026-10-16), so `ref` now reads `Loading` on that single undelivered member — a host-side
+staging artefact, not a drawer rule.
 
 Unverified as of writing: nothing here was compiled or run — no build, no test and no device
 was touched for this change (the orchestrating session runs them). The rules stay in
@@ -365,10 +376,11 @@ own turn is running, or a member the rollup credits with a running descendant
 (`indexSubagentRollups(...).filterValues { it.running > 0 }.keys`). That is the same accent the
 row already draws as its descendant count and the header chip draws as `+N running`, so the
 header is that fact lifted one level — and still `SessionItem.running` underneath. Every group
-header is decided this way, not only Workspace ones: Ungrouped, the flat list and Automations
-fold the same way and hide rows the same way. The automation runs are subtracted from a
-Workspace's own member list, as the section's rows are, so a lifted run does not tint two
-headers at once.
+header is decided this way, not only Workspace ones: Ungrouped and the flat list fold the same
+way and hide rows the same way. (This paragraph used to add that an "Automations" section did
+too and that its runs were subtracted from a Workspace's member list; that section is gone —
+a session a schedule delivers into is a Workspace member like any other, marked rather than
+lifted.)
 
 **Tests.** `WorkspaceGroupTest` pins the decider and the three-way distinction (a running member
 beating an undelivered one, an empty Workspace being idle rather than unknown, a running

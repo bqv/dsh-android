@@ -282,6 +282,10 @@ system.
 - `~/.dsh/profiles/web/package.json` bundles: `@deepseek-ai/dsh-base`, `@deepseek-ai/dsh-web-app`,
   `dsh-shared-terminal`, `dsh-session-surgeon`, `deepseek-harness-auth`,
   `dsh-local-llm-controller`, `@michengai/dsh-automation`. **No mobile/remote bundle.**
+  **(Updated 2026-10-16:** the list has moved on — `dsh-shared-terminal` and
+  `dsh-session-surgeon` are no longer bundled, `@michengai/dsh-automation` was dropped as
+  incompatible with dsh 0.2.0-rc.2, and `@deepseek-ai/dsh-experimental-schedule-bundle`
+  (the host's own Schedule subsystem) took its place. The mobile conclusion is unchanged.)
 - `~/.dsh/profiles/web/node_modules/.modules.yaml` and `pnpm-workspace.yaml` still list
   `allowBuilds` for `@xiaosenho/dsh-plugin-remote-access`, `dsh-mobile-gateway` (GitHub
   `agent-mobile`), `dsh-speech` — stale entries.

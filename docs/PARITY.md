@@ -367,19 +367,36 @@ of where the app stands against them.
       handled — it is a message, not an attachment, and the composer is where it belongs
       if it is ever wanted.
 
-- [+] **Automation runs get their own drawer section** (the web shows them apart from
-      conversations). A session a scheduled automation started carries no marker in the
-      roster — measured on the host: `origin` is null or `subagent`, `sessionListMetadata`
-      has no automation field, and the runs *are* Workspace members, so they pad out a
-      Workspace's list exactly like a chat someone started. The authoritative mapping
-      (`dsh_automation.json`'s `runs` table, with `sessionId` and `automationName`) is
-      host-side and has no RPC — `automations`, `automation`, `runs` and `units`
-      endpoints all answer "not found" — so the id prefix the runner puts on the session
-      is the one signal a client can see, and the rule lives in
-      `model/Automations.kt` rather than being spelled out per call site.
-      **With no automation sessions the drawer renders exactly as it did before** — the
-      section is built only when there is something to put in it, and the split reduces
-      to identity (pinned by a test).
+- [x] **A session a schedule delivers into wears a clock mark, in place** (the web's
+      `SessionScheduleMark`). The third-party `@michengai/dsh-automation` plugin that used
+      to mint one throwaway `dsh-automation-session-…` session per run is incompatible with
+      the host this app talks to and is no longer in the profile (`~/.dsh/logs/dsh.err`:
+      "skipping profile bundle \"@michengai/dsh-automation\" … incompatible with dsh
+      0.2.0-rc.2"); the host's own Schedule subsystem replaced it
+      (`@deepseek-ai/dsh-experimental-schedule-bundle`, pulling `dsh-schedule`,
+      `dsh-client-ui-schedule` and `dsh-time-context`, all 0.2.0-rc.2). A task is now
+      stored against the **original session** it was created in and each due occurrence is
+      delivered into that same session, so a run is not a session at all: the session is
+      reused, its id is an ordinary `session-…`, and the old prefix predicate matched
+      nothing (measured on the host: 485 sessions in `session/list`, not one beginning
+      `dsh-automation`). The signal is the host's `schedule/catalog` remote — an
+      argument-less read returning every task with its `sessionId` and `status`, and the
+      only session-level signal the web uses too (`selectSessionScheduleFacts` filters it
+      by `record.sessionId === sessionId && record.status === "active"`). The app reads it
+      once per roster pull (`DshViewModel.refreshScheduleCounts`, through `rpcRaw` because
+      the answer is a bare array) and folds it into `SessionItem.scheduledTaskCount`; the
+      drawer draws a clock in the row's leading 16dp cell, offered to it only while the
+      row's own status dot is absent, exactly as the web's mark is. `model/Automations.kt`
+      owns the parse, the per-session count and the mark's spoken label.
+      **The row keeps its Workspace and its place.** The app used to lift these sessions
+      into a synthetic "Automations" section, which was right when each was a throwaway run
+      and wrong now that each is the reader's own session; the lift-out, the section and
+      the synthetic `__automations__` key are gone. A host without the bundle answers the
+      call with an error, no row is marked, and the drawer renders exactly as it did before
+      the feature existed (pinned by `AutomationsTest`). The **landing** rule
+      (`model/LandingSession.kt`) is the same preference re-keyed from the dead id prefix
+      to the catalog: a session with an active task is passed over while a conversation
+      exists, and is still what opens when nothing else has content.
 
 - [+] **Balance & top up** (app addition, not in the web client). The token panel's
       cost row leads to the account balance, read with the user's own DeepSeek key
