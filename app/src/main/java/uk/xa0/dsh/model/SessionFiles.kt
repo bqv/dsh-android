@@ -20,15 +20,35 @@ import org.json.JSONObject
  *    ports that rule field for field.
  *
  * Only successful calls count, on both surfaces: a failed write produced
- * nothing, and neither did a call still in flight. Reads are an app-side
- * addition for the Files panel; the web's produced-files rule has no read case
- * at all.
+ * nothing, and neither did a call still in flight. Two app-side additions feed
+ * the Files panel, and neither has a counterpart in the web's produced-files
+ * rule: a successful read is a touch (that rule has no read case at all), and so
+ * is a successful `present` declaration.
+ *
+ * The `present` case is load-bearing rather than cosmetic. A presented path is
+ * exactly the path the deliverable card hands to the panel, and that spelling is
+ * often the only one the transcript holds for the file: a `present` may name
+ * `out/report.md` relative to the session cwd while every write named the same
+ * file absolutely, or the file may have been produced by something that is not a
+ * mutation at all — a shell redirect, a subagent's own turn, or a file that
+ * already existed. Without the declaration folded in here, the card draws and the
+ * list has no row under the card's path, so the card's tap has nothing to select.
  *
  * Paths keep their exact spelling from the tool arguments (no normalization), so
  * two spellings of one file stay two rows — the web's produced paths are deduped
  * by exact string too.
  */
-enum class FileTouch { READ, WRITTEN, EDITED }
+enum class FileTouch {
+    READ,
+    WRITTEN,
+    EDITED,
+
+    /**
+     * Declared with `present` for the reader to open. Not a change to the file:
+     * [SessionFile.modified] stays false when a declaration is the only touch.
+     */
+    PRESENTED,
+}
 
 /** One path the session touched, in first-seen order. */
 data class SessionFile(
@@ -42,6 +62,8 @@ data class SessionFile(
     val reads: Int,
     val writes: Int,
     val edits: Int,
+    /** Times the session declared it with `present`; a declaration changes nothing. */
+    val presents: Int,
     /** Seq of the first tool call that touched it; the list's sort key. */
     val firstSeq: Int,
     /** Seq of the most recent tool call that touched it. */
@@ -106,22 +128,31 @@ object SessionFiles {
     /** Wire names whose successful result means the call *read* a path. */
     private val READ_TOOLS = setOf("read", "read_file", "read_image")
 
+    /** The one tool that declares files as deliverables; both folds read its name. */
+    private const val PRESENT_TOOL = "present"
+
     // ------------------------------------------------------------ files panel
 
     /**
      * Every path the transcript's successful tool calls touched, in first-seen
      * order. A path written twice is one row; the counts say what happened.
+     *
+     * A successful `present` contributes one row per path it declared, so a file
+     * the session only ever declared — produced by a shell command, by a
+     * subagent, or existing already — is a row the deliverable card's tap can
+     * land on.
      */
     fun derive(entries: List<ChatEntry>): List<SessionFile> {
         val order = ArrayList<String>()
         val files = HashMap<String, MutableFile>()
         for (entry in entries) {
-            val hit = touchOf(entry) ?: continue
-            val file = files.getOrPut(hit.path) {
-                order += hit.path
-                MutableFile()
+            for (hit in touchesOf(entry)) {
+                val file = files.getOrPut(hit.path) {
+                    order += hit.path
+                    MutableFile()
+                }
+                file.record(hit.touch, entry.seq)
             }
-            file.record(hit.touch, entry.seq)
         }
         return order.map { path -> files.getValue(path).freeze(path) }
     }
@@ -210,17 +241,11 @@ object SessionFiles {
         val byPath = LinkedHashMap<String, PresentedFile>()
         for (entry in entries) {
             val call = entry as? ChatEntry.ToolCall ?: continue
-            if (call.name.lowercase() != "present" || call.turn != turn) continue
+            if (call.name.lowercase() != PRESENT_TOOL || call.turn != turn) continue
             // The web hangs the declaration on a non-error result; a running call
             // has declared nothing yet.
             if (call.result == null || call.isError || call.seq >= throughSeq) continue
-            val files = jsonObject(call.arguments)?.optJSONArray("files") ?: continue
-            for (index in 0 until files.length()) {
-                val file = files.optJSONObject(index) ?: continue
-                val path = (file.opt("path") as? String)?.takeIf { it.isNotBlank() } ?: continue
-                val description = (file.opt("description") as? String)?.takeIf { it.isNotBlank() }
-                byPath[path] = PresentedFile(path, description, call.seq, index)
-            }
+            for (file in declaredFiles(call)) byPath[file.path] = file
         }
         return byPath.values.toList()
     }
@@ -359,10 +384,47 @@ object SessionFiles {
     private fun previewOf(call: ChatEntry.ToolCall): FilePreview.Ready? =
         parseReadMeta(call.meta) ?: call.result?.let { parseReadEnvelope(it, argPathOf(call)) }
 
-    /** What one successful call touched, or null when the call is not a file tool. */
-    private fun touchOf(entry: ChatEntry): TouchHit? {
-        val call = entry as? ChatEntry.ToolCall ?: return null
-        if (call.result == null || call.isError) return null
+    /**
+     * Everything one successful call touched: a read or a mutation is one hit, and
+     * a `present` is one hit per path it declared.
+     */
+    private fun touchesOf(entry: ChatEntry): List<TouchHit> {
+        val call = entry as? ChatEntry.ToolCall ?: return emptyList()
+        if (call.result == null || call.isError) return emptyList()
+        if (call.name.lowercase() == PRESENT_TOOL) return presentedTouches(call)
+        return listOfNotNull(singleTouch(call))
+    }
+
+    /**
+     * The paths one successful `present` declared, in the call's own order and
+     * deduped by exact spelling — the same declaration [presentedForTurn] reads
+     * for the card, so a card's path is always a row in [derive].
+     */
+    private fun presentedTouches(call: ChatEntry.ToolCall): List<TouchHit> {
+        val declared = LinkedHashSet<String>()
+        for (file in declaredFiles(call)) declared += file.path
+        return declared.map { TouchHit(it, FileTouch.PRESENTED) }
+    }
+
+    /**
+     * The files one `present` call's arguments declare, in the call's own index
+     * order and keeping a path declared twice. Both folds read this one parser,
+     * so the card's list and the Files list cannot drift apart on spelling.
+     */
+    private fun declaredFiles(call: ChatEntry.ToolCall): List<PresentedFile> {
+        val files = jsonObject(call.arguments)?.optJSONArray("files") ?: return emptyList()
+        val declared = ArrayList<PresentedFile>(files.length())
+        for (index in 0 until files.length()) {
+            val file = files.optJSONObject(index) ?: continue
+            val path = (file.opt("path") as? String)?.takeIf { it.isNotBlank() } ?: continue
+            val description = (file.opt("description") as? String)?.takeIf { it.isNotBlank() }
+            declared += PresentedFile(path, description, call.seq, index)
+        }
+        return declared
+    }
+
+    /** What one successful read or mutation call touched. */
+    private fun singleTouch(call: ChatEntry.ToolCall): TouchHit? {
         if (call.name.lowercase() in READ_TOOLS) {
             val args = jsonObject(call.arguments) ?: return null
             val path = pathOf(args, "file_path", "path") ?: return null
@@ -447,6 +509,7 @@ object SessionFiles {
         private var reads = 0
         private var writes = 0
         private var edits = 0
+        private var presents = 0
         private var firstSeq = Int.MAX_VALUE
         private var lastSeq = Int.MIN_VALUE
 
@@ -457,13 +520,14 @@ object SessionFiles {
                 FileTouch.READ -> reads += 1
                 FileTouch.WRITTEN -> writes += 1
                 FileTouch.EDITED -> edits += 1
+                FileTouch.PRESENTED -> presents += 1
             }
             if (seq < firstSeq) firstSeq = seq
             if (seq > lastSeq) lastSeq = seq
         }
 
         fun freeze(path: String) =
-            SessionFile(path, touches.toList(), reads, writes, edits, firstSeq, lastSeq)
+            SessionFile(path, touches.toList(), reads, writes, edits, presents, firstSeq, lastSeq)
     }
 
     private fun jsonObject(raw: String): JSONObject? =

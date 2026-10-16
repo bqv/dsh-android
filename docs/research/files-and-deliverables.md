@@ -204,9 +204,10 @@ type directly.
 
 ### `model/SessionFiles.kt` (pure, no Android types)
 
-- `SessionFile(path, touches, reads, writes, edits, firstSeq, lastSeq)` and
-  `enum FileTouch { READ, WRITTEN, EDITED }`. `derive(entries)` walks the
-  `ChatEntry.ToolCall` rows in seq order and keeps the first-seen order.
+- `SessionFile(path, touches, reads, writes, edits, presents, firstSeq, lastSeq)` and
+  `enum FileTouch { READ, WRITTEN, EDITED, PRESENTED }`. `derive(entries)` walks the
+  `ChatEntry.ToolCall` rows in seq order, keeps the first-seen order, and takes
+  *many* hits from one row when that row is a `present`.
 - `mutationOf` is the §3.2 table, verbatim, **successful results only**
   (`result != null && !isError`). Wire names are exact and lowercase-compared;
   the app's UI aliases (`write_file`, `str_replace`, `apply_patch`) are
@@ -214,7 +215,16 @@ type directly.
   explicit contribution".
 - `READ` is an app-side addition (the web's produced rule has no read case):
   successful `read` / `read_file` / `read_image` calls, path from `file_path`
-  then `path`.
+  then `path`. `PRESENTED` is the second app-side addition, and it is
+  load-bearing rather than decorative: a successful `present` declares each path
+  in its `files` array as a row, under the spelling the card carries. Without it
+  the deliverable card draws while the Files list has no row for the card's path
+  — `present` may name the file relatively where every `write` named it
+  absolutely, or the file may have been produced by a shell redirect, a
+  subagent's turn, or already existed — and the card's tap, which reaches the
+  panel as `initialPath` and is selected only on an exact path match, does
+  nothing at all. `presentedForTurn` and `derive` share one argument parser
+  (`declaredFiles`), so the card's list and the Files list cannot drift apart.
 - `previews(entries)` harvests the **last successful read of each path** from
   `meta` (`parseReadMeta`) or, for records that predate `meta`, from the
   `<path>…<content>` envelope (`parseReadEnvelope`, ported from the read card).
@@ -319,8 +329,10 @@ via `workspaceFiles/read`. The app has no such tree.
 
 ## 7. What is left
 
-- **No live directory tree.** The app's panel is transcript-derived; it cannot
-  show a file the session never touched, and a directory is not a row.
+- **No live directory tree.** The app's panel is transcript-derived; a directory
+  is not a row, and a file the session neither touched nor *declared* is not one
+  either. A `present` declaration is a row (`FileTouch.PRESENTED`), which is what
+  keeps a delivered card's path selectable.
 - **No pagination / `Load more`** in the preview: the loader reads one page
   (`offset: 1`, `FILE_PREVIEW_LINES`) and the panel says `Showing the first N
   lines` when the host cut it short (`FilesPanel.kt:395`); nothing pages past it

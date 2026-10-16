@@ -219,7 +219,17 @@ editing the live copy. There is no install step to forget.
 11. **The Files pane lists what the session touched**, from the transcript — not a
     live directory tree. Content is read on demand through `workspaceFiles/read`,
     which is scoped by session id, not by directory. `workspaceFiles/list` is
-    never called.
+    never called. **A `present` declaration is a touch** (`FileTouch.PRESENTED`,
+    `model/SessionFiles.kt`), and that is load-bearing: a card's tap arrives as
+    the panel's `initialPath` and is selected only on an exact path match, so a
+    declared path with no row made the card's tap open the *list* instead of the
+    file. It is not a rare shape: of the 1,551 paths declared by `present` across
+    this host's 420 journals, 1,143 had no row under the old read/write/edit rule
+    — 765 of them because `present` named the file relatively where every
+    `write`/`edit` named it absolutely, and 378 because the file was produced by
+    something that is not a mutation at all (a shell redirect, a subagent, or it
+    already existed). Paths keep their exact spelling, so one file under two
+    spellings is two rows.
 12. **Content search latches off per deployment.** A host with no content index
     ("session search is unavailable/disabled") fails every call the same way; the
     ViewModel latches that and stops sending the RPC. It is also not reachable

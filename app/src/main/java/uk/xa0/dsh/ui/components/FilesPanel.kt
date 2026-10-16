@@ -231,7 +231,7 @@ private fun FilesEmptyState() {
         )
         Text("No files yet", style = DshType.labelMedium, color = colors.labelSecondary)
         Text(
-            text = "Files this session reads, writes, or edits will appear here.",
+            text = "Files this session reads, writes, edits, or presents will appear here.",
             style = DshType.bodySmall,
             color = colors.labelTertiary,
             textAlign = TextAlign.Center,
@@ -591,6 +591,7 @@ private fun touchLabel(touch: FileTouch): String = when (touch) {
     FileTouch.READ -> "Read"
     FileTouch.WRITTEN -> "Write"
     FileTouch.EDITED -> "Edit"
+    FileTouch.PRESENTED -> "Presented"
 }
 
 private fun directoryOf(path: String): String {

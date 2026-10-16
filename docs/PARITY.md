@@ -323,7 +323,9 @@ of where the app stands against them.
       write and edit in the transcript — rather than a live directory tree
       (`workspaceFiles/list` is never called), and reads content on demand through
       `workspaceFiles/read` (`model/SessionFiles.kt`, `model/WorkspaceFileLoader.kt`,
-      `ui/components/FilesPanel.kt`)
+      `ui/components/FilesPanel.kt`). A successful `present` is a touch too
+      (`FileTouch.PRESENTED`): a delivered card's path has to be a row, or its tap
+      has nothing to select
 - [x] Terminal panel — the **Shell** tab, a real PTY over the host's `terminal`
       Remote namespace (`environment`, `shells`, `list`, `create`, `follow`, `write`,
       `resize`, `rename`, `close` in `net/TerminalClient.kt`), `follow` on the same
