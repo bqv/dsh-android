@@ -792,3 +792,25 @@ Extended the same night: **tests count as builds.** A subagent may write tests b
 them, for the same reason — three agents running `:app:testDebugUnitTest` is three Gradle runs
 plus three Kotlin daemons. The orchestrating session builds and tests, batched, top-level, and
 feeds the output back. A subagent's job is code, reasoning and host probing.
+
+## trap: mass "unresolved reference" from stale incremental state, not from code
+
+`FilesPanel.kt` reported **27 unresolved references** to imported symbols — `DiagLazyList`,
+`DiagScrollColumn`, `diagDrag`, `diagOffset`, `previewFormatOf`, `clickableNoRipple`,
+`shortenPath` — at **import lines and use sites**, while every one of those symbols was
+declared exactly once in the tree and the package line and all 74 imports were byte-identical
+to a commit whose main sources had compiled minutes earlier. The tree was clean, `git diff`
+against the commit was empty, and there was exactly one import block.
+
+**It was not the code and not a merge.** `rm -rf app/build` and rebuild: `BUILD SUCCESSFUL`,
+0 errors. `org.gradle.caching=true` with a freshly created worktree is the mechanism —
+Kotlin incremental state crossed trees and the compiler described a state that did not exist.
+
+Two things this costs if unknown. First, it looks exactly like a broken commit, so it invites
+a fix to code that compiles. Second, the shape matches an unclosed block comment (see the trap
+above), so the first instinct is to hunt a stray `/*` that is not there.
+
+**Before believing a mass unresolved-reference failure:** confirm `git status` is empty and
+`git diff <commit>` is empty, confirm the symbols exist, then wipe `app/build` and rebuild
+before changing a line. And note this is the second trap here whose lesson is *the compiler is
+describing something that is not real*.
