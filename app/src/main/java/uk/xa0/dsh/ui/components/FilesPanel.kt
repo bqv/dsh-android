@@ -66,6 +66,7 @@ import uk.xa0.dsh.diag.DiagLazyList
 import uk.xa0.dsh.diag.DiagScrollColumn
 import uk.xa0.dsh.diag.diagDrag
 import uk.xa0.dsh.diag.diagOffset
+import uk.xa0.dsh.model.FileDownloader
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.FileTouch
 import uk.xa0.dsh.model.ExplorerState
@@ -75,10 +76,16 @@ import uk.xa0.dsh.model.SessionFile
 import uk.xa0.dsh.model.WorkspaceEntry
 import uk.xa0.dsh.model.WorkspaceEntryKind
 import uk.xa0.dsh.model.WorkspaceExplorer
+import uk.xa0.dsh.model.formatSize
+import uk.xa0.dsh.model.isMarkdownPath
 import uk.xa0.dsh.model.previewFormatOf
+import uk.xa0.dsh.model.previewLanguageOf
 import uk.xa0.dsh.model.WorkspaceFileLoader
 import uk.xa0.dsh.ui.clickableNoRipple
+import uk.xa0.dsh.ui.markdown.MarkdownText
+import uk.xa0.dsh.ui.markdown.highlightCodeLine
 import uk.xa0.dsh.ui.shortenPath
+import uk.xa0.dsh.ui.theme.DshColors
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
@@ -139,6 +146,19 @@ data class ExplorerWiring(
  *  - [explorer] is the workspace listing and the way to move it. Null means the
  *    parent has no host (or no cwd), and then there is no Browse mode at all
  *    rather than a tab that can only be empty.
+ *  - [downloader] is the on-demand whole-file read, offered as a Download control
+ *    in the preview header. It is wired only by the parent that has a session to
+ *    read from; a panel without one simply does not offer it, rather than drawing
+ *    a control that cannot work.
+ *
+ * The preview draws a file three ways, and says which: a document's *rendering*
+ * (Markdown), a document's source with its code coloured, and a picture. Rendering
+ * replaces the raw text, so it is a claim about the content and never the only view —
+ * a Markdown file opens with a Source toggle beside it, and a page the host cut short
+ * says so above whichever view is showing. Those two belong to the *preview* rather
+ * than to either list, so they behave the same in both modes: a file reached through
+ * Browse is the same file, and a rendering that dropped its toggle there would be the
+ * one place the claim went unqualified.
  *
  * On a phone the list and preview swap in place; from 720dp they sit side by
  * side, which is the desktop reading of the web's two-pane right sidebar.
@@ -153,6 +173,8 @@ fun FilesPanel(
     cached: Map<String, FilePreview> = emptyMap(),
     /** On-demand workspace read; null means "use [cached] only". */
     loader: WorkspaceFileLoader? = null,
+    /** On-demand whole-file read for the Download control; null draws none. */
+    downloader: FileDownloader? = null,
     /**
      * Path to open straight away, for a caller that arrived from a file link or a
      * deliverable card rather than from this list. It is opened even when the
@@ -321,6 +343,7 @@ fun FilesPanel(
                             path = selected,
                             preview = shown,
                             loaderWired = loader != null,
+                            downloader = downloader,
                             showBack = false,
                             onBack = {},
                             onRetry = retry,
@@ -334,6 +357,7 @@ fun FilesPanel(
                         path = selected,
                         preview = shown,
                         loaderWired = loader != null,
+                        downloader = downloader,
                         showBack = true,
                         onBack = { selected = null },
                         onRetry = retry,
@@ -794,12 +818,33 @@ private fun FileRow(file: SessionFile, selected: Boolean, onSelect: () -> Unit) 
 }
 
 /**
- * The text preview: a path header over a wrapped, line-numbered monospace body.
+ * The text preview: a path header over a wrapped, line-numbered monospace body — or,
+ * for a Markdown document, over its rendering.
  *
  * The web's code/plain-text renderers load with `text-pages` and wrap by
  * default, which is why long lines wrap here instead of scrolling sideways.
  * A page the host cut short says so above the body; the panel never scrolls
  * horizontally, so a minified or generated line still reads down the page.
+ *
+ * Three things are drawn here and the header says which:
+ *
+ *  - a **Markdown rendering**, which replaces the source and therefore always has a
+ *    Source toggle beside it;
+ *  - the **source**, with code coloured when the extension names a language this app
+ *    has a grammar for — and left plain when it does not, because colouring an unknown
+ *    file would claim it is code;
+ *  - a **picture**, with the SVG toggle for the one format that is both.
+ *
+ * Whatever is on screen, a window the host cut short is announced above it. Without
+ * that, a rendering of the first two thousand lines would read as the whole document.
+ *
+ * This pane is mode-independent on purpose. It is composed below the mode tabs, over
+ * whichever list selected the file, because a rendering, its Source toggle and its
+ * window banner are claims about *the file* — and a file reached through Browse is the
+ * same file. The one asymmetry Browse brings is spelling: the transcript's key is
+ * preferred when the row carries a badge ([readKey] in the panel above), while the read
+ * itself still travels under the path on screen, so the preview cannot be showing one
+ * file's cache while it names another.
  */
 @Composable
 private fun PreviewPane(
@@ -807,6 +852,8 @@ private fun PreviewPane(
     preview: FilePreview?,
     /** True when a loader is wired: an empty first frame reads as "Reading…". */
     loaderWired: Boolean,
+    /** On-demand whole-file read; null draws no Download control at all. */
+    downloader: FileDownloader?,
     showBack: Boolean,
     onBack: () -> Unit,
     /**
@@ -823,7 +870,16 @@ private fun PreviewPane(
     // SVG opens as the drawing; the toggle is the way to the markup. Defaulted per
     // *path* so switching files does not carry the last file's choice over.
     var svgAsImage by rememberSaveable(path) { mutableStateOf(true) }
+    // Markdown opens rendered — that is the request this exists to answer — and the
+    // toggle is the way back to the source, which is not an afterthought: the file
+    // being previewed is often a document the reader is debugging.
+    var markdownRendered by rememberSaveable(path) { mutableStateOf(true) }
     val isSvg = ready != null && previewFormatOf(path.orEmpty()) == PreviewFormat.SVG
+    val isMarkdown = ready != null && isMarkdownPath(path.orEmpty())
+    val language = ready?.lang ?: previewLanguageOf(path.orEmpty())
+    // Nothing about a fetch that succeeds, and everything about one that does not: the
+    // control's own label is one word, so the reason gets a line here.
+    var downloadMessage by remember(path) { mutableStateOf<String?>(null) }
 
     Column(modifier) {
         Row(
@@ -849,16 +905,52 @@ private fun PreviewPane(
             if (path != null) PathCrumb(path, Modifier.weight(1f))
             // SVG is both a drawing and a document, and which one the reader wants
             // depends on what they are doing — look at the icon, or read its path.
-            // The choice sits here rather than behind a second file row.
-            if (isSvg) SvgViewToggle(asImage = svgAsImage, onToggle = { svgAsImage = !svgAsImage })
-            ready?.lang?.let { lang ->
+            // The choice sits here rather than behind a second file row, and Markdown
+            // is the same shape of choice between a document and its source.
+            if (isSvg) {
+                ViewToggle(
+                    label = if (svgAsImage) "Source" else "Image",
+                    onToggle = { svgAsImage = !svgAsImage },
+                )
+            }
+            if (isMarkdown) {
+                ViewToggle(
+                    label = if (markdownRendered) "Source" else "Rendered",
+                    onToggle = { markdownRendered = !markdownRendered },
+                )
+            }
+            // A claim, drawn as a chip: what this app thinks the file is. It is shown
+            // whether or not anything is coloured, so a misnamed file's reader can see
+            // the claim the panel is making and check it against the source.
+            language?.let { lang ->
                 Text(lang, style = DshType.bodySmall, color = colors.labelTertiary, maxLines = 1)
             }
             if (ready != null && ready.lines > 0) {
                 CopyPreviewButton(ready.text)
             }
+            // Offered for whatever is selected, including a file whose *preview* failed:
+            // a PDF or a binary is exactly what the text read refuses, and a download is
+            // the only way to get it onto the phone. It reads and writes nothing until
+            // it is tapped, and every download it starts dies with this composition —
+            // the panel's own close is therefore also the download's cancel.
+            if (path != null && downloader != null) {
+                FileDownloadControl(
+                    path = path,
+                    downloader = downloader,
+                    onMessage = { downloadMessage = it },
+                )
+            }
         }
         Box(Modifier.fillMaxWidth().height(0.5.dp).background(colors.borderL1))
+
+        downloadMessage?.let { message ->
+            Text(
+                text = message,
+                style = DshType.bodySmall,
+                color = colors.error,
+                modifier = Modifier.padding(horizontal = DshSpacing.lg, vertical = DshSpacing.xs),
+            )
+        }
 
         when {
             path == null -> PreviewNote("Select a file to preview.", Modifier.weight(1f).fillMaxWidth())
@@ -896,22 +988,13 @@ private fun PreviewPane(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             )
 
+            isMarkdown && markdownRendered -> Column(Modifier.fillMaxSize()) {
+                WindowBanner(ready, rendered = true)
+                MarkdownPreview(ready.text, Modifier.weight(1f).fillMaxWidth())
+            }
+
             else -> Column(Modifier.fillMaxSize()) {
-                // The transcript knows the file's total length; a workspace page
-                // only knows that it stopped short of EOF.
-                val banner = when {
-                    ready.windowed -> "Showing ${ready.lines} of ${ready.totalLines} lines"
-                    ready.truncated -> "Showing the first ${ready.lines} lines"
-                    else -> null
-                }
-                if (banner != null) {
-                    Text(
-                        text = banner,
-                        style = DshType.bodySmall,
-                        color = colors.labelTertiary,
-                        modifier = Modifier.padding(horizontal = DshSpacing.lg, vertical = DshSpacing.xs),
-                    )
-                }
+                WindowBanner(ready, rendered = false)
                 val previewState = rememberLazyListState()
                 DiagLazyList("files:preview", previewState)
                 LazyColumn(
@@ -920,17 +1003,78 @@ private fun PreviewPane(
                         .diagDrag("files:preview") { previewState.diagOffset() },
                     state = previewState,
                 ) {
-                    items(ready.numbered, key = { it.number }) { line -> PreviewLineRow(line) }
+                    val highlight = language != null && !isMarkdown
+                    items(ready.numbered, key = { it.number }) { line ->
+                        PreviewLineRow(line, highlight, colors)
+                    }
                 }
             }
         }
     }
 }
 
-/** One numbered line, wrapping rather than truncating (wrap is the web default). */
+/**
+ * How much of the file the reader is looking at, when it is not all of it.
+ *
+ * The transcript knows the file's total length; a workspace page only knows that it
+ * stopped short of EOF. [rendered] adds the one thing a rendered document cannot say
+ * for itself: that what is on screen is a rendering *of the window*, not of the file.
+ *
+ * The sentence is about the *page the host sent*, which is why it is true in both
+ * modes: a file reached through Browse carries a workspace-relative path and a page the
+ * host capped identically, and the cap is the host's, not the list's. What Browse does
+ * change is that the panel cannot say how many lines this session has read, so
+ * `ready.truncated` — the host's own `eof` — is the only half that can be stated, and
+ * the banner says exactly that rather than inventing a total.
+ */
 @Composable
-private fun PreviewLineRow(line: PreviewLine) {
+private fun WindowBanner(ready: FilePreview.Ready, rendered: Boolean) {
     val colors = DshTheme.colors
+    val window = when {
+        ready.windowed -> "Showing ${ready.lines} of ${ready.totalLines} lines"
+        ready.truncated -> "Showing the first ${ready.lines} lines"
+        else -> null
+    } ?: return
+    Text(
+        text = if (rendered) "$window · the rest of this document is not shown" else window,
+        style = DshType.bodySmall,
+        color = colors.labelTertiary,
+        modifier = Modifier.padding(horizontal = DshSpacing.lg, vertical = DshSpacing.xs),
+    )
+}
+
+/**
+ * The rendered document, in the panel's own scroller.
+ *
+ * `MarkdownText` is the same renderer the transcript uses, so a document reads the same
+ * whether it is a message or a file — and it is the reason this panel needs no Markdown
+ * dependency: the subset, and its streaming tolerance, are already here. Its code blocks
+ * scroll sideways on their own; the document scrolls vertically here.
+ */
+@Composable
+private fun MarkdownPreview(text: String, modifier: Modifier = Modifier) {
+    val scroll = rememberScrollState()
+    DiagScrollColumn("files:markdown", scroll)
+    Column(
+        modifier
+            .verticalScroll(scroll)
+            .diagDrag("files:markdown") { scroll.value }
+            .padding(horizontal = DshSpacing.lg, vertical = DshSpacing.md),
+    ) {
+        MarkdownText(text)
+    }
+}
+
+/**
+ * One numbered line, wrapping rather than truncating (wrap is the web default).
+ *
+ * [highlight] is decided once for the whole page and passed down, so a row pays for a
+ * composition-local read only when the theme changes. The colouring never touches the
+ * text: `highlightCodeLine` returns the line split into spans, and their concatenation
+ * is the line exactly as it arrived.
+ */
+@Composable
+private fun PreviewLineRow(line: PreviewLine, highlight: Boolean, colors: DshColors) {
     Row(Modifier.fillMaxWidth().padding(horizontal = DshSpacing.lg, vertical = 1.dp)) {
         Text(
             text = line.number.toString(),
@@ -940,8 +1084,15 @@ private fun PreviewLineRow(line: PreviewLine) {
             maxLines = 1,
             modifier = Modifier.width(40.dp).padding(end = DshSpacing.md),
         )
+        val body = remember(line.text, highlight, colors) {
+            when {
+                line.text.isEmpty() -> AnnotatedString(" ")
+                highlight -> highlightCodeLine(line.text, colors)
+                else -> AnnotatedString(line.text)
+            }
+        }
         Text(
-            text = line.text.ifEmpty { " " },
+            text = body,
             style = DshType.codeSmall,
             color = colors.labelPrimary,
             modifier = Modifier.weight(1f),
@@ -1133,11 +1284,7 @@ private fun captionFor(picture: FilePreview.Image, bitmap: ImageBitmap?): String
     return parts.joinToString(" · ")
 }
 
-private fun formatBytes(bytes: Int): String = when {
-    bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
-    bytes >= 1024 -> "%.0f KB".format(bytes / 1024.0)
-    else -> "$bytes B"
-}
+private fun formatBytes(bytes: Int): String = formatSize(bytes.toLong())
 
 /**
  * The drawing half of an SVG.
@@ -1199,12 +1346,18 @@ private fun SvgPreview(markup: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** Image ⇄ Source, for a file that is legitimately both. */
+/**
+ * One tap between two readings of the same file: SVG as drawing or as markup, Markdown
+ * as document or as source.
+ *
+ * [label] names the view the tap *goes to*, which is the convention the SVG control
+ * already set, so the label is never ambiguous about where it leads.
+ */
 @Composable
-private fun SvgViewToggle(asImage: Boolean, onToggle: () -> Unit) {
+private fun ViewToggle(label: String, onToggle: () -> Unit) {
     val colors = DshTheme.colors
     Text(
-        text = if (asImage) "Source" else "Image",
+        text = label,
         style = DshType.bodySmall,
         color = colors.link,
         maxLines = 1,

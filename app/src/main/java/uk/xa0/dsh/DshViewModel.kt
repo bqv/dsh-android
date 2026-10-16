@@ -61,6 +61,9 @@ import uk.xa0.dsh.model.ExplorerState
 import uk.xa0.dsh.model.WorkspaceEntry
 import uk.xa0.dsh.model.WorkspaceEntryKind
 import uk.xa0.dsh.model.WorkspaceListing
+import uk.xa0.dsh.model.DownloadResult
+import uk.xa0.dsh.model.FileDownloader
+import uk.xa0.dsh.model.readWholeFile
 import uk.xa0.dsh.model.SessionHeader
 import uk.xa0.dsh.model.SessionSearch
 import uk.xa0.dsh.model.sessionForkRequest
@@ -133,6 +136,7 @@ import uk.xa0.dsh.net.DshAuthException
 import uk.xa0.dsh.net.DshCertificateException
 import uk.xa0.dsh.net.DshRpcException
 import uk.xa0.dsh.net.multipartBytes
+import uk.xa0.dsh.net.multipartByteParts
 import uk.xa0.dsh.net.boundaryOf
 import uk.xa0.dsh.net.DshUnreachableException
 import uk.xa0.dsh.net.MuxState
@@ -7441,6 +7445,110 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    /**
+     * A whole-file reader for the Download control, bound to the session that is open
+     * now.
+     *
+     * The pane's loader asks `workspaceFiles/read` for one page of *text*, which is why
+     * it cannot serve a download: that call refuses non-UTF-8 outright, caps a page at
+     * its own line and byte limits, and answers with a document rather than bytes. This
+     * asks `workspaceFiles/readBytes` instead — the same call, with the same multipart
+     * parsing, that already serves the image preview — one bounded window at a time,
+     * from zero to the file's end. Binary and text are the same read here, which is the
+     * point: a `.pdf`, a `.zip` or an extensionless file has no preview in this app and
+     * is exactly what a reader wants to take off the phone.
+     *
+     * The session id is captured when the downloader is built rather than read per call,
+     * for the same reason the loader captures it: the host resolves the path against
+     * that session's `cwd`, so a rebuild mid-download would re-scope the read.
+     *
+     * The paging itself lives in `model/readWholeFile`, where it is testable against a
+     * fake reader; this supplies the two things that need a socket — the file's length
+     * (`workspaceFiles/stat`, best-effort: a host that will not report one still
+     * downloads) and one window of bytes.
+     */
+    fun workspaceFileDownloader(): FileDownloader {
+        val sessionId = _ui.value.currentSessionId
+        return FileDownloader { path, onProgress ->
+            if (sessionId.isNullOrBlank()) {
+                return@FileDownloader DownloadResult.Refused("No open session to read it from.")
+            }
+            // The whole walk runs off the main thread: the byte scan that reassembles a
+            // window is a few milliseconds per megabyte, and a phone should not drop
+            // frames for the length of a download.
+            withContext(Dispatchers.IO) {
+                try {
+                    val size = runCatching { workspaceFileSize(sessionId, path) }.getOrNull()
+                    Log.d(TAG, "download: path=$path session=$sessionId bytes=$size")
+                    readWholeFile(path, size, reader = { target, offset, length ->
+                        workspaceFileWindow(sessionId, target, offset, length)
+                    }) { done, total ->
+                        // The only consumer draws Compose state, so the hop back is
+                        // explicit rather than left to whoever wired the callback.
+                        withContext(Dispatchers.Main) { onProgress(done, total) }
+                    }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    // A reader who pressed Cancel is not a failed download: the control
+                    // says nothing and offers the file again.
+                    throw cancelled
+                } catch (error: Throwable) {
+                    if (error is DshAuthException) onAuthFailure("workspaceFiles/readBytes", error)
+                    // Logged because every way this fails is otherwise the control's own
+                    // one-word label: the reason travels back inside the result.
+                    Log.w(TAG, "download failed: path=$path session=$sessionId", error)
+                    DownloadResult.Refused(describe(error))
+                }
+            }
+        }
+    }
+
+    /** The file's reported length, or null when the host will not say. */
+    private suspend fun workspaceFileSize(sessionId: String, path: String): Int? {
+        val args = JSONObject()
+            .put("workspaceFileScopeId", sessionId)
+            .put("path", path)
+        val value = client.rpc("workspaceFiles/stat", args)
+        // Absent is *not* zero. `int(key)` falls back to 0, and a length of zero would
+        // make the paging loop return an empty download before reading anything — a
+        // saved file that is silently blank. Anything the host does not state plainly is
+        // "unknown", which the loop handles by reading to the end.
+        if (!value.has("bytes") || value.isNull("bytes")) return null
+        val reported = value.opt("bytes") as? Number ?: return null
+        return reported.toInt().takeIf { it >= 0 }
+    }
+
+    /**
+     * One window of a file's own bytes, reassembled from the multipart reply.
+     *
+     * Every `bytes-` part is taken in order and not just the first: the host numbers
+     * them, and a window that arrives split would otherwise be handed over truncated — a
+     * half-written download that looks whole, which is the one outcome this feature must
+     * not have.
+     */
+    private suspend fun workspaceFileWindow(
+        sessionId: String,
+        path: String,
+        offset: Long,
+        length: Int,
+    ): ByteArray {
+        val body = client.rpcBytes(
+            "workspaceFiles/readBytes",
+            JSONObject()
+                .put("workspaceFileScopeId", sessionId)
+                .put("path", path)
+                .put(
+                    "options",
+                    JSONObject().put(
+                        "range",
+                        JSONObject().put("offset", offset).put("length", length),
+                    ),
+                ),
+        )
+        val boundary = boundaryOf(body)
+            ?: error("the host answered with something that is not a byte window")
+        return multipartByteParts(body, boundary)
     }
 
     /**

@@ -246,7 +246,7 @@ type directly.
 
 ### `ui/components/FilesPanel.kt`
 
-`FilesPanel(files, modifier, root, cached, loader, initialPath, onSelect, explorer)`
+`FilesPanel(files, modifier, root, cached, loader, downloader, initialPath, onSelect, explorer)`
 (`FilesPanel.kt`). Two modes when the parent supplies an `ExplorerWiring` and a
 `root`: **This session**, the touched-file list below, and **Browse**, the
 workspace tree (see `WorkspaceExplorer.kt` above). A plain open lands on Browse,
@@ -258,7 +258,8 @@ different spellings. Switching the *hidden* toggle lives in the explorer pane an
 resets with the panel.
 
 The session list: a list of the touched files (icon, basename, directory
-tail, touch badges) with a wrapped, line-numbered monospace preview. From 720dp
+tail, touch badges) with a wrapped, line-numbered monospace preview — or, since
+§8, a Markdown rendering, with the source one tap away. From 720dp
 the list and preview sit side by side; below that they swap, with a back control
 (`FilesPanel.kt:148-195`). `loader == null` uses `cached` only, and the loader is
 consulted **only for a path `cached` does not hold** (`FilesPanel.kt:122`); a
@@ -356,12 +357,14 @@ derived on demand, only while the surface is open (`ChatScreen.kt:502-519`):
 val files = remember(entries) { SessionFiles.derive(entries) }
 val previews = remember(entries) { SessionFiles.previews(entries) }
 val fileLoader = remember(current?.id) { vm.workspaceFileLoader() }
+val fileDownloader = remember(current?.id) { vm.workspaceFileDownloader() }
 FilesSurface(
     files = files,
     previews = previews,
     root = current?.cwd ?: header?.cwd,
     focus = filesFocus,
     loader = fileLoader,
+    downloader = fileDownloader,
     explorer = ExplorerWiring(
         state = workspaceExplorer,
         onList = vm::listWorkspaceDirectory,
@@ -381,6 +384,13 @@ browser's: a listing failure belongs to the panel, not to the session error
 banner. Both close paths — the surface's back bar and the header's Files toggle —
 call `resetWorkspaceExplorer()`, so a reopened panel lists the directory again
 instead of drawing a snapshot from whenever it was last looked at.
+
+The downloader is session-scoped for the same reason the loader is. Its *control's*
+state is not session-scoped at all: `FileDownloadControl` holds its fetch, its job and
+its bytes in `remember(path)`, so closing the panel (or selecting another file) disposes
+the composition and cancels a fetch in flight. That is why the panel close needs no
+download reset alongside `resetWorkspaceExplorer()` — there is no state outside the
+composition to clear.
 
 ### c. The Files tree, and what it does not do
 
@@ -410,8 +420,9 @@ watch, exactly as the web's does not.
   and `stat.version` is never read, so the web's "the file has changed" bar has
   no counterpart.
 - **No file-watch refresh** (the web tree has none either; the preview does).
-- **No `readAll`/images/PDF/HTML renderers.** Only numbered text is drawn; an
-  image read lists as a touched file with no preview.
+- **No PDF or HTML renderer.** A PDF is read as text like anything else, so the
+  host answers `workspace-file/not-text` and the pane shows its wording; the
+  download control is the way such a file leaves the app (§8).
 - **No inline-code file mentions** from the closing prose
   (`chatFileMentions`), and **no `present` tool card**: a `present` call renders
   as the generic transcript row with a `Visibility` icon
@@ -420,3 +431,111 @@ watch, exactly as the web's does not.
   declaration is read from the `present` call arguments. If `Transcript.kt`
   later folds the event, `presentedForTurn` could switch to it (the event's seq
   is the result's, which is marginally more faithful).
+
+## 8. Rendering, colouring, and taking the file
+
+Added after the port above, and drawing on what was already in the app rather
+than on a new dependency.
+
+### 8.1 The renderers were already here
+
+`ui/markdown/Markdown.kt` is a hand-rolled Markdown parser covering headings,
+paragraphs, bullet/numbered/task lists, tables with a `|---|` separator, fenced
+code (``` and `~~~`, language-labelled), block quotes, rules and inline
+emphasis/code/links/images/strike plus GFM autolinks. It is streaming-tolerant,
+and it is what the chat transcript already draws (`MarkdownText`). The same file
+holds `SyntaxHighlighter`: a line-based, language-agnostic highlighter producing
+KEYWORD/STRING/COMMENT/NUMBER/FUNCTION/PUNCTUATION spans, painted from the
+theme's `synKeyword`/`synString`/`synComment`/… colours by
+`MarkdownView.highlightCodeLine` (added so the Files preview can colour one
+numbered row at a time, with the same mapping `CodeBlock` uses).
+
+No Markdown or highlighting library is in the offline Gradle cache, and none is
+added: the honest subset was already implemented, so this is a wiring change.
+
+**What the parser does with what it does not understand: nothing is dropped.**
+Footnoted `[^1]`, raw HTML tags, reference links, setext headings, HTML entities
+and nesting deeper than the two-space list heuristic all survive as literal
+characters; only *interpretation* is declined. `MarkdownHighlightTest` pins the
+same property for colouring — the spans concatenate to the line exactly as it
+arrived.
+
+### 8.2 Deciding what a file gets, from the name alone
+
+Three claims, all from the last path segment, all client-side (the host sends no
+content type, and the read/readBytes choice has to be made before the first
+byte):
+
+| function | decides | vocabulary |
+|---|---|---|
+| `previewFormatOf` | how it is **read** | TEXT + PNG/JPEG/WEBP/GIF/BMP/ICO/HEIC/AVIF/SVG |
+| `previewLanguageOf` | how its source is **coloured** | the `LANG_BY_EXTENSION` table, moved here from the read card so both surfaces answer the same, plus `kts` |
+| `isMarkdownPath` | whether it is **rendered** | `md`, `markdown`, `mdown` only |
+
+A dotfile and an unlisted extension answer `null`/false, which is what keeps a
+`.log` or an extensionless file from being coloured as code. `.mdx` is
+deliberately not rendered: it is Markdown *plus* JSX, and drawing the JSX as
+prose would be a claim the file does not support.
+
+### 8.3 Rendering replaces the text, so the source stays one tap away
+
+The preview header carries a `Source`/`Rendered` toggle for a Markdown file
+(the existing SVG `Image`/`Source` control generalised into `ViewToggle`), the
+label naming where the tap *goes*. Markdown opens rendered; the language chip
+always says what the panel took the file for, so a misnamed file's claim is
+visible and checkable; and the window banner is hoisted above **both** views, so
+a rendering of the first 2000 lines reads `Showing 3 of 5000 lines · the rest of
+this document is not shown` rather than looking like the whole document.
+
+### 8.4 Download: paged bytes, then the system's save dialog
+
+There is one file read per window in this API, so a download is a walk:
+
+- **Window**: `workspaceFiles/readBytes` with `options.range {offset, length}`,
+  2 MiB at a time — the host's own ceiling on a *requested* length (it refuses a
+  larger request outright rather than shortening it), and the same call and
+  multipart shape the image preview already uses and has verified. Every
+  `bytes-N` part is reassembled in order (`multipartByteParts`), not just the
+  first: truncation that looks whole is the failure mode this must not have.
+- **Length**: `workspaceFiles/stat` for the progress total and the pre-flight
+  refusal, treated as best-effort — an absent `bytes` is "unknown", never zero,
+  or the loop would hand back an empty file without reading anything.
+- **Ceiling**: 32 MiB, the host's own `readAll` limit. Above it the download is
+  refused with the file's own size; it is never truncated. The loop's shape is
+  such that a short window always ends the read, and a file that exactly fills
+  the ceiling costs one single-byte read rather than a guess
+  (`model/FileDownload.kt`, `model/FileDownloadTest.kt`).
+- **Destination**: SAF `ACTION_CREATE_DOCUMENT` via
+  `ActivityResultContracts.CreateDocument(mimeType)` — no storage permission, no
+  `FileProvider`, no manifest entry, and the reader chooses the location. The
+  name and type come from `downloadSaveOf(path)`: the file's own last segment
+  unchanged, and the format table's answer as the type
+  (`application/octet-stream` for bytes of unknown kind).
+- **Order**: bytes are fetched first, then the dialog opens. The dialog creates
+  the destination the moment it is answered, so fetching afterwards would leave
+  a half-written file under a name the reader chose. The cost — the whole file
+  held in memory — is why the ceiling exists.
+- **Saying so**: `Download` → `N%` (or bytes, when no total was reported) with
+  `Cancel`, then `Saved`, or `Retry` with the reason printed on its own line —
+  the preview header for the panel, the card's status line for a delivery — and
+  a `Log.w` under the `DshFiles` tag. Cancellation takes effect between windows,
+  because the call in flight is a blocking socket read.
+
+Both surfaces carry it (`ui/components/FileDownloadControl.kt`): the presented
+card, where a reader is handed a file, and the Files preview header, where the
+same file would otherwise behave differently.
+
+### 8.5 What is not verified
+
+Everything below the surface is untested from this box, which has no device:
+
+- the `readBytes` window loop against the real host (only against a fake reader),
+- whether `workspaceFiles/stat` answers on the running host at all (a failure is
+  handled as "unknown length", so it degrades rather than breaks),
+- the save dialog, the write to the chosen `content://` URI, `Saved`, and
+  Cancel during a real transfer,
+- whether the host splits a 2 MiB window into several `bytes-N` parts (the
+  reassembly handles both, but only the single-part shape has been captured),
+- how a 2000-line Markdown document composes: `MarkdownText` is a plain
+  `Column`, not a lazy list, so a very large rendering is a cost the preview
+  pays in frames rather than in correctness.

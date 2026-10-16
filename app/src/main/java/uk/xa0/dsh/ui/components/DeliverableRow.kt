@@ -36,6 +36,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import uk.xa0.dsh.model.FileDownloader
 import uk.xa0.dsh.model.PresentedFile
 import uk.xa0.dsh.model.ProducedFile
 import uk.xa0.dsh.model.TurnDeliverables
@@ -66,13 +67,20 @@ private const val COLLAPSED_PRESENTED_COUNT = 4
  *
  * The web's "Open in default app" / "Show in Finder" menu is deliberately
  * dropped: it acts on the *serving host's* desktop, which a phone never has
- * (`panels-settings.md` §4.5 says to keep only the preview action).
+ * (`panels-settings.md` §4.5 says to keep only the preview action). What replaces
+ * it is the one action that *does* mean something on a phone and did not exist
+ * there: taking the file itself, through [downloader] and the system's save dialog.
+ * A presented card carries it because a delivery is exactly when a reader wants the
+ * file in their own hands, and the Files preview carries it too, because a file that
+ * can be saved from one surface and not the other is its own small lie.
  */
 @Composable
 fun DeliverableRow(
     delivered: TurnDeliverables,
     onOpen: (String) -> Unit = {},
     modifier: Modifier = Modifier,
+    /** On-demand whole-file read for the delivered cards; null draws no control. */
+    downloader: FileDownloader? = null,
 ) {
     if (delivered.isEmpty) return
     Column(
@@ -85,7 +93,7 @@ fun DeliverableRow(
             ProducedFiles(delivered.produced, onOpen)
         }
         if (delivered.presented.isNotEmpty()) {
-            PresentedFiles(delivered.presented, onOpen)
+            PresentedFiles(delivered.presented, onOpen, downloader)
         }
     }
 }
@@ -167,7 +175,11 @@ private fun ProducedChip(file: ProducedFile, onOpen: (String) -> Unit) {
 
 /** The delivered-file cards, with the web's four-card collapse. */
 @Composable
-private fun PresentedFiles(files: List<PresentedFile>, onOpen: (String) -> Unit) {
+private fun PresentedFiles(
+    files: List<PresentedFile>,
+    onOpen: (String) -> Unit,
+    downloader: FileDownloader?,
+) {
     val colors = DshTheme.colors
     var expanded by remember { mutableStateOf(false) }
     val collapsible = files.size > COLLAPSED_PRESENTED_COUNT
@@ -181,7 +193,7 @@ private fun PresentedFiles(files: List<PresentedFile>, onOpen: (String) -> Unit)
             shown.chunked(columns).forEach { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(DshSpacing.lg)) {
                     row.forEach { file ->
-                        PresentedCard(file, Modifier.weight(1f), onOpen)
+                        PresentedCard(file, Modifier.weight(1f), onOpen, downloader)
                     }
                     // A lone last card keeps its column width instead of stretching.
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
@@ -219,11 +231,22 @@ private fun PresentedFiles(files: List<PresentedFile>, onOpen: (String) -> Unit)
  * `PresentedFileCard.tsx`: icon, name, a status line that falls back to the
  * upper-cased extension and then `File`, and an always-visible Open control.
  * The whole card is the web's `.cardPreview` overlay, so a tap anywhere opens.
+ *
+ * The download control sits inside that overlay and takes its own tap, so the card
+ * still opens on a tap anywhere else. Its one-word state is not where a failure is
+ * explained: the reason replaces the status line, which is the only line on the card
+ * with room for a sentence and the one a reader is already looking at.
  */
 @Composable
-private fun PresentedCard(file: PresentedFile, modifier: Modifier = Modifier, onOpen: (String) -> Unit) {
+private fun PresentedCard(
+    file: PresentedFile,
+    modifier: Modifier = Modifier,
+    onOpen: (String) -> Unit,
+    downloader: FileDownloader?,
+) {
     val colors = DshTheme.colors
     val shape = RoundedCornerShape(18.dp)
+    var downloadMessage by remember(file.path) { mutableStateOf<String?>(null) }
     Row(
         modifier
             .height(60.dp)
@@ -259,11 +282,18 @@ private fun PresentedCard(file: PresentedFile, modifier: Modifier = Modifier, on
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = cardStatus(file),
+                text = downloadMessage ?: cardStatus(file),
                 style = cardStatusStyle,
-                color = colors.labelTertiary,
+                color = if (downloadMessage != null) colors.error else colors.labelTertiary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (downloader != null) {
+            FileDownloadControl(
+                path = file.path,
+                downloader = downloader,
+                onMessage = { downloadMessage = it },
             )
         }
         Text(

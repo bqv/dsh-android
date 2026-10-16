@@ -647,6 +647,10 @@ fun ChatScreen(vm: DshViewModel) {
     val modelTrigger = modelTriggerState(ui.modelChoice, ui.selectedModel, ui.selectedEffort)
 
     val current = ui.sessions.firstOrNull { it.id == ui.currentSessionId }
+    // The whole-file reader behind every Download control on this screen. Rebuilt with
+    // the session for the same reason the loader is: it carries the session id the host
+    // resolves the path against, so a stale one would read the wrong workspace.
+    val fileDownloader = remember(current?.id) { vm.workspaceFileDownloader() }
     // The pending seat's directory, for the hero's workspace chip. The target's own
     // path is preferred; a Workspace the registry has not delivered a path for yet
     // still resolves through the registry, and a Directory target *is* its path.
@@ -920,6 +924,9 @@ fun ChatScreen(vm: DshViewModel) {
                         onList = vm::listWorkspaceDirectory,
                         onReload = vm::reloadWorkspaceExplorer,
                     ),
+                    // The downloader is session-scoped like the loader, and the panel
+                    // decides whether to draw its control at all.
+                    downloader = fileDownloader,
                     onClose = {
                         // The tree is a per-open reading; leaving the cache up
                         // would show a stale directory the next time it opens.
@@ -1270,6 +1277,7 @@ fun ChatScreen(vm: DshViewModel) {
                                             filesFocus = path
                                             showFiles = true
                                         },
+                                        downloader = fileDownloader,
                                     )
                                 }
                               }
@@ -2247,6 +2255,12 @@ private fun FilesSurface(
      * is what it was before there was a tree to browse.
      */
     explorer: ExplorerWiring? = null,
+    /**
+     * Reads a whole file, for the preview header's Download control. Wired from the
+     * session scope like [loader]; without it the panel offers no download at all
+     * rather than a control that cannot work.
+     */
+    downloader: uk.xa0.dsh.model.FileDownloader? = null,
 ) {
     val colors = DshTheme.colors
     Column(
@@ -2299,6 +2313,7 @@ private fun FilesSurface(
             root = root,
             cached = previews,
             loader = loader,
+            downloader = downloader,
             initialPath = focus,
             explorer = explorer,
             modifier = Modifier.weight(1f),
