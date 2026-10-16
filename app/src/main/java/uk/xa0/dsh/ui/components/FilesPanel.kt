@@ -108,8 +108,11 @@ data class ExplorerWiring(
  *
  *  - **This session** is `SessionFiles.derive(entries)` — the files the
  *    transcript actually touched, in first-seen order. It is true and it is
- *    small, and it stays: it is the only list that can name a file by the exact
- *    spelling a tool call used, which is what a deliverable card's path is.
+ *    small, and it stays: it is the only list that records what the session said,
+ *    under the exact spelling a tool call used, which is the spelling a
+ *    deliverable card carries and the one the preview's transcript cache is keyed
+ *    by. It is not required to open a card's focus — see [initialPath] — but it is
+ *    what makes the file *this session's* rather than merely present.
  *  - **Browse** is the workspace tree, listed one directory at a time from
  *    `workspaceFiles/list` rooted at the session's cwd, with the session's own
  *    touches drawn on it as marks. The user's complaint was that the panel held
@@ -151,8 +154,15 @@ fun FilesPanel(
     /** On-demand workspace read; null means "use [cached] only". */
     loader: WorkspaceFileLoader? = null,
     /**
-     * Path to open straight away, for a caller that arrived from a file link
-     * rather than from this list. A path the session never touched is ignored.
+     * Path to open straight away, for a caller that arrived from a file link or a
+     * deliverable card rather than from this list. It is opened even when the
+     * derivation has no row for it: such a path is a fact about the transcript,
+     * not about this list, and [loader] resolves it against the session all the
+     * same. Discarding it was the silent no-op the reader met — the panel came up
+     * on its list and the file never opened.
+     *
+     * Naming a file also opens the panel on **This session** rather than Browse,
+     * because that is the mode whose rows are addressed the way a card's path is.
      */
     initialPath: String? = null,
     /** Fired when a file row is selected, for a parent that wants to observe it. */
@@ -164,23 +174,31 @@ fun FilesPanel(
     val canExplore = explorer != null && root != null
     // Which list is up. The workspace is the default — a panel derived only from
     // the session's own activity is what read as broken — but a caller that named
-    // a file arrived from a card or a link, and the session list is the only one
-    // that can select an arbitrary transcript spelling, so that opens as it did.
+    // a file arrived from a card or a link, and the session list is the one whose
+    // rows are addressed the way a card's path is, so that opens as it did.
     var browse by rememberSaveable(initialPath, canExplore) {
         mutableStateOf(canExplore && initialPath == null)
     }
-    var selected by remember(initialPath) {
-        mutableStateOf(initialPath?.takeIf { path -> files.any { it.path == path } })
-    }
+    // The path on screen: [initialPath], or a row the reader tapped. A focus the
+    // derivation has no row for is kept rather than discarded: such a path is a
+    // fact about the transcript, not about this list, and the loader resolves it
+    // against the session all the same.
+    var selected by remember(initialPath) { mutableStateOf(initialPath) }
+    // True once the *session list* has held the current selection, so a path that
+    // was a row and is no longer one (a transcript reload) is still dropped, while
+    // a path only an outside caller knew is not.
+    var listed by remember(initialPath) { mutableStateOf(false) }
     // The session's own record, resolved onto workspace-relative paths once per
     // list rather than per row.
     val badges = remember(files, root) { WorkspaceExplorer.badges(files, root) }
 
-    // A selected path can vanish when the transcript reloads; drop it rather than
-    // previewing a file the session list no longer holds. The rule belongs to that
-    // list: a browse selection is a workspace path and is not drawn from here.
-    LaunchedEffect(files, browse) {
-        if (!browse && selected != null && files.none { it.path == selected }) selected = null
+    // The drop-on-reload guard belongs to the session list, and only to it: a
+    // browse selection is a workspace path this list is not drawn from, and a mode
+    // switch clears the selection outright.
+    LaunchedEffect(files, selected, browse) {
+        if (browse) return@LaunchedEffect
+        val held = selected != null && files.any { it.path == selected }
+        if (held) listed = true else if (listed) selected = null
     }
 
     // Ask for the root when Browse has nothing to show. Guarded on the state
@@ -235,7 +253,11 @@ fun FilesPanel(
     val shown: FilePreview? = readKey?.let { key -> cached[key] ?: fetched[key] }
     val retry: () -> Unit = { readKey?.let { key -> fetched.remove(key); reloadKey += 1 } }
 
-    if (files.isEmpty() && !browse) {
+    // Nothing to list *and* nothing asked for: the panel's own empty state. A path
+    // an outside caller asked for goes on to the preview instead, which is the one
+    // thing this panel can still show for a session whose derivation holds nothing.
+    // Browse never takes this branch: its content is the tree, not the derivation.
+    if (files.isEmpty() && selected == null && !browse) {
         Box(modifier.fillMaxSize().background(colors.bgBase), contentAlignment = Alignment.Center) {
             FilesEmptyState()
         }
@@ -253,8 +275,10 @@ fun FilesPanel(
                             browse = next
                             // The two lists address the same file under different
                             // spellings, so a selection made in one is not a
-                            // selection in the other.
+                            // selection in the other. `listed` is part of that
+                            // selection: only the session list ever sets it.
                             selected = null
+                            listed = false
                         }
                     },
                 )

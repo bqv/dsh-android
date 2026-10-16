@@ -221,24 +221,29 @@ editing the live copy. There is no install step to forget.
     scoped by session id and confined by the host to the session's workspace root.
     **This session** is what the transcript touched, derived by
     `SessionFiles.derive` — every read, write, edit and `present` declaration, under
-    the tool's exact spelling. That second list is kept deliberately: it is the only
-    one that can name a file by the spelling a delivered card carries, so it is what
-    the card's `initialPath` selects from. Content is read on demand through
+    the tool's exact spelling. That second list is kept deliberately: it is what
+    records the session's own spelling of a file, which is the spelling the
+    preview's transcript cache is keyed by. Content is read on demand through
     `workspaceFiles/read`, which is scoped by session id, not by directory. **A
     `present` declaration is a touch** (`FileTouch.PRESENTED`,
     `model/SessionFiles.kt`), and that is load-bearing: a card's tap arrives as
-    the panel's `initialPath` and is selected only on an exact path match, so a
-    declared path with no row made the card's tap open the *list* instead of the
-    file. It is not a rare shape: of the 1,551 paths declared by `present` across
-    this host's 420 journals, 1,143 had no row under the old read/write/edit rule
-    — 765 of them because `present` named the file relatively where every
-    `write`/`edit` named it absolutely, and 378 because the file was produced by
-    something that is not a mutation at all (a shell redirect, a subagent, or it
-    already existed). Paths keep their exact spelling, so one file under two
-    spellings is two rows *in that list*. On the tree the two spellings resolve to
-    one row and merge into one mark (`model/WorkspaceExplorer.kt`), which is where
-    the tree and the list are allowed to disagree — one is an annotation on the
-    filesystem, the other a record of what the session said.
+    the panel's `initialPath` and the panel used to select it only on an exact path
+    match, so a declared path with no row made the card's tap open the *list*
+    instead of the file. It is not a rare shape: of the 1,551 paths declared by
+    `present` across this host's 420 journals, 1,143 had no row under the old
+    read/write/edit rule — 765 of them because `present` named the file relatively
+    where every `write`/`edit` named it absolutely, and 378 because the file was
+    produced by something that is not a mutation at all (a shell redirect, a
+    subagent, or it already existed). Paths keep their exact spelling, so one file
+    under two spellings is two rows *in that list*; on the tree the two spellings
+    resolve to one row and merge into one mark (`model/WorkspaceExplorer.kt`),
+    which is where the tree and the list are allowed to disagree — one is an
+    annotation on the filesystem, the other a record of what the session said.
+    And the panel no longer *needs* a row to open a focus: `initialPath` is kept
+    even when the derivation has none, and only a selection the list itself once
+    held (`listed`) is dropped when the list stops holding it. A focus opens the
+    panel on **This session**, the mode whose rows are addressed the way a card's
+    path is.
 12. **Content search latches off per deployment.** A host with no content index
     ("session search is unavailable/disabled") fails every call the same way; the
     ViewModel latches that and stops sending the RPC. It is also not reachable
@@ -799,3 +804,25 @@ Extended the same night: **tests count as builds.** A subagent may write tests b
 them, for the same reason — three agents running `:app:testDebugUnitTest` is three Gradle runs
 plus three Kotlin daemons. The orchestrating session builds and tests, batched, top-level, and
 feeds the output back. A subagent's job is code, reasoning and host probing.
+
+## trap: mass "unresolved reference" from stale incremental state, not from code
+
+`FilesPanel.kt` reported **27 unresolved references** to imported symbols — `DiagLazyList`,
+`DiagScrollColumn`, `diagDrag`, `diagOffset`, `previewFormatOf`, `clickableNoRipple`,
+`shortenPath` — at **import lines and use sites**, while every one of those symbols was
+declared exactly once in the tree and the package line and all 74 imports were byte-identical
+to a commit whose main sources had compiled minutes earlier. The tree was clean, `git diff`
+against the commit was empty, and there was exactly one import block.
+
+**It was not the code and not a merge.** `rm -rf app/build` and rebuild: `BUILD SUCCESSFUL`,
+0 errors. `org.gradle.caching=true` with a freshly created worktree is the mechanism —
+Kotlin incremental state crossed trees and the compiler described a state that did not exist.
+
+Two things this costs if unknown. First, it looks exactly like a broken commit, so it invites
+a fix to code that compiles. Second, the shape matches an unclosed block comment (see the trap
+above), so the first instinct is to hunt a stray `/*` that is not there.
+
+**Before believing a mass unresolved-reference failure:** confirm `git status` is empty and
+`git diff <commit>` is empty, confirm the symbols exist, then wipe `app/build` and rebuild
+before changing a line. And note this is the second trap here whose lesson is *the compiler is
+describing something that is not real*.

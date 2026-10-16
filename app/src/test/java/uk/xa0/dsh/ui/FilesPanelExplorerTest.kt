@@ -3,7 +3,6 @@ package uk.xa0.dsh.ui
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
-import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -83,27 +82,44 @@ class FilesPanelExplorerTest {
         ),
     )
 
-    @Composable
-    private fun panel(onList: (String) -> Unit = {}) {
-        // Single-pane: 400dp is below the 720dp two-pane cut.
-        Box(Modifier.size(width = 400.dp, height = 800.dp)) {
-            FilesPanel(
-                files = SessionFiles.derive(entries),
-                root = cwd,
-                explorer = ExplorerWiring(
-                    state = ExplorerState.Ready(listing),
-                    onList = onList,
-                    onReload = {},
-                ),
-                modifier = Modifier.fillMaxSize(),
-            )
+    /**
+     * The panel under the app's own theme, in a box the size of a phone (400dp is
+     * below the 720dp two-pane cut, so the list and the preview swap rather than
+     * sitting side by side), with the listing already answered.
+     *
+     * A plain function around the rule's own content lambda, as
+     * `FilesPanelTest.show` is. A `@Composable` member helper called inside
+     * `DshTheme { }` is the shape that reported `receiver type mismatch` at
+     * `DshTheme` and `@Composable invocations can only happen from the context of
+     * a @Composable function` at the helper (`cfc78ae`, and the handoff's trap on
+     * stale incremental state that imitates it), because the `DshTheme` object won
+     * over the composable. Theme and real composables go directly in the content
+     * lambda instead.
+     */
+    private fun show(onList: (String) -> Unit = {}) {
+        rule.setContent {
+            DshTheme {
+                Box(Modifier.size(width = 400.dp, height = 800.dp)) {
+                    FilesPanel(
+                        files = SessionFiles.derive(entries),
+                        root = cwd,
+                        explorer = ExplorerWiring(
+                            state = ExplorerState.Ready(listing),
+                            onList = onList,
+                            onReload = {},
+                        ),
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
         }
+        rule.waitForIdle()
     }
 
     /** The reported symptom: the panel is the workspace, not the session's dozen rows. */
     @Test
     fun `the panel opens on the listing and keeps the session list one tap away`() {
-        rule.setContent { DshTheme { panel() } }
+        show()
 
         rule.onNodeWithText("Browse").assertExists()
         rule.onNodeWithText("This session").assertExists()
@@ -128,7 +144,7 @@ class FilesPanelExplorerTest {
      */
     @Test
     fun `a mark is drawn only on the file the session touched`() {
-        rule.setContent { DshTheme { panel() } }
+        show()
 
         rule.onNodeWithText("REPORT.md").assertExists()
         rule.onNodeWithText("notes.txt").assertExists()
@@ -137,7 +153,7 @@ class FilesPanelExplorerTest {
 
     @Test
     fun `a hidden file is behind the toggle`() {
-        rule.setContent { DshTheme { panel() } }
+        show()
 
         rule.onNodeWithText(".secret").assertDoesNotExist()
 
@@ -150,7 +166,7 @@ class FilesPanelExplorerTest {
     @Test
     fun `descending asks for the child's workspace path`() {
         val asked = mutableListOf<String>()
-        rule.setContent { DshTheme { panel(onList = { asked += it }) } }
+        show(onList = { asked += it })
 
         rule.onNodeWithText("out").performClick()
 
