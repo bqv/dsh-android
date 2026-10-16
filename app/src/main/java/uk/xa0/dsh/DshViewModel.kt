@@ -56,6 +56,8 @@ import uk.xa0.dsh.model.providerRank
 import uk.xa0.dsh.model.withRunning
 import uk.xa0.dsh.model.warrantsIdleAlert
 import uk.xa0.dsh.model.landingSessionId
+import uk.xa0.dsh.model.activeTaskCounts
+import uk.xa0.dsh.model.automationTasksFrom
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.ExplorerState
 import uk.xa0.dsh.model.WorkspaceEntry
@@ -218,6 +220,21 @@ data class SessionItem(
     val isSubagent: Boolean,
     /** A provisional session with nothing in it yet; the host sends `title: null`. */
     val blank: Boolean = false,
+    /**
+     * How many **active** scheduled tasks deliver into this session.
+     *
+     * The host's `schedule/catalog` answer, folded per session; zero covers both "no
+     * task" and "the catalog read has never settled". A host running without the
+     * Schedule bundle answers that call with an error and every row stays at zero,
+     * which is exactly how the app rendered before automations existed.
+     *
+     * A session with a task is an ordinary session — it keeps its Workspace and its
+     * row — so this is a *mark*, not a classification. The rules that read it are the
+     * landing preference (see [uk.xa0.dsh.model.landingSessionId]) and the
+     * idle-notification mute (see [uk.xa0.dsh.model.warrantsIdleAlert]); the drawer
+     * draws it as the web's clock mark.
+     */
+    val scheduledTaskCount: Int = 0,
     /** Set on subagent sessions, which nest under their parent in the tree. */
     val parentSessionId: String? = null,
     /** The real subagent title, from the parent's `subagentCatalog` projection. */
@@ -451,7 +468,8 @@ private const val MAX_PREVIEW_IMAGE_BYTES = 2 * 1024 * 1024
  *
  * The new-session hero takes typing like any other composer and what is typed there is
  * as easy to lose, but there is no session id to file it under. It cannot collide with
- * one: session ids are `session-…` or `dsh-automation-session-…`.
+ * one: session ids all begin `session-` (the old `dsh-automation-session-` shape is
+ * gone with the third-party plugin that minted it — see `model/Automations.kt`).
  */
 const val PENDING_DRAFT_KEY = "pending"
 
@@ -2312,6 +2330,40 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val membershipHold = MembershipHold()
 
+    /**
+     * How many active scheduled tasks each session hosts, from `schedule/catalog`.
+     *
+     * Held here rather than read per row: the catalog is one host-wide answer, so one
+     * read marks every row, and a roster pull that arrives before the read settles keeps
+     * the previous sample instead of blanking every mark. A host without the Schedule
+     * bundle never answers the call, the map stays empty, and nothing downstream draws a
+     * mark — the state this app was in before it knew the concept.
+     *
+     * The same snapshot answers both the drawer's clock mark and the landing preference,
+     * so the two cannot disagree about which sessions host a schedule.
+     */
+    private var scheduleCounts: Map<String, Int> = emptyMap()
+
+    /**
+     * Re-reads the host's scheduled-task catalog.
+     *
+     * `schedule/catalog` takes no arguments and returns a bare array, so it rides
+     * [DshClient.rpcRaw] rather than [DshClient.rpc] — the latter reads `value` as an
+     * object and would answer an empty one. A *successful* read replaces the map; a
+     * failed one keeps the last sample, which is the web's rule too
+     * (`createCatalogSource`: a refresh republishes loading over the last successful
+     * read). That matters because the read is issued from [fetchSessions], and a
+     * transient host hiccup must not read as "every task vanished".
+     */
+    private suspend fun refreshScheduleCounts() {
+        runCatching {
+            val value = client.rpcRaw("schedule/catalog")
+            activeTaskCounts(automationTasksFrom(value as? JSONArray))
+        }.onSuccess { counts ->
+            scheduleCounts = counts
+        }
+    }
+
     /** The last running summary written to the diag file, so an unchanged pull is silent. */
     private var lastRunningSummary: String? = null
 
@@ -3670,12 +3722,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             //
             // "Conversation" is [uk.xa0.dsh.model.landingSessionId]'s rule, and it
             // is more than "the first row": the roster is ordered by `updatedAt`
-            // descending, so a scheduled automation run — which is what the
-            // automations are for — outranks every chat on the host for as long as
-            // the schedule keeps firing, and a fresh open would land on one every
-            // time. The rule passes over runs and subagents; nothing is hidden by
-            // it, and a run is still what opens when there is nothing else with
-            // content.
+            // descending, so a session an active schedule delivers into outranks
+            // every chat on the host for as long as the schedule keeps firing, and a
+            // fresh open would land on one every time. The rule passes over those
+            // rows and subagents; nothing is hidden by it, and such a row is still
+            // what opens when there is nothing else with content.
             //
             // The explicit pick is read (and consumed) here, in the same
             // uninterrupted main-thread block as the open below, so it cannot be
@@ -4945,6 +4996,10 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         val pull = runningBook.beginPull()
         val value = client.rpc("session/list", JSONObject().put("_request", JSONObject()))
         val items = value.optJSONArray("items") ?: JSONArray()
+        // The scheduled-task marks, read beside the roster so the rows this pull builds
+        // already carry them. One host-wide read, and a failure is not evidence that a
+        // task ended — see [refreshScheduleCounts].
+        refreshScheduleCounts()
         // A subagent's own stored title is its opening prompt ("You are ..."), which
         // the web UI shows only as a subtitle. The real title — and the `mode` its
         // address needs — live in the *parent's* `subagentCatalog` projection.
@@ -5032,6 +5087,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private fun sessionItemOf(
         item: JSONObject,
         catalog: Map<String, Pair<String, String>> = emptyMap(),
+        scheduled: Map<String, Int> = scheduleCounts,
     ): SessionItem? {
         val id = item.str("sessionId")
         if (id.isEmpty()) return null
@@ -5076,6 +5132,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             running = item.optBoolean("running"),
             isSubagent = item.str("origin") == "subagent",
             blank = blank,
+            scheduledTaskCount = scheduled[id] ?: 0,
             parentSessionId = parentSessionId,
             subagentLabel = subagent?.first?.takeIf { it.isNotBlank() },
             subagentMode = subagent?.second?.takeIf { it.isNotBlank() },
@@ -5522,11 +5579,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // A session that stopped is the one thing this client can tell you
             // about that the web UI cannot: you may have walked away mid-turn.
             justFinished.forEach { sessionId ->
-                // Neither a subagent nor an automation run is worth a "Done" buzz:
-                // nobody is waiting on either. Its row still takes the green "done"
-                // dot, which is the quiet half of the same signal, and both still
-                // speak up when something is stuck or has failed.
-                if (!warrantsIdleAlert(sessionId, app.attention.isSubagent(sessionId))) {
+                // Neither a subagent nor a session hosting an active schedule is worth
+                // a "Done" buzz: nobody is waiting on either. Its row still takes the
+                // green "done" dot, which is the quiet half of the same signal, and both
+                // still speak up when something is stuck or has failed. The count comes
+                // from the roster row, which carries the one catalog sample the drawer's
+                // mark is drawn from.
+                val hosted = sessions.firstOrNull { it.id == sessionId }?.scheduledTaskCount ?: 0
+                if (!warrantsIdleAlert(subagent = app.attention.isSubagent(sessionId), scheduledTaskCount = hosted)) {
                     return@forEach
                 }
                 val title = sessions.firstOrNull { it.id == sessionId }?.title

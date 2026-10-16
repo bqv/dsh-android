@@ -39,8 +39,8 @@ import uk.xa0.dsh.SessionItem
  *    `DshViewModel.warnOnMissingMembers` logs exactly that divergence). "0" would be a
  *    lie here; the truthful statement is that the sessions have not arrived.
  *  * **[WorkspaceGroupState.Filtered]** — every member is known and none of them is drawn
- *    under this header: the Archived switch is off, they are subagent sessions (never
- *    top-level rows), or they are automation runs this drawer lists in their own section.
+ *    under this header: the Archived switch is off, or they are subagent sessions (never
+ *    top-level rows).
  *
  * They therefore draw different words — see [placeholder] — and they differ in the header's
  * count as well: a group whose membership has not arrived prints no figure at all
@@ -112,9 +112,9 @@ enum class WorkspaceGroupState {
     /**
      * Every member is known, and none of them is drawn under this header.
      *
-     * The drawer's own view rules emptied the group — the Archived switch, the rule that
-     * a subagent is reached through its parent rather than as a top-level row, or the
-     * automation lift-out. The group still draws, and says so: see [placeholder].
+     * The drawer's own view rules emptied the group — the Archived switch, or the rule that
+     * a subagent is reached through its parent rather than as a top-level row. The group
+     * still draws, and says so: see [placeholder].
      */
     Filtered,
 }
@@ -126,7 +126,7 @@ enum class WorkspaceGroupState {
  *   Deliberately the *unfiltered* set: a group is never called empty because a filter
  *   hid its members.
  * @param visibleIds the members the drawer would draw right now — after the query, the
- *   Archived switch, the subagent rule and the automation lift-out.
+ *   Archived switch and the subagent rule.
  * @param knownIds every session id the roster has delivered, filters ignored. A member
  *   that is archived or a subagent is still *known*; a member that is merely not there
  *   yet is not.
@@ -297,10 +297,9 @@ object WorkspaceCopy {
      * Deliberately not "No sessions": the directory holds sessions, and at least one of the
      * rules that can empty a group — the Archived switch — is a control the reader can turn
      * back on, which is a different fact from a directory the host says holds nothing.
-     * Deliberately not "your filters" either: the other two rules — a subagent is reached
-     * through its parent rather than as a top-level row, and an automation run is listed
-     * under its own section — are the drawer's own, not the reader's, so the sentence names
-     * the filters without claiming who set them.
+     * Deliberately not "your filters" either: the other rule — a subagent is reached
+     * through its parent rather than as a top-level row — is the drawer's own, not the
+     * reader's, so the sentence names the filters without claiming who set them.
      */
     const val SESSIONS_HIDDEN = "Sessions hidden by filters"
 

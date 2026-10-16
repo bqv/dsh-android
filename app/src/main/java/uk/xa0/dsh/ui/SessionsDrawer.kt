@@ -79,9 +79,8 @@ import androidx.compose.ui.unit.dp
 import uk.xa0.dsh.PendingKind
 import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
-import uk.xa0.dsh.model.isAutomationSessionId
-import uk.xa0.dsh.model.partitionAutomations
 import uk.xa0.dsh.model.holdOrder
+import uk.xa0.dsh.model.scheduledTaskMarkLabel
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.WorkspaceCopy
 import uk.xa0.dsh.model.WorkspaceGroupState
@@ -116,13 +115,14 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * One collapsible group in the sidebar: a Workspace, the flat list, "Ungrouped", or
- * the automation runs.
+ * One collapsible group in the sidebar: a Workspace, the flat list, or "Ungrouped".
  *
  * [icon] is null for every group that has a *place* rather than a *kind* — a
  * Workspace, the flat list, Ungrouped — and those keep the folder pair they have
- * always had. Only the automation section names an icon of its own, because only it
- * is a different sort of thing: a Workspace is a directory, this is a schedule.
+ * always had. Only the catch-all names an icon of its own (an inbox, for sessions
+ * outside every directory). There is deliberately no section for sessions a schedule
+ * delivers into: the host's Schedule subsystem marks such a row in place rather than
+ * separating it, so the drawer draws the mark and leaves the row where it belongs.
  */
 private data class Section(
     val key: String,
@@ -133,17 +133,16 @@ private data class Section(
      * The Workspace a new session would be created in, or null for a group that is not
      * a directory.
      *
-     * This is what decides the header's `+`. It used to be a blacklist of the two
-     * synthetic keys, which meant the Automations section offered a `+` that would have
-     * asked the host for a session in a Workspace called `__automations__` — a name no
-     * registry has. A group draws the button only when it can say where the session
-     * goes.
+     * This is what decides the header's `+`. It used to be a blacklist of synthetic
+     * keys, which meant a synthetic group offered a `+` that would have asked the host
+     * for a session in a Workspace whose name no registry has. A group draws the button
+     * only when it can say where the session goes.
      */
     val createIn: String? = null,
     /**
      * Why a Workspace group draws the rows it does, or null for the groups that are not
-     * a Workspace (the flat list, the catch-all and Automations). Those three exist only
-     * when they have rows, so their count is always a fact.
+     * a Workspace (the flat list and the catch-all). Those two exist only when they have
+     * rows, so their count is always a fact.
      *
      * It is carried rather than recomputed at draw time because the two facts it decides
      * belong *only* to Workspaces: what a zero-row group says, and whether it may print a
@@ -431,7 +430,6 @@ fun SessionsDrawer(
         // Hiding it then looked permanent — the registry does not change again, so
         // nothing re-emitted the section.
         val known = sessions.associateBy { it.id }
-        val automationIds = matched.filter { isAutomationSessionId(it.id) }.map { it.id }.toSet()
 
         // Every id the roster reports as live work, which is what a group header's blue is
         // read from. `SessionItem.running` is `RunningBook`'s answer and the only liveness
@@ -467,29 +465,15 @@ fun SessionsDrawer(
             return out
         }
 
-        // With no runs to lift, every expression below reduces to what it was before
-        // this existed: `automationIds` is empty, `claimedIds` *is* the Workspace's own
-        // list, `conversations` is `matched`, and `automationSection` is null — no
-        // header, no empty group, nothing on screen to hint the app knows the concept.
-        //
-        // Automation runs are lifted out of the workspace groups and listed together,
-        // the way the web surfaces them: a scheduled run is not a conversation someone
-        // started in that directory, and fifty of them turn a Workspace into a log.
-        // Nothing is hidden — every row is here, in its own section.
-        val (automationRuns, conversations) = partitionAutomations(matched) { it.id }
-        val automationSection = holdOrder(automationRuns, heldOrder)
-            .takeIf { it.isNotEmpty() }
-            ?.let { runs ->
-                Section(
-                    key = AUTOMATIONS,
-                    title = "Automations",
-                    rows = runs.flatMap { run -> disclose(run) },
-                    // A schedule, not a folder: this group is a kind of session
-                    // rather than a place one lives.
-                    icon = Icons.Rounded.Schedule,
-                    run = workspaceRunState(runs.map { it.id }, live, known.keys),
-                )
-            }
+        // A session a schedule delivers into is *not* lifted out. Under the old
+        // third-party plugin each run was its own throwaway session, and lifting those
+        // out of the Workspaces kept fifty of them from turning a directory into a log.
+        // The host's Schedule subsystem reused the reader's own session instead, so such
+        // a row is an ordinary member of its directory and belongs there; the drawer
+        // marks it with a clock (see [SessionRow]) exactly as the web does, and nothing
+        // is separated, hidden or reordered. `conversations` is therefore the matched
+        // roster unchanged, and there is no automation section.
+        val conversations = matched
 
         if (!groupByWorkspace) {
             val ordered = holdOrder(conversations, heldOrder)
@@ -501,7 +485,6 @@ fun SessionsDrawer(
                     run = workspaceRunState(ordered.map { it.id }, live, known.keys),
                 ),
             )
-            automationSection?.let { sections += it }
             return@remember sections
         }
 
@@ -509,19 +492,19 @@ fun SessionsDrawer(
         val result = ArrayList<Section>()
 
         workspaces.forEach { workspace ->
-            val claimedIds = workspace.sessionIds.filter { it !in automationIds }
+            val claimedIds = workspace.sessionIds
             var items = claimedIds.mapNotNull { byId[it] }
             // Manual order is the host's (`workspace.sessionIds`) and does not move
             // on its own, so only the newest-first view needs holding.
             if (orderByUpdated) items = holdOrder(items, heldOrder)
             claimed += claimedIds
             // Every Workspace the registry reports is drawn, always: a Workspace whose
-            // members are all hidden by the Archived switch (or by the subagent rule, or
-            // by the automation lift-out) is still a directory that exists, and hiding it
-            // meant a persisted filter could erase it from the sidebar with nothing on
-            // screen to say why. That is a deliberate divergence from the web's
-            // `deriveGroups`, which drops a group with no visible members; see
-            // `model/WorkspaceGroups.kt` and `docs/PARITY.md`.
+            // members are all hidden by the Archived switch (or by the subagent rule) is
+            // still a directory that exists, and hiding it meant a persisted filter could
+            // erase it from the sidebar with nothing on screen to say why. That is a
+            // deliberate divergence from the web's `deriveGroups`, which drops a group
+            // with no visible members; see `model/WorkspaceGroups.kt` and
+            // `docs/PARITY.md`.
             //
             // The three zero-row cases are not the same claim, though, and the sidebar
             // must not draw them alike: "this directory accounts for no session" is a fact
@@ -548,10 +531,9 @@ fun SessionsDrawer(
                 createIn = workspace.id,
                 state = state,
                 containsCurrent = currentId != null && currentId in workspace.sessionIds,
-                // Read from the members the *section* accounts for, so a run the drawer lifted
-                // into the Automations section does not tint two headers at once. Unfiltered on
-                // purpose: a running member the Archived switch has hidden still makes this
-                // directory a place where work is happening.
+                // Read from the members the *section* accounts for. Unfiltered on
+                // purpose: a running member the Archived switch has hidden still makes
+                // this directory a place where work is happening.
                 run = workspaceRunState(claimedIds, live, known.keys),
             )
         }
@@ -573,8 +555,6 @@ fun SessionsDrawer(
                 run = workspaceRunState(rest.map { it.id }, live, known.keys),
             )
         }
-        // Last, after the live work: a run's session is history the moment it ends.
-        automationSection?.let { result += it }
         result
     }
 
@@ -1384,6 +1364,19 @@ private fun SessionRow(
             }
             when {
                 dot != null -> StateDot(state = dot, size = 10.dp)
+                // The web's clock mark (`SessionScheduleMark`): the row's leading
+                // cell is offered to it only while the row's own primary state is
+                // idle, so a live turn or a pending interaction keeps the status dot
+                // here and never mounts the mark. The count comes from the one
+                // `schedule/catalog` sample the whole roster shares — see
+                // `SessionItem.scheduledTaskCount` — so this mark and the landing
+                // rule cannot disagree about which sessions host a schedule.
+                session.scheduledTaskCount > 0 -> Icon(
+                    Icons.Rounded.Schedule,
+                    contentDescription = scheduledTaskMarkLabel(session.scheduledTaskCount),
+                    tint = colors.labelTertiary,
+                    modifier = Modifier.size(13.dp),
+                )
                 // Nested rows keep the "member of" glyph when they have no status
                 // of their own. The user explicitly likes it; the earlier problem
                 // was that activity was not being shown, not the glyph.
@@ -1609,7 +1602,6 @@ private fun MiniChoice(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 private const val UNGROUPED = "__ungrouped__"
-private const val AUTOMATIONS = "__automations__"
 private const val FLAT = "__flat__"
 
 /** How many sessions a collapsed section shows before "Show N more". */
