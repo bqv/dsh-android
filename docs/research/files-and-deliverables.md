@@ -246,8 +246,18 @@ type directly.
 
 ### `ui/components/FilesPanel.kt`
 
-`FilesPanel(files, modifier, root, cached, loader, initialPath, onSelect)`
-(`FilesPanel.kt:82-98`). A list of the touched files (icon, basename, directory
+`FilesPanel(files, modifier, root, cached, loader, initialPath, onSelect, explorer)`
+(`FilesPanel.kt`). Two modes when the parent supplies an `ExplorerWiring` and a
+`root`: **This session**, the touched-file list below, and **Browse**, the
+workspace tree (see `WorkspaceExplorer.kt` above). A plain open lands on Browse,
+because a panel derived only from the session's activity is what read as broken; a
+caller that named a file (`initialPath` — a deliverable card's tap) lands on This
+session, which is the only list that can select an arbitrary transcript spelling.
+Switching modes clears the selection: the two lists address one file under
+different spellings. Switching the *hidden* toggle lives in the explorer pane and
+resets with the panel.
+
+The session list: a list of the touched files (icon, basename, directory
 tail, touch badges) with a wrapped, line-numbered monospace preview. From 720dp
 the list and preview sit side by side; below that they swap, with a back control
 (`FilesPanel.kt:148-195`). `loader == null` uses `cached` only, and the loader is
@@ -257,7 +267,49 @@ a `Retry` (`FilesPanel.kt:372-376`), never a fallback to older content. Empty
 states: no files at all (`No files yet`, `FilesPanel.kt:213-219`), `Select a
 file to preview.` (`:368`), `Reading…` (`:369`, `:381`), `Nothing read from this
 file in this session.` when no loader is wired and nothing is cached (`:383`),
-and `This file is empty.` for a zero-line page (`:388`).
+and `This file is empty.` for a zero-line page (`:388`). The explorer's own
+states are `Loading…`, `Empty directory`, the host's refusal with `Retry`, the
+web's `Too many entries, showing only some of them.` for a truncated level, and
+the standing line `A file with no mark has not been touched by this session.`
+
+### `model/WorkspaceExplorer.kt` (pure, no Android types)
+
+Added when the panel became an explorer as well as a session record. The host's
+`list` surface is a **one-shot call**: `workspaceFiles/list(workspaceFileScopeId,
+path)`, scoped by session id, confined to the session's workspace root, with no
+cursor and no paging — only `maxEntries` (default 2000) and a `truncated` flag.
+`path` must be non-empty, so the root is asked for as `.` (the host's `contains`
+is documented as true for the parent itself, so `.` names the workspace root
+without this client having to agree about its spelling); every level below is the
+`path` the reply itself returned, joined with the child's name by `/`, which the
+wire type explicitly sanctions. There is a `workspaceFiles/changes` watch, but the
+web's tree does not subscribe to it either, and the app does not.
+
+- `WorkspaceEntry(name, kind, size)`, `WorkspaceEntryKind{FILE,DIRECTORY,OTHER}`,
+  `WorkspaceListing(path, entries, truncated)`, `ExplorerState{Idle,Loading,Ready,Failed}`.
+- `relativeToWorkspace(path, cwd)` resolves a transcript spelling onto a
+  workspace-relative one: absolute under the cwd is stripped, relative passes
+  through, `.` and `..` are collapsed, and an escape above the root, the root
+  itself, or an absolute path outside it answers **null** rather than a guess.
+  That null is the whole reason a badge cannot be wrong: the host would refuse to
+  list a directory outside the workspace, so no row could carry such a path.
+- `badges(files, cwd)` keys `SessionFiles.derive`'s rows by that resolved path and
+  **merges** two spellings of one file into one mark (counts add, first/last seqs
+  are the extremes, touch kinds are the union). An absent key means the session
+  has not touched that file — a fact, not a gap.
+- `visibleEntries` filters dot-prefixed rows behind the toggle *unless* the
+  session touched them (a mark is the session's own record, and hiding a file it
+  edited would fail the panel's one job to honour a filter about exploring), and
+  orders directories first, then by a `Intl.Collator`-shaped natural name order
+  (`file2` before `file10`).
+- `crumbs(relative, rootName)` roots at the workspace and offers no "up": the host
+  confines listings, so there is nothing above to list.
+
+The ViewModel half is `listWorkspaceDirectory` / `reloadWorkspaceExplorer` /
+`resetWorkspaceExplorer` (`DshViewModel.kt`), with a per-level cache
+(`explorerLevels`) held for one panel open and a generation counter so a
+superseded level cannot land after a newer one. Reload is the only invalidation,
+as in the web.
 
 ### `ui/components/DeliverableRow.kt`
 
@@ -310,7 +362,12 @@ FilesSurface(
     root = current?.cwd ?: header?.cwd,
     focus = filesFocus,
     loader = fileLoader,
-    onClose = { showFiles = false },
+    explorer = ExplorerWiring(
+        state = workspaceExplorer,
+        onList = vm::listWorkspaceDirectory,
+        onReload = vm::reloadWorkspaceExplorer,
+    ),
+    onClose = { vm.resetWorkspaceExplorer(); showFiles = false },
     modifier = Modifier.weight(1f),
 )
 ```
@@ -318,21 +375,35 @@ FilesSurface(
 `derive`/`previews` are cheap enough to recompute from the row list on change;
 the parent remembers them on the list identity, and the loader is rebuilt per
 session id (`DshViewModel.kt:3504`) so a stale reader cannot resolve paths
-against the previous workspace.
+against the previous workspace. The explorer's state is a flow of its own
+(`vm.workspaceExplorer`) rather than part of `UiState`, like the directory
+browser's: a listing failure belongs to the panel, not to the session error
+banner. Both close paths — the surface's back bar and the header's Files toggle —
+call `resetWorkspaceExplorer()`, so a reopened panel lists the directory again
+instead of drawing a snapshot from whenever it was last looked at.
 
-### c. A real Files tree
+### c. The Files tree, and what it does not do
 
-If true destination parity is wanted later, the web behaviour in §1 is the
-spec: `workspaceFiles/list` per expanded level, directories first + numeric
-collation, a `Reload` that re-lists every expanded path, and the `text` route
-via `workspaceFiles/read`. The app has no such tree.
+The web behaviour in §1 is the spec and the app now ports its shape: one
+`workspaceFiles/list` call per opened level, directories first with natural
+collation, a `Reload` that re-lists the current level, and the `text` route via
+`workspaceFiles/read`. What is deliberately *not* ported: the web's tree is the
+only Files list, while the app keeps the transcript-derived list as a second mode
+(the divergence is recorded in `docs/PARITY.md`); and the tree subscribes to no
+watch, exactly as the web's does not.
 
 ## 7. What is left
 
-- **No live directory tree.** The app's panel is transcript-derived; a directory
-  is not a row, and a file the session neither touched nor *declared* is not one
-  either. A `present` declaration is a row (`FileTouch.PRESENTED`), which is what
-  keeps a delivered card's path selectable.
+- **The explorer lists one level at a time and does not page.** `workspaceFiles/list`
+  has no cursor, so the host's `maxEntries` (2000 by default) is the only bound and
+  the panel reports `truncated` rather than offering `Load more`. Hidden rows are
+  client-filtered behind a toggle; `node_modules`-style noise is *not* on any
+  deny-list — that would be an invented policy on top of the one rule the host and
+  the web already share (a dot prefix), and directories-first ordering plus a lazy
+  list is what keeps a large directory navigable.
+- **A mark is the session's record, and the panel says so.** Absence of a mark
+  means "not touched by this session", not "unknown"; the explorer states that in
+  words under the list. The listener should not have to infer it.
 - **No pagination / `Load more`** in the preview: the loader reads one page
   (`offset: 1`, `FILE_PREVIEW_LINES`) and the panel says `Showing the first N
   lines` when the host cut it short (`FilesPanel.kt:395`); nothing pages past it

@@ -139,6 +139,7 @@ import uk.xa0.dsh.ui.components.Composer
 import uk.xa0.dsh.ui.components.DeliverableRow
 import uk.xa0.dsh.ui.components.DotState
 import uk.xa0.dsh.ui.components.DshMark
+import uk.xa0.dsh.ui.components.ExplorerWiring
 import uk.xa0.dsh.ui.components.FilesPanel
 import uk.xa0.dsh.ui.components.GoalBar
 import uk.xa0.dsh.ui.components.JobsSeat
@@ -220,6 +221,9 @@ fun ChatScreen(vm: DshViewModel) {
     val directoryLoading by vm.directoryLoading.collectAsStateWithLifecycle()
     val directoryBusy by vm.directoryBusy.collectAsStateWithLifecycle()
     val directoryError by vm.directoryError.collectAsStateWithLifecycle()
+    // The Files panel's explorer half. A flow of its own, like the browser's: a
+    // listing failure belongs to the panel, not to the session error banner.
+    val workspaceExplorer by vm.workspaceExplorer.collectAsStateWithLifecycle()
 
     // A live clock for the running turn's status line, ticked once a second. Gated
     // on the session's *own* turn (`ownTurnInFlight`) like the row it feeds, so a
@@ -863,6 +867,10 @@ fun ChatScreen(vm: DshViewModel) {
                 filesAvailable = ui.currentSessionId != null,
                 onFiles = {
                     filesFocus = null
+                    // Closing the panel drops the tree's cache with it, so
+                    // reopening reads the directory again rather than drawing a
+                    // snapshot from whenever it was last looked at.
+                    if (showFiles) vm.resetWorkspaceExplorer()
                     showFiles = !showFiles
                 },
                 lineage = current?.let { subagentRollups[it.id] },
@@ -903,7 +911,21 @@ fun ChatScreen(vm: DshViewModel) {
                     root = current?.cwd ?: header?.cwd,
                     focus = filesFocus,
                     loader = fileLoader,
-                    onClose = { showFiles = false },
+                    // The panel decides whether Browse is offered: the wiring is
+                    // always here, and a session with no cwd gets no mode tabs
+                    // because `workspaceFiles/list` would be confined to a root
+                    // this app cannot name.
+                    explorer = ExplorerWiring(
+                        state = workspaceExplorer,
+                        onList = vm::listWorkspaceDirectory,
+                        onReload = vm::reloadWorkspaceExplorer,
+                    ),
+                    onClose = {
+                        // The tree is a per-open reading; leaving the cache up
+                        // would show a stale directory the next time it opens.
+                        vm.resetWorkspaceExplorer()
+                        showFiles = false
+                    },
                     modifier = Modifier.weight(1f),
                 )
             } else if (shownView == ChatView.TERMINAL) {
@@ -2219,6 +2241,12 @@ private fun FilesSurface(
      * a file the agent merely mentioned looked like it had no contents.
      */
     loader: uk.xa0.dsh.model.WorkspaceFileLoader? = null,
+    /**
+     * The workspace listing, for the panel's Browse mode. Null — no host, or no
+     * cwd to be relative to — leaves the panel as the session's own list, which
+     * is what it was before there was a tree to browse.
+     */
+    explorer: ExplorerWiring? = null,
 ) {
     val colors = DshTheme.colors
     Column(
@@ -2272,6 +2300,7 @@ private fun FilesSurface(
             cached = previews,
             loader = loader,
             initialPath = focus,
+            explorer = explorer,
             modifier = Modifier.weight(1f),
         )
     }

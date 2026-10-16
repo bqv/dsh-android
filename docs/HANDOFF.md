@@ -216,10 +216,16 @@ editing the live copy. There is no install step to forget.
     replacement is model-visible shadow, not a transcript row: clearing the
     shadowed range erased conversation the user had already seen, so replacement
     copies are skipped as rows instead.
-11. **The Files pane lists what the session touched**, from the transcript — not a
-    live directory tree. Content is read on demand through `workspaceFiles/read`,
-    which is scoped by session id, not by directory. `workspaceFiles/list` is
-    never called. **A `present` declaration is a touch** (`FileTouch.PRESENTED`,
+11. **The Files pane has two lists, and they answer different questions.** **Browse**
+    is the workspace tree: one directory level per call from `workspaceFiles/list`,
+    scoped by session id and confined by the host to the session's workspace root.
+    **This session** is what the transcript touched, derived by
+    `SessionFiles.derive` — every read, write, edit and `present` declaration, under
+    the tool's exact spelling. That second list is kept deliberately: it is the only
+    one that can name a file by the spelling a delivered card carries, so it is what
+    the card's `initialPath` selects from. Content is read on demand through
+    `workspaceFiles/read`, which is scoped by session id, not by directory. **A
+    `present` declaration is a touch** (`FileTouch.PRESENTED`,
     `model/SessionFiles.kt`), and that is load-bearing: a card's tap arrives as
     the panel's `initialPath` and is selected only on an exact path match, so a
     declared path with no row made the card's tap open the *list* instead of the
@@ -229,7 +235,10 @@ editing the live copy. There is no install step to forget.
     `write`/`edit` named it absolutely, and 378 because the file was produced by
     something that is not a mutation at all (a shell redirect, a subagent, or it
     already existed). Paths keep their exact spelling, so one file under two
-    spellings is two rows.
+    spellings is two rows *in that list*. On the tree the two spellings resolve to
+    one row and merge into one mark (`model/WorkspaceExplorer.kt`), which is where
+    the tree and the list are allowed to disagree — one is an annotation on the
+    filesystem, the other a record of what the session said.
 12. **Content search latches off per deployment.** A host with no content index
     ("session search is unavailable/disabled") fails every call the same way; the
     ViewModel latches that and stops sending the RPC. It is also not reachable

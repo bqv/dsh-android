@@ -40,7 +40,8 @@ of where the app stands against them.
 - [x] Dark + light themes from DSH tokens (`ui/theme/DshTheme.kt`)
 - [x] `workspace/follow` registry stream (`DshViewModel.ensureMuxWiring`)
 - [x] `commands/*`, `goal/*`, `permissionPresets/*`, `subagents/*`, `session/page`,
-      `session/search`, `directoryPicker/*`, `workspace/*`, `workspaceFiles/read`
+      `session/search`, `directoryPicker/*`, `workspace/*`, `workspaceFiles/read`,
+      `workspaceFiles/readBytes`, `workspaceFiles/list`
 - [ ] `settings/*` and `skills/*`. A remote browser lands in the host's `memory`
       settings scope, where every `settings/mutate` is a no-op, so the settings sheet
       holds no host settings write; the one host write it carries is
@@ -319,13 +320,18 @@ of where the app stands against them.
 
 - [ ] 38dp tab strip, r12 chips. A phone has no room for a column beside the transcript, so
       each surface takes the whole body with its own back bar instead of a strip
-- [x] Files panel. Deliberate divergence: it lists what the session *touched* — every read,
-      write and edit in the transcript — rather than a live directory tree
-      (`workspaceFiles/list` is never called), and reads content on demand through
-      `workspaceFiles/read` (`model/SessionFiles.kt`, `model/WorkspaceFileLoader.kt`,
-      `ui/components/FilesPanel.kt`). A successful `present` is a touch too
-      (`FileTouch.PRESENTED`): a delivered card's path has to be a row, or its tap
-      has nothing to select
+- [x] Files panel. Two lists over one session. **Browse** is the workspace tree: one
+      directory level at a time from `workspaceFiles/list`, rooted at the session cwd and
+      confined to the workspace by the host, with the session's own touches drawn on as
+      marks and the host's `truncated` flag reported. **This session** is the
+      transcript-derived list it has always been — every read, write, edit and `present`
+      declaration, under the tool's exact spelling — kept because it is the only list that
+      can select a file under the spelling a delivered card carries
+      (`model/SessionFiles.kt`, `model/WorkspaceExplorer.kt`, `ui/components/FilesPanel.kt`).
+      A row the session never touched carries no mark, and the panel says in words that this
+      is a fact about the session rather than missing data. Content is read on demand through
+      `workspaceFiles/read` (`model/WorkspaceFileLoader.kt`); `present` is a touch too
+      (`FileTouch.PRESENTED`), or the card's tap has nothing to select
 - [x] Terminal panel — the **Shell** tab, a real PTY over the host's `terminal`
       Remote namespace (`environment`, `shells`, `list`, `create`, `follow`, `write`,
       `resize`, `rename`, `close` in `net/TerminalClient.kt`), `follow` on the same
@@ -435,7 +441,10 @@ host settings write stays a value with a disabled control.
   app keeps them visible because it has no `hidden="until-found"` reveal to get them back.
 - **A question answers pick and typed text together** for single-select questions too. The
   wire accepts the pair; a typed note next to a pick is more useful than forcing a choice.
-- **Files panel lists touched files, not a directory tree** (see above).
+- **Files panel keeps the session's own list beside the workspace tree.** The web's Files tab
+  is the directory tree alone; the app keeps `SessionFiles.derive`'s list as a second mode,
+  because it is the only list that can select a file under the exact spelling a delivered
+  card carries (see above).
 - **Conversation view strip gap** is tightened below the web's 36px, or the second label falls
   off a narrow phone.
 - **Search snippets wrap to two lines** instead of the web's single nowrap line, so the match

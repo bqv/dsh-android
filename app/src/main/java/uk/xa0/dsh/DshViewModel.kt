@@ -57,6 +57,10 @@ import uk.xa0.dsh.model.withRunning
 import uk.xa0.dsh.model.warrantsIdleAlert
 import uk.xa0.dsh.model.landingSessionId
 import uk.xa0.dsh.model.FilePreview
+import uk.xa0.dsh.model.ExplorerState
+import uk.xa0.dsh.model.WorkspaceEntry
+import uk.xa0.dsh.model.WorkspaceEntryKind
+import uk.xa0.dsh.model.WorkspaceListing
 import uk.xa0.dsh.model.SessionHeader
 import uk.xa0.dsh.model.SessionSearch
 import uk.xa0.dsh.model.sessionForkRequest
@@ -1264,6 +1268,34 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     val directoryBusy: StateFlow<Boolean> = _directoryBusy.asStateFlow()
     /** Bumped on every listing so a superseded scan cannot land after a newer one. */
     private var directoryGeneration = 0
+
+    // -------------------------------------------------- workspace file explorer
+
+    /**
+     * The Files panel's explorer half: one directory level of the session's
+     * workspace, as `workspaceFiles/list` reports it.
+     *
+     * A flow of its own, like the directory browser's, because only the panel reads
+     * it and a listing failure must not take over the session error banner. The
+     * cache below is why a level is asked for once: the endpoint is a one-shot call
+     * with no cursor, and re-descending into a directory the reader has already
+     * seen must not be a second round trip.
+     */
+    private val _workspaceExplorer = MutableStateFlow<ExplorerState>(ExplorerState.Idle)
+    val workspaceExplorer: StateFlow<ExplorerState> = _workspaceExplorer.asStateFlow()
+
+    /**
+     * Levels already listed, keyed by their workspace-relative path — `""` is the
+     * session root. Held for as long as one session is open: a directory listing is
+     * a snapshot, and the panel's Reload is the one thing that drops it.
+     */
+    private val explorerLevels = HashMap<String, WorkspaceListing>()
+
+    /** The level the panel asked for last: what Reload re-lists, cached or not. */
+    private var explorerPath = ""
+
+    /** Bumped per request, so a superseded level cannot land after a newer one. */
+    private var explorerGeneration = 0
 
     // --------------------------------------------------------------- terminal
 
@@ -4376,6 +4408,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         followJob?.cancel()
         historyJob?.cancel()
         reducer.reset()
+        // A listed level is a path inside one workspace root; carrying it to another
+        // session would name a directory that session is not confined to.
+        resetWorkspaceExplorer()
         publishTranscript()
         _ui.value = _ui.value.copy(
             currentSessionId = null,
@@ -4747,6 +4782,131 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _directoryLoading.value = false
         _directoryError.value = null
         _directoryBusy.value = false
+    }
+
+    // -------------------------------------------------- workspace file explorer
+
+    /**
+     * Lists one directory of the open session's workspace
+     * (`workspaceFiles/list`).
+     *
+     * [path] is **workspace-relative**, and `""` is the session root. The host
+     * refuses an empty `path` outright (`gateway/bad-request`, "path is
+     * required"), so the root goes out as `"."`: the host resolves it against the
+     * workspace root its own scope lookup produced, and its `contains` is
+     * documented as true for the parent itself, so `"."` names exactly the
+     * session's workspace without this client having to agree in advance about
+     * what that root is spelled. Everything below the root travels as the
+     * relative path the host itself returned for the parent, joined with the
+     * child's name by its own rule; the app never invents a path the host has not
+     * named.
+     *
+     * The scope id is the session id, not a directory: `workspaceFiles/list` is
+     * confined to the workspace root the session header carries, which is why the
+     * panel can offer no "up" above it — the host would answer
+     * `workspace-file/outside-workspace`.
+     *
+     * A level already in the cache is published without a round trip. A miss sets
+     * [ExplorerState.Loading] and asks; the reply lands as [ExplorerState.Ready],
+     * and a refusal as [ExplorerState.Failed] with the host's own wording. Nothing
+     * is ever drawn from the previous level, because rows under a breadcrumb that
+     * names a different directory are a lie about which directory they are in.
+     */
+    fun listWorkspaceDirectory(path: String = "") {
+        explorerPath = path
+        explorerLevels[path]?.let { cached ->
+            _workspaceExplorer.value = ExplorerState.Ready(cached)
+            return
+        }
+        val sessionId = _ui.value.currentSessionId
+        _workspaceExplorer.value = ExplorerState.Loading(path)
+        if (sessionId.isNullOrBlank()) {
+            _workspaceExplorer.value = ExplorerState.Failed(path, "No open session to list from.")
+            return
+        }
+        val request = if (path.isEmpty()) "." else path
+        val generation = ++explorerGeneration
+        viewModelScope.launch {
+            runCatching {
+                val args = JSONObject()
+                    // The wire spelling of the scope lookup: the session id, not a
+                    // path. `workspaceFiles/read` uses the same one.
+                    .put("workspaceFileScopeId", sessionId)
+                    .put("path", request)
+                toWorkspaceListing(path, client.rpc("workspaceFiles/list", args))
+            }.onSuccess { listing ->
+                if (generation != explorerGeneration) return@onSuccess
+                explorerLevels[path] = listing
+                _workspaceExplorer.value = ExplorerState.Ready(listing)
+            }.onFailure { error ->
+                if (generation != explorerGeneration) return@onFailure
+                if (error is DshAuthException) {
+                    onAuthFailure("workspaceFiles/list", error)
+                    _workspaceExplorer.value = ExplorerState.Failed(path, AUTH_ERROR)
+                } else {
+                    _workspaceExplorer.value = ExplorerState.Failed(path, describe(error))
+                }
+            }
+        }
+    }
+
+    /**
+     * Re-lists the level on screen, ignoring the cache.
+     *
+     * The endpoint has no change feed the tree subscribes to (the web's tree has
+     * none either), so this is the one invalidation: a directory the session has
+     * since written into shows the new file only after it.
+     */
+    fun reloadWorkspaceExplorer() {
+        explorerLevels.remove(explorerPath)
+        listWorkspaceDirectory(explorerPath)
+    }
+
+    /** Forgets every listed level, e.g. when the panel closes or the session changes. */
+    fun resetWorkspaceExplorer() {
+        explorerGeneration++
+        explorerLevels.clear()
+        explorerPath = ""
+        _workspaceExplorer.value = ExplorerState.Idle
+    }
+
+    /**
+     * One `workspaceFiles/list` reply.
+     *
+     * [requested] is the workspace-relative path the app asked for. The host's own
+     * `path` is preferred when it sent one, because that is its spelling of the
+     * directory rather than ours; the fallback keeps the breadcrumb naming
+     * something when an older host omits it.
+     */
+    private fun toWorkspaceListing(requested: String, json: JSONObject): WorkspaceListing {
+        val path = (json.opt("path") as? String) ?: requested
+        return WorkspaceListing(
+            path = path,
+            entries = toWorkspaceEntries(json.arr("entries")),
+            truncated = json.optBoolean("truncated", false),
+        )
+    }
+
+    private fun toWorkspaceEntries(array: JSONArray?): List<WorkspaceEntry> {
+        if (array == null) return emptyList()
+        val result = ArrayList<WorkspaceEntry>(array.length())
+        for (i in 0 until array.length()) {
+            val item = array.optJSONObject(i) ?: continue
+            val name = item.str("name")
+            if (name.isEmpty()) continue
+            val kind = when (item.str("type")) {
+                "directory" -> WorkspaceEntryKind.DIRECTORY
+                "file" -> WorkspaceEntryKind.FILE
+                // The host's `other`, and anything a future host might add: a row,
+                // but one the reader cannot open.
+                else -> WorkspaceEntryKind.OTHER
+            }
+            // Only a reported size is a size: a file whose backend omits it must not
+            // read as an empty one.
+            val size = if (item.has("size")) item.optLong("size").takeIf { it >= 0 } else null
+            result += WorkspaceEntry(name = name, kind = kind, size = size)
+        }
+        return result
     }
 
     private fun toDirectoryLevel(json: JSONObject) = DirectoryLevel(
@@ -5634,6 +5794,8 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         followJob?.cancel()
         historyJob?.cancel()
         reducer.reset()
+        // Same reason as `enterPendingSession`: a level is relative to one root.
+        resetWorkspaceExplorer()
         publishTranscript()
         Log.d(TAG, "openSession $sessionId")
         _ui.value = _ui.value.copy(
