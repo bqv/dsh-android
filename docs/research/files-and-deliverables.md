@@ -493,10 +493,22 @@ There is one file read per window in this API, so a download is a walk:
 
 - **Window**: `workspaceFiles/readBytes` with `options.range {offset, length}`,
   2 MiB at a time — the host's own ceiling on a *requested* length (it refuses a
-  larger request outright rather than shortening it), and the same call and
-  multipart shape the image preview already uses and has verified. Every
-  `bytes-N` part is reassembled in order (`multipartByteParts`), not just the
-  first: truncation that looks whole is the failure mode this must not have.
+  larger request outright rather than shortening it), and the same call the image
+  preview already uses. Every `bytes-`named part is reassembled in order
+  (`multipartByteParts`), not just the first: truncation that looks whole is the
+  failure mode this must not have. The captured live reply (now asserted against
+  its bytes in `net/MultipartTest.kt`) is **two** parts — `bytes-0` with the
+  payload, and `metadata` holding the RPC envelope, which names the payload
+  (`"attachments":[{"…","part":"bytes-0"}]`) and states `"eof":true`. The filter is
+  therefore load-bearing rather than precautionary: without it the envelope's JSON
+  would be appended to the reader's file.
+- **Termination**: the loop advances by the bytes it was *given*, not by the length
+  it asked for, and a short (or empty) window ends the read. That is the only signal
+  that works when `stat` reported nothing, which is why the granted length is what
+  the loop counts and what `FileDownloadTest` asserts — the same test fails if the
+  advance is ever changed to the requested window. The envelope's `eof` is a second,
+  stronger signal the host already sends and this client does not yet read; it is the
+  thing to use if the paging ever needs to be independent of short reads.
 - **Length**: `workspaceFiles/stat` for the progress total and the pre-flight
   refusal, treated as best-effort — an absent `bytes` is "unknown", never zero,
   or the loop would hand back an empty file without reading anything.
@@ -534,8 +546,10 @@ Everything below the surface is untested from this box, which has no device:
   handled as "unknown length", so it degrades rather than breaks),
 - the save dialog, the write to the chosen `content://` URI, `Saved`, and
   Cancel during a real transfer,
-- whether the host splits a 2 MiB window into several `bytes-N` parts (the
-  reassembly handles both, but only the single-part shape has been captured),
+- whether the host splits a 2 MiB window into several payload parts. The captured
+  reply is one `bytes-0` plus a `metadata` envelope, so the *multi-payload* shape is
+  exercised only against a hand-built body; the envelope-plus-payload shape is the
+  captured one and is asserted from its bytes.
 - how a 2000-line Markdown document composes: `MarkdownText` is a plain
   `Column`, not a lazy list, so a very large rendering is a cost the preview
   pays in frames rather than in correctness.

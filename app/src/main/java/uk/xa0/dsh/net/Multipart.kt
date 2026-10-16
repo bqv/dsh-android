@@ -9,10 +9,15 @@ package uk.xa0.dsh.net
  * because the JSON parse failed and the failure message *is* the body's first 400
  * characters.
  *
+ * The captured reply has two parts, not one: that `bytes-0` payload and a `metadata`
+ * part carrying the RPC envelope. Both readings live here — the first part is what the
+ * image preview needs, and the named payload parts are what a download needs — and
+ * `net/MultipartTest.kt` asserts the captured body's shape from its own bytes.
+ *
  * Hand-written rather than with a multipart library because the app needs exactly one
- * thing from it: the bytes between the first part's header block and the next boundary.
- * Top level, and not a method on the client, so it can be tested on its own — it is pure
- * and nothing about it needs a socket.
+ * thing from it: the bytes of the parts that carry them. Top level, and not a method on
+ * the client, so it can be tested on its own — it is pure and nothing about it needs a
+ * socket.
  */
 
 /** The boundary of a body, read from its own first line: `--<boundary>` then CRLF. */
@@ -76,6 +81,12 @@ data class MultipartPart(val name: String?, val bytes: ByteArray) {
  * `bytes-0`, `bytes-1` and so on. Taking the first of those would hand the reader a
  * truncated file that looks whole, which is the one failure a download must not have —
  * so a window is reassembled from every `bytes-` part.
+ *
+ * The live reply is not single-part *either*, which is why this exists rather than
+ * [multipartBytes] being widened: the capture in `net/MultipartTest.kt` is `bytes-0`
+ * with the payload followed by a `metadata` part holding the RPC envelope. Reading
+ * "the first part" happens to be right there and is right for the wrong reason; a
+ * reassembly that took every part would append the envelope's JSON to the file.
  *
  * A body whose parts are unnamed, or named for something else, comes back whole rather
  * than as an empty list: those parts are still the answer, and dropping them would turn

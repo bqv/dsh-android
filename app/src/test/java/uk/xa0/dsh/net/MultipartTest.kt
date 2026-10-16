@@ -3,6 +3,7 @@ package uk.xa0.dsh.net
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -130,15 +131,67 @@ class MultipartTest {
         assertArrayEquals(png, multipartByteParts(framed, boundary))
     }
 
+    /**
+     * The body the live host actually sent, byte for byte — and it has **two** parts, not
+     * one.
+     *
+     * The earlier version of this test asserted a single part. That was written from the
+     * *image preview's* experience, which only ever read the first part and so never
+     * looked at what came after it; it was never true of the bytes. The capture is the
+     * whole `workspaceFiles/readBytes` reply, and the reply is `bytes-0` (the payload)
+     * plus `metadata` — the RPC envelope, which is where `eof`, `bytes` and the
+     * `attachments` list naming `bytes-0` live.
+     *
+     * That makes this the one case here that is evidence rather than arithmetic: the
+     * filter that keeps `bytes-`-named parts and drops everything else is not a
+     * precaution against a shape nobody has seen — it is what stops the envelope's JSON
+     * being appended to the file. A third delimiter follows the metadata part and is the
+     * closing marker, which is why two parts and not three.
+     */
     @Test
-    fun `the real captured body parses the same either way`() {
+    fun `the real captured body is a payload part plus the envelope, and only the payload is taken`() {
         val real = javaClass.getResourceAsStream("/multipart-real.bin")?.readBytes()
             ?: error("fixture missing")
         val boundary = boundaryOf(real) ?: error("no boundary in ${real.size} bytes")
         val parts = multipartParts(real, boundary)
-        assertEquals(1, parts.size)
-        assertEquals("bytes-0", parts.single().name)
-        assertArrayEquals(multipartBytes(real, boundary)!!, multipartByteParts(real, boundary))
+
+        assertEquals(listOf("bytes-0", "metadata"), parts.map { it.name })
+        assertEquals(885, parts[0].bytes.size)
+        assertArrayEquals(
+            byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte()),
+            parts[0].bytes.copyOfRange(0, 4),
+        )
+        // The envelope's own text, so the fixture cannot silently stop being the shape
+        // this test claims it is.
+        val envelope = parts[1].bytes.toString(Charsets.UTF_8)
+        assertTrue(envelope, envelope.contains("\"eof\":true"))
+        assertTrue(envelope, envelope.contains("\"part\":\"bytes-0\""))
+
+        // What the download path asks for: the payload, whole, and no envelope in it.
+        // The envelope is asserted non-empty first, so "885 bytes" cannot be true by
+        // accident of a fixture that lost its second part.
+        assertTrue(parts[1].bytes.isNotEmpty())
+        val taken = multipartByteParts(real, boundary)
+        assertArrayEquals(multipartBytes(real, boundary)!!, taken)
+        assertEquals(885, taken.size)
+    }
+
+    /**
+     * A window split across numbered parts is reassembled in order, and the envelope that
+     * may travel with it is dropped — the combination the live body above shows the
+     * *shape* of, and this test shows the arithmetic of for more than one payload part.
+     */
+    @Test
+    fun `a split window keeps its payload parts in order and drops the envelope`() {
+        val first = "the first half ".toByteArray()
+        val second = "and the second".toByteArray()
+        val framed = body(
+            "Content-Disposition: form-data; name=\"bytes-0\"" to first,
+            "Content-Disposition: form-data; name=\"bytes-1\"" to second,
+            "Content-Disposition: form-data; name=\"metadata\"\r\n" +
+                "Content-Type: application/json" to "{\"eof\":true}".toByteArray(),
+        )
+        assertArrayEquals(first + second, multipartByteParts(framed, boundary))
     }
 
     @Test
