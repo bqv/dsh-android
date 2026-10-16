@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import uk.xa0.dsh.model.ChatEntry
+import uk.xa0.dsh.model.previewLanguageOf
 import uk.xa0.dsh.ui.clickableNoRipple
 import uk.xa0.dsh.ui.shortenPath
 import uk.xa0.dsh.ui.theme.DshRadius
@@ -69,26 +70,14 @@ private val READ_NUMBERED_LINE = Regex("^(\\d+): (.*)$")
 private val READ_SHOWN = Regex("Showing lines (\\d+)-(\\d+) of (\\d+)\\.")
 private val READ_TOTAL = Regex("total (\\d+) lines")
 
-/** Extension -> language id, mirroring `read-render.ts#LANG_BY_EXTENSION` for the banner label. */
-private val LANG_BY_EXTENSION = mapOf(
-    "ts" to "ts", "tsx" to "tsx", "mts" to "ts", "cts" to "ts",
-    "js" to "js", "jsx" to "jsx", "mjs" to "js", "cjs" to "js",
-    "json" to "json", "jsonc" to "json", "py" to "py", "rb" to "rb", "go" to "go", "rs" to "rs",
-    "java" to "java", "c" to "c", "h" to "c", "cc" to "cpp", "cpp" to "cpp", "hpp" to "cpp",
-    "cxx" to "cpp", "cs" to "cs", "kt" to "kotlin", "swift" to "swift", "php" to "php",
-    "sh" to "sh", "bash" to "sh", "zsh" to "sh", "yaml" to "yaml", "yml" to "yaml",
-    "toml" to "toml", "ini" to "ini", "md" to "md", "markdown" to "md", "mdx" to "mdx",
-    "html" to "html", "htm" to "html", "css" to "css", "scss" to "scss", "less" to "less",
-    "sql" to "sql", "xml" to "xml", "lua" to "lua",
-)
-
-/** Grammar hint from the file extension; a dotfile and an unknown extension both yield none. */
-private fun langFromPath(path: String): String? {
-    val base = path.substringAfterLast('/').substringAfterLast('\\')
-    val dot = base.lastIndexOf('.')
-    if (dot <= 0) return null
-    return LANG_BY_EXTENSION[base.substring(dot + 1).lowercase()]
-}
+/**
+ * Grammar hint from the file extension; a dotfile and an unknown extension both yield none.
+ *
+ * The table itself lives in `model/WorkspaceFileLoader.kt` now, because the Files panel
+ * makes the same claim about the same path and two copies of one table is how a `.kt`
+ * file ends up labelled `kotlin` in one pane and blank in another.
+ */
+private fun langFromPath(path: String): String? = previewLanguageOf(path)
 
 private fun positiveInt(value: Any?): Int? =
     (value as? Number)?.takeIf { it.toDouble() == it.toInt().toDouble() }?.toInt()?.takeIf { it >= 1 }

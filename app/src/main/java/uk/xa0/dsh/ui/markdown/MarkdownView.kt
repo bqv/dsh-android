@@ -476,17 +476,39 @@ private fun highlightCode(code: String, colors: DshColors): AnnotatedString {
         code.split('\n').forEachIndexed { index, line ->
             if (index > 0) append("\n")
             SyntaxHighlighter.highlightLine(line).forEach { span ->
-                val color = when (span.kind) {
-                    SyntaxHighlighter.Kind.PLAIN -> colors.labelPrimary
-                    SyntaxHighlighter.Kind.KEYWORD -> colors.synKeyword
-                    SyntaxHighlighter.Kind.STRING -> colors.synString
-                    SyntaxHighlighter.Kind.COMMENT -> colors.synComment
-                    SyntaxHighlighter.Kind.NUMBER -> colors.synConstant
-                    SyntaxHighlighter.Kind.FUNCTION -> colors.synFunction
-                    SyntaxHighlighter.Kind.PUNCTUATION -> colors.synPunctuation
-                }
-                withStyle(SpanStyle(color = color)) { append(span.text) }
+                withStyle(SpanStyle(color = codeColor(span.kind, colors))) { append(span.text) }
             }
         }
     }
+}
+
+/**
+ * One line of code as coloured spans, for a reader that draws its own line numbers.
+ *
+ * The Files preview is a list of numbered rows, one per line, so it cannot use
+ * [CodeBlock] — but it must use the same grammar and the same palette, or the same file
+ * would be coloured two different ways in two places. This is that shared half.
+ *
+ * It is a claim about the *line*, not about the file: the highlighter has no state
+ * between lines, so a block comment opened on one line and closed on another is
+ * coloured as punctuation on the line it opens and as ordinary text after. Nothing is
+ * removed — the concatenation of the spans is always the line exactly as it arrived,
+ * which `MarkdownHighlightTest` holds to — so a wrong colour is a wrong colour and
+ * never a lost character.
+ */
+fun highlightCodeLine(line: String, colors: DshColors): AnnotatedString = buildAnnotatedString {
+    SyntaxHighlighter.highlightLine(line).forEach { span ->
+        withStyle(SpanStyle(color = codeColor(span.kind, colors))) { append(span.text) }
+    }
+}
+
+/** The palette's one answer for a span kind. */
+private fun codeColor(kind: SyntaxHighlighter.Kind, colors: DshColors): Color = when (kind) {
+    SyntaxHighlighter.Kind.PLAIN -> colors.labelPrimary
+    SyntaxHighlighter.Kind.KEYWORD -> colors.synKeyword
+    SyntaxHighlighter.Kind.STRING -> colors.synString
+    SyntaxHighlighter.Kind.COMMENT -> colors.synComment
+    SyntaxHighlighter.Kind.NUMBER -> colors.synConstant
+    SyntaxHighlighter.Kind.FUNCTION -> colors.synFunction
+    SyntaxHighlighter.Kind.PUNCTUATION -> colors.synPunctuation
 }

@@ -57,3 +57,85 @@ private fun indexOf(haystack: ByteArray, needle: ByteArray, from: Int): Int? {
     }
     return null
 }
+
+/** One part of a multipart body: its declared name, and its payload. */
+data class MultipartPart(val name: String?, val bytes: ByteArray) {
+
+    override fun equals(other: Any?): Boolean =
+        other is MultipartPart && other.name == name && other.bytes.contentEquals(bytes)
+
+    override fun hashCode(): Int = 31 * (name?.hashCode() ?: 0) + bytes.contentHashCode()
+}
+
+/**
+ * Every part of a multipart body, in the order it holds them.
+ *
+ * [multipartBytes] answers "the bytes in the first part", which is all a single-part
+ * reply needs and *not* all a download can trust: the part the host names is `bytes-0`,
+ * and that numbering is a promise that a larger answer may arrive split across
+ * `bytes-0`, `bytes-1` and so on. Taking the first of those would hand the reader a
+ * truncated file that looks whole, which is the one failure a download must not have —
+ * so a window is reassembled from every `bytes-` part.
+ *
+ * A body whose parts are unnamed, or named for something else, comes back whole rather
+ * than as an empty list: those parts are still the answer, and dropping them would turn
+ * an unfamiliar shape into a silent zero-byte download.
+ */
+fun multipartParts(body: ByteArray, boundary: String): List<MultipartPart> {
+    val delimiter = "--$boundary".toByteArray(Charsets.ISO_8859_1)
+    val headerEnd = "\r\n\r\n".toByteArray(Charsets.ISO_8859_1)
+    val parts = mutableListOf<MultipartPart>()
+    var search = 0
+    while (true) {
+        val start = indexOf(body, delimiter, search) ?: break
+        var cursor = start + delimiter.size
+        // `--` immediately after a delimiter is the closing marker, not a part.
+        if (cursor + 1 < body.size &&
+            body[cursor] == '-'.code.toByte() &&
+            body[cursor + 1] == '-'.code.toByte()
+        ) {
+            break
+        }
+        if (cursor + 1 < body.size &&
+            body[cursor] == '\r'.code.toByte() &&
+            body[cursor + 1] == '\n'.code.toByte()
+        ) {
+            cursor += 2
+        }
+        val headersEnd = indexOf(body, headerEnd, cursor) ?: break
+        val headers = body.copyOfRange(cursor, headersEnd).toString(Charsets.ISO_8859_1)
+        val dataStart = headersEnd + 4
+        val next = indexOf(body, delimiter, dataStart) ?: break
+        var end = next
+        if (end >= 2 && body[end - 2] == '\r'.code.toByte() && body[end - 1] == '\n'.code.toByte()) end -= 2
+        if (end < dataStart) break
+        parts += MultipartPart(PART_NAME.find(headers)?.groupValues?.get(1), body.copyOfRange(dataStart, end))
+        search = next
+    }
+    return parts
+}
+
+/**
+ * The bytes of one window, from every part that claims to hold them.
+ *
+ * The filter is by part name because that is the only thing distinguishing a payload
+ * from whatever else the host may put in the envelope; when no part carries a `bytes-`
+ * name there is nothing to filter on, so every part is taken in order, as
+ * [multipartParts] documents.
+ */
+fun multipartByteParts(body: ByteArray, boundary: String): ByteArray {
+    val parts = multipartParts(body, boundary)
+    val named = parts.filter { it.name?.startsWith("bytes-") == true }
+    val chosen = named.ifEmpty { parts }
+    if (chosen.size == 1) return chosen[0].bytes
+    val out = ByteArray(chosen.sumOf { it.bytes.size })
+    var at = 0
+    for (part in chosen) {
+        part.bytes.copyInto(out, at)
+        at += part.bytes.size
+    }
+    return out
+}
+
+/** `name="bytes-0"` in a part's `Content-Disposition`, whatever else the header holds. */
+private val PART_NAME = Regex("name=\"([^\"]*)\"")

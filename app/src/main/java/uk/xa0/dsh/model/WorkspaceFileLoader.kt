@@ -117,8 +117,7 @@ enum class PreviewFormat {
  * `?raw=1` tail off a URL a session wrote.
  */
 fun previewFormatOf(path: String): PreviewFormat {
-    val name = path.substringAfterLast('/').substringBefore('?').substringBefore('#')
-    val extension = name.substringAfterLast('.', "").lowercase()
+    val extension = extensionOf(previewNameOf(path))
     return when (extension) {
         "png", "apng" -> PreviewFormat.PNG
         "jpg", "jpeg", "jpe", "jfif" -> PreviewFormat.JPEG
@@ -132,6 +131,69 @@ fun previewFormatOf(path: String): PreviewFormat {
         else -> PreviewFormat.TEXT
     }
 }
+
+/** The file name alone, query and fragment stripped; the one name both tables read. */
+private fun previewNameOf(path: String): String =
+    path.substringAfterLast('/').substringAfterLast('\\').substringBefore('?').substringBefore('#')
+
+/** The lower-cased suffix after the last dot; empty for a name with no dot at all. */
+private fun extensionOf(name: String): String = name.substringAfterLast('.', "").lowercase()
+
+/**
+ * The language id a path names, by extension.
+ *
+ * This is the read card's table (a port of the web's `read-render.ts`), moved here so
+ * the read card and the Files panel cannot answer differently about what a `.kt` file
+ * is. It is a *claim*, not a fact: nothing here looks inside the file, so a `.py` that
+ * holds a shell script is labelled `py`. That is why the claim is drawn as a chip
+ * beside the content rather than used to decide what the content means, and why the
+ * panel offers the source for any file it renders.
+ *
+ * A dotfile and an unknown extension both answer `null` — no claim at all, which is
+ * what keeps a `.log` or an extensionless file from being coloured as code.
+ */
+fun previewLanguageOf(path: String): String? {
+    val name = previewNameOf(path)
+    val dot = name.lastIndexOf('.')
+    if (dot <= 0) return null
+    return LANGUAGE_BY_EXTENSION[name.substring(dot + 1).lowercase()]
+}
+
+/**
+ * True when the panel will *render* this path rather than only colour it.
+ *
+ * Deliberately three extensions and no sniffing of the content: a document whose first
+ * line happens to be `#` is not a promise that the rest of it is Markdown, and a
+ * renderer that guesses wrong reflows prose the author laid out on purpose. The reader
+ * always has the source one tap away, and the toggle names it.
+ *
+ * `.mdx` is not here: its body is Markdown *plus* JSX, and rendering half of it as
+ * prose would be a claim the file does not support.
+ */
+fun isMarkdownPath(path: String): Boolean =
+    extensionOf(previewNameOf(path)) in MARKDOWN_EXTENSIONS
+
+/** The extensions whose whole content is Markdown. */
+private val MARKDOWN_EXTENSIONS = setOf("md", "markdown", "mdown")
+
+/**
+ * Extension to language id, verbatim from the read card's `LANG_BY_EXTENSION`, which
+ * is itself the web's `read-render.ts` table, with one addition: `kts`, the Kotlin
+ * script suffix (`build.gradle.kts` is a Kotlin file by any reading, and it is this
+ * project's own build file). The read card picks the addition up too, since it now asks
+ * this table rather than keeping its own copy.
+ */
+private val LANGUAGE_BY_EXTENSION = mapOf(
+    "ts" to "ts", "tsx" to "tsx", "mts" to "ts", "cts" to "ts",
+    "js" to "js", "jsx" to "jsx", "mjs" to "js", "cjs" to "js",
+    "json" to "json", "jsonc" to "json", "py" to "py", "rb" to "rb", "go" to "go", "rs" to "rs",
+    "java" to "java", "c" to "c", "h" to "c", "cc" to "cpp", "cpp" to "cpp", "hpp" to "cpp",
+    "cxx" to "cpp", "cs" to "cs", "kt" to "kotlin", "kts" to "kotlin", "swift" to "swift", "php" to "php",
+    "sh" to "sh", "bash" to "sh", "zsh" to "sh", "yaml" to "yaml", "yml" to "yaml",
+    "toml" to "toml", "ini" to "ini", "md" to "md", "markdown" to "md", "mdx" to "mdx",
+    "html" to "html", "htm" to "html", "css" to "css", "scss" to "scss", "less" to "less",
+    "sql" to "sql", "xml" to "xml", "lua" to "lua",
+)
 
 /**
  * Reads one workspace file on demand, for a panel that has no transcript preview.

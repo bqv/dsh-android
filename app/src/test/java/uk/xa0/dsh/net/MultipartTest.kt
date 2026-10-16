@@ -75,4 +75,75 @@ class MultipartTest {
         assertNull(boundaryOf("{\"type\":\"server-response\"}".toByteArray()))
         assertNull(multipartBytes("not multipart at all".toByteArray(), boundary))
     }
+
+    /**
+     * A window the host split across numbered parts is the whole window.
+     *
+     * The part the live host names is `bytes-0`, and the numbering is the only evidence
+     * there can be more than one. Taking just the first would hand a reader a truncated
+     * file that looks complete — the one outcome a download must not have — so every
+     * `bytes-` part is taken, in the order the body holds them.
+     */
+    @Test
+    fun `numbered byte parts are reassembled in order`() {
+        val first = "the first half ".toByteArray()
+        val second = "and the second".toByteArray()
+        val framed = body(
+            "Content-Disposition: form-data; name=\"bytes-0\"; filename=\"blob\"\r\n" +
+                "Content-Type: application/octet-stream" to first,
+            "Content-Disposition: form-data; name=\"bytes-1\"; filename=\"blob\"\r\n" +
+                "Content-Type: application/octet-stream" to second,
+        )
+        assertArrayEquals(first + second, multipartByteParts(framed, boundary))
+    }
+
+    /** A single part is that part, which is the shape the image preview already parses. */
+    @Test
+    fun `a single byte part is returned as it stands`() {
+        val framed = body("Content-Disposition: form-data; name=\"bytes-0\"" to png)
+        assertArrayEquals(png, multipartByteParts(framed, boundary))
+    }
+
+    /**
+     * A part that is not a payload is never mixed into one.
+     *
+     * When any part names itself `bytes-`, that naming is the filter — an envelope that
+     * also carries metadata must not have the metadata appended to the file.
+     */
+    @Test
+    fun `a part named for something else is left out when bytes parts exist`() {
+        val framed = body(
+            "Content-Disposition: form-data; name=\"meta\"\r\n" +
+                "Content-Type: application/json" to "{\"bytes\":4}".toByteArray(),
+            "Content-Disposition: form-data; name=\"bytes-0\"" to png,
+        )
+        assertArrayEquals(png, multipartByteParts(framed, boundary))
+    }
+
+    /**
+     * And when nothing is named `bytes-0`, the parts are still the answer: dropping
+     * them would turn an unfamiliar envelope into a silent zero-byte download.
+     */
+    @Test
+    fun `unnamed parts are taken whole rather than dropped`() {
+        val framed = body("Content-Type: application/octet-stream" to png)
+        assertArrayEquals(png, multipartByteParts(framed, boundary))
+    }
+
+    @Test
+    fun `the real captured body parses the same either way`() {
+        val real = javaClass.getResourceAsStream("/multipart-real.bin")?.readBytes()
+            ?: error("fixture missing")
+        val boundary = boundaryOf(real) ?: error("no boundary in ${real.size} bytes")
+        val parts = multipartParts(real, boundary)
+        assertEquals(1, parts.size)
+        assertEquals("bytes-0", parts.single().name)
+        assertArrayEquals(multipartBytes(real, boundary)!!, multipartByteParts(real, boundary))
+    }
+
+    @Test
+    fun `a body that is not multipart comes back empty rather than invented`() {
+        assertEquals(emptyList<MultipartPart>(), multipartParts("not multipart at all".toByteArray(), boundary))
+        assertEquals(0, multipartByteParts("not multipart at all".toByteArray(), boundary).size)
+    }
 }
