@@ -353,7 +353,9 @@ The blue token is shared but never carries two meanings on one element: the glyp
 here" and the title means "something here is running", so all four combinations draw differently
 and the ambiguity the request could have introduced did not happen by accident.
 
-**Unknown is neither blue nor silent.** If the registry names a member the roster has not
+**Unknown is neither blue nor silent.** *(Superseded 2026-10-16: the `Unknown` title tint and the
+`Running: unknown` line below were removed — see "A colour must be readable off the screen" at the
+end of this note. The rest of this section still describes the blue.)* If the registry names a member the roster has not
 delivered and nothing known is running, "nothing is running in here" is not a fact: the title
 keeps its normal colour (never the blue) *and* the header says `Running: unknown`
 (`stateDescription`), the app's standing convention for a reading it cannot confirm (the
@@ -395,6 +397,89 @@ touched for this change (the orchestrating session runs them). The blue itself i
 anywhere: the JVM harness has no text metrics and no pixels, so the colour is asserted only
 through the state that decides it, and a wrong token in `ui/SessionsDrawer.kt` would pass every
 test here.
+
+## A colour must be readable off the screen (2026-10-16)
+
+Report: "why are some workspaces grey", and then the rule that settled it — *unless you can give me
+a clear flowchart for why grey and why not, it is not correct behaviour.* A user-facing colour has
+to be derivable from something the reader can see and reason about; if it cannot be drawn as a short
+flowchart a reader would accept, the rule changes rather than the documentation.
+
+**The rule as it stood, and why it fails.** For a Workspace header:
+
+```
+is any accounted member id in the live set?          yes -> title accent (blue)
+else is every accounted id in the roster?             no -> title labelCaption (dim grey)
+else                                                     -> title labelSecondary (ordinary)
+```
+
+The third box is a fact about a *fetch* — whether this client's `session/list` served every id the
+host's Workspace registry names — not about the Workspace or its work. The registry's own row can
+name members the roster will never return (measured here: stale `dsh-automation-session-*` ids left
+by a retired plugin, still members in the host's `workspace.json`, their transcripts gone, ~70 of
+them; `session/list` omits them and `DshViewModel` logged that omission every pull). Seven of the
+user's eight Workspaces had at least one such member, so seven titles were dimmed. What did the
+screen say about it? For a group with **rows drawn** — the actual case — nothing: the "Sessions not
+loaded" note only draws for a group with zero rows, and the `unknown` count only in the same case.
+The dimming *was* the only signal, and it was the thing being asked about. A colour whose legend is
+not anywhere on screen is not a signal; it is a riddle. It also read as "this Workspace is somehow
+lesser/empty", which is what the user took from it.
+
+**The flowchart now.** Two channels, each carrying one fact the reader can check:
+
+```
+title colour:  is a member I can see (or a running descendant of one) working?  yes -> accent (blue)
+                                                                                no  -> ordinary colour
+count column:  has the roster served every id the registry accounts?
+                   no  -> "2 of 13"   (rows drawn, of ids the registry names)
+                   yes -> "2"         (the plain figure, as before)
+```
+
+"Blue means something here is running" is the whole legend, and a reader can confirm it by looking
+at the rows. Incomplete membership is a count, in the column where a count is read, visible folded
+or open, and it is honest in both directions: the first number is the rows drawn (which is what the
+column has always meant), the second is what the registry accounts, so the gap is stated without
+claiming *why* — a filter and a missing transcript both show as a gap in the drawn rows.
+
+**Why an undelivered member is absent, not unknown.** The client cannot observe a session the
+roster never delivered, so it cannot report on its work. The old rule turned that into a third
+title colour, which made the reader's glance into a question. The alternative — treating it as
+absolutely not running — is not a claim about the missing session either; "nothing here is running"
+is true of the work that is *here*, and the sentence is scoped to the screen. So `WorkspaceRunState`
+has two members, `workspaceRunState` no longer takes `knownIds`, and there is no `Unknown` state
+left to reach: a state that exists only in code, with no on-screen referent, is the defect, not the
+mechanism.
+
+**The count form's guard.** "[shown] of [accounted]" is drawn only when some accounted member was
+not delivered *and* something is undrawn (`missing > 0 && shown < accounted`). Two corners need
+that: a Workspace whose every member is delivered but hidden by the reader's Archived switch must
+keep the plain figure (the group's `Filtered` placeholder already names the filter), and a Workspace
+whose members arrived only as live membership frames — drawn, but not yet confirmed by a pull —
+must not print "2 of 2". The two conditioning facts are derivations, and `WorkspaceGroupTest` pins
+all four combinations.
+
+**The log, which was the same defect.** `DshViewModel.warnOnMissingMembers` printed the full
+missing list — on the user's phone ~70 ids, ~4 KB — on every roster pull: 295 of those lines sat in
+one ring buffer. The signal deserves a line, not a flood, so it now goes through
+`MissingMembersLatch` (`model/MissingMembers.kt`), the same shape as `ScheduleSignalLatch`: the
+first omission of an episode is written, the same set on the next pull is quiet, a changed set
+reports, and a whole pull clears the latch. The line itself is `omittedMembersWarning`: the count,
+then three ids and ", ... and N more". No timer, one field. The underlying host state — a registry
+naming members whose transcripts are gone — is not this client's to edit; the client just stops
+shouting about it and renders the gap honestly in both channels.
+
+**Tests.** `WorkspaceGroupTest` pins the two-member run rule (an undelivered member makes a group
+idle, not unknown; a running member still wins) and the four count combinations.
+`MissingMembersTest` pins the exact warning string and the latch's episode rule.
+`SessionsDrawerRunningTest` pins the wiring: a Workspace with
+an undelivered member draws "0 of 1" and speaks no unknown state, and one with a running delivered
+member *and* an undelivered one both speaks "Running" and draws "1 of 2".
+
+Unverified as of writing: nothing here was compiled or run — no build, no test and no device was
+touched for this change (the orchestrating session runs them). The colours themselves are still not
+measurable in the JVM harness, so the tests assert the states and the strings the colours are read
+from; a wrong token in `ui/SessionsDrawer.kt` would pass every test here. The phone evidence is the
+log ring buffer read over `adb`, not a screenshot.
 
 ## Observed but out of scope
 
