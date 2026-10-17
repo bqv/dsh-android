@@ -314,6 +314,15 @@ of where the app stands against them.
 - [x] Attachments: files and pictures through `fileUploads/upload`; a picture the host
       recognises is sent inline as `{type:'image', mediaType, data, name}` with no upload
 - [x] Slash commands (`commands/list` → `commands/execute`)
+- [x] **Undo and redo in the draft, which the web has no equivalent of.** The composer
+      runs on Compose's stateful text field (`TextFieldState`), so the history is the
+      platform's: a 28dp seat beside `+` undoes on a tap and redoes on a long press, and
+      the seat becomes Redo once the undo stack is empty rather than going dead with the
+      redo still available. Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y do the same from a physical
+      keyboard. A send, a failed send's restore and a `/` or `@` pick are programmatic
+      edits, so they are not on the undo stack; a failed send is put back only into the
+      box that send cleared, so an empty box left by undo is not mistaken for it
+      (`ui/components/Composer.kt`, `ui/composer/ComposerDraft.kt`)
 - [x] Subagent messaging: an addressed continuable child sends `subagents/prompt`, Stop
       sends `subagents/interruptByParent`, and the composer seat becomes a read-only status
       frame unless `subagents/list` reports the parent available
