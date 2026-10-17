@@ -201,10 +201,13 @@ class ScheduleManagementTest {
     }
 
     @Test
-    fun `a fixed rate is told in the largest unit that divides it`() {
+    fun `a fixed rate is told in the largest unit that divides it, pluralised`() {
         assertEquals("Every 30 minutes", scheduleFrequencyLabel(ScheduleSpec.Every(1_800), "UTC"))
+        assertEquals("Every 90 minutes", scheduleFrequencyLabel(ScheduleSpec.Every(5_400), "UTC"))
+        assertEquals("Every 2 hours", scheduleFrequencyLabel(ScheduleSpec.Every(7_200), "UTC"))
         assertEquals("Every 1 hour", scheduleFrequencyLabel(ScheduleSpec.Every(3_600), "UTC"))
         assertEquals("Every 1 day", scheduleFrequencyLabel(ScheduleSpec.Every(86_400), "UTC"))
+        assertEquals("Every 1 minute", scheduleFrequencyLabel(ScheduleSpec.Every(60), "UTC"))
         assertEquals("Every 90 seconds", scheduleFrequencyLabel(ScheduleSpec.Every(90), "UTC"))
         assertEquals(
             "Repeats at an unreadable interval",
@@ -254,8 +257,14 @@ class ScheduleManagementTest {
         assertEquals("in 3 hours", scheduleRelativeLabel(now + 3 * 3_600_000L, now))
         assertEquals("1 minute overdue", scheduleRelativeLabel(now - 90_000L, now))
         assertEquals("30 seconds overdue", scheduleRelativeLabel(now - 30_000L, now))
-        // Under a minute ahead still names a minute: "now" would hide a real target.
-        assertEquals("in 1 minute", scheduleRelativeLabel(now + 30_000L, now))
+        // The web's `UNIT_SECONDS` ends with `{ unit: "second", seconds: 1 }` and has
+        // no one-minute floor, so a sub-minute distance is stated in seconds. Pinning
+        // this stops a future "fix" from making a nearer target look further away.
+        assertEquals("in 30 seconds", scheduleRelativeLabel(now + 30_000L, now))
+        assertEquals("in 1 second", scheduleRelativeLabel(now + 1_000L, now))
+        assertEquals("in 2 minutes", scheduleRelativeLabel(now + 90_000L, now))
+        assertEquals("in 1 minute", scheduleRelativeLabel(now + 60_000L, now))
+        assertEquals("1 minute overdue", scheduleRelativeLabel(now - 60_000L, now))
         assertEquals("Due now", scheduleRelativeLabel(now, now))
     }
 

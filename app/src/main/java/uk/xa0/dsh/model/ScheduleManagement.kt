@@ -360,7 +360,10 @@ fun scheduleIntervalLabel(everySeconds: Long): String {
     val (unit, seconds) = INTERVAL_UNITS.firstOrNull { everySeconds % it.second == 0L }
         ?: ("second" to 1L)
     val value = everySeconds / seconds
-    return "Every $value $unit"
+    // The unit noun is pluralised by its magnitude, as the web's `unitLabel` does:
+    // "Every 30 minutes", but "Every 1 hour". Rendering the bare unit name gave
+    // "Every 30 minute" on two of this box's twelve live tasks.
+    return "Every ${plural(value, unit)}"
 }
 
 /**
@@ -429,10 +432,15 @@ private fun plural(value: Long, unit: String): String =
     if (value == 1L) "$value $unit" else "$value ${unit}s"
 
 /**
- * How far away a committed target is, said in the largest natural unit: `in 3 hours`,
- * `2 minutes overdue`, or `Due now`. The rounding is the web's — a future distance
- * rounds up, a past one rounds down, and neither is ever `0` — so a target one second
- * ahead reads as `in 1 minute` rather than vanishing into "now".
+ * How far away a committed target is, said in the largest unit the distance reaches:
+ * `in 3 hours`, `2 minutes overdue`, `in 30 seconds`, or `Due now`.
+ *
+ * The unit list is the web's own `UNIT_SECONDS`: day, hour, minute, and finally
+ * `{ unit: "second", seconds: 1 }`. There is no one-minute floor in it, so a
+ * sub-minute distance is stated in seconds — `in 30 seconds`, not `in 1 minute`. The
+ * rounding is the web's too: a future distance rounds up, a past one rounds down, and
+ * the value is never `0`, so a target one second ahead reads `in 1 second` rather than
+ * vanishing into "now".
  */
 fun scheduleRelativeLabel(targetMillis: Long, now: Long): String {
     val difference = targetMillis - now

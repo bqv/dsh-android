@@ -118,12 +118,37 @@ class AutomationTasksTest {
         show(SchedulePageState.Ready(listOf(entry())))
         rule.waitForIdle()
 
-        // The rule names its zone because the device's is UTC in this test.
-        rule.onNodeWithText("Weekly on Mon, Wed at 09:00 (Europe/Helsinki)").assertExists()
+        // The device's zone is the rule's own here, so the row omits the suffix — the
+        // web's decision, and the reason this line once failed while the detail passed.
+        rule.onNodeWithText("Weekly on Mon, Wed at 09:00").assertExists()
         rule.onNodeWithText("Next run 19 Oct 09:00 (in 1 day)").assertExists()
         rule.onNodeWithText("Into Weekly bump session").assertExists()
         rule.onNodeWithText("Never delivered").assertExists()
         rule.onNodeWithText("1 task · 1 enabled").assertExists()
+    }
+
+    @Test
+    fun `a rule names its zone only when it is not the device's`() {
+        show(
+            SchedulePageState.Ready(
+                listOf(
+                    entry(id = "s-local"),
+                    entry(
+                        id = "s-foreign",
+                        title = "Peak reminder",
+                        spec = ScheduleSpec.Daily("00:45:00.000", "UTC"),
+                        scheduledAt = "2026-10-19T00:45:00.000Z",
+                    ),
+                ),
+            ),
+        )
+        rule.waitForIdle()
+
+        // Same zone as the device's (Europe/Helsinki): no suffix, no noise.
+        rule.onNodeWithText("Weekly on Mon, Wed at 09:00").assertExists()
+        rule.onNodeWithText("Weekly on Mon, Wed at 09:00 (Europe/Helsinki)").assertDoesNotExist()
+        // A different zone is named, so "00:45" can never be read as the reader's clock.
+        rule.onNodeWithText("Daily at 00:45 (UTC)").assertExists()
     }
 
     @Test
