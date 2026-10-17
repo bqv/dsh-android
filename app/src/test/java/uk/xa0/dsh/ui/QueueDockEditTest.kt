@@ -3,6 +3,7 @@ package uk.xa0.dsh.ui
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.LayoutInfo
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -14,6 +15,7 @@ import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.printToString
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -128,6 +130,16 @@ class QueueDockEditTest {
         rule.waitForIdle()
         dump("after waitForIdle", withTree = true)
 
+        // The discriminating step. The clickable's own semantics action calls the same
+        // handler with no hit testing and no gesture dispatch, so if the editor opens
+        // here the handler and the state are fine and the touch is what never arrives.
+        if (count("Save queued message") == 0 && count("Edit queued message") > 0) {
+            rule.onNodeWithContentDescription("Edit queued message")
+                .performSemanticsAction(SemanticsActions.OnClick)
+            rule.waitForIdle()
+            dump("after the semantic OnClick", withTree = true)
+        }
+
         val wait = runCatching {
             rule.waitUntil(5_000L) {
                 rule.onNodeWithContentDescription("Save queued message").isDisplayed()
@@ -138,6 +150,11 @@ class QueueDockEditTest {
             throw wait.exceptionOrNull()!!
         }
     }
+
+    /** How many nodes carry a description, in the merged or unmerged tree. */
+    private fun count(label: String, unmerged: Boolean = false): Int =
+        rule.onAllNodesWithContentDescription(label, useUnmergedTree = unmerged)
+            .fetchSemanticsNodes().size
 
     /**
      * Counts every control that says which state the dock is in, and prints each match's
