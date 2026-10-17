@@ -62,6 +62,7 @@ import kotlinx.coroutines.flow.first
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
@@ -235,6 +236,22 @@ fun SessionsDrawer(
      * silently did nothing would be worse than no control at all.
      */
     onAbout: () -> Unit,
+    /**
+     * Opens the host-wide Automation tasks sheet, or null to draw no entry.
+     *
+     * Optional because the drawer is also composed by tests and by surfaces that do
+     * not own the host's schedule catalogue; a null here draws no row rather than a
+     * row that does nothing. Like About, this is a place you go, not a preference —
+     * so it sits in the footer beside them rather than inside Settings.
+     */
+    onAutomations: (() -> Unit)? = null,
+    /**
+     * How many schedules the host says will fire again. Zero draws no count.
+     *
+     * Deliberately *active* only: an ended task is still listed on the sheet, but it
+     * is not running, and a badge that counted it would say otherwise.
+     */
+    activeScheduleTotal: Int = 0,
     /**
      * The persisted Group/Order modes. Passed in rather than held here: they are
      * client-local preferences, so the ViewModel owns them and a cold start
@@ -987,6 +1004,16 @@ fun SessionsDrawer(
                 .height(0.5.dp)
                 .background(colors.borderL1),
         )
+        // A destination, not a preference: the web puts Automation tasks in its own
+        // sidebar panel, and the drawer is the only host-wide shelf this app has.
+        // It is a full row above the Settings/About pair so it reads as a place to
+        // go, and it never intrudes on the composer.
+        onAutomations?.let { open ->
+            AutomationFooterRow(
+                activeCount = activeScheduleTotal,
+                onClick = open,
+            )
+        }
         Row(
             Modifier
                 .fillMaxWidth()
@@ -1012,6 +1039,59 @@ fun SessionsDrawer(
             )
         }
     }
+    }
+}
+
+/**
+ * The drawer's Automation tasks entry: one full-width row, with the count of tasks
+ * that will fire again.
+ *
+ * The count is the *active* total and nothing else. A task that has ended still
+ * appears on the sheet (it can be read and deleted there), but this row must never
+ * imply that it is still running — the same rule that keeps an inactive task out of
+ * `SessionItem.scheduledTaskCount`.
+ */
+@Composable
+private fun AutomationFooterRow(
+    activeCount: Int,
+    onClick: () -> Unit,
+) {
+    val colors = DshTheme.colors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .clip(RoundedCornerShape(DshRadius.md))
+            .clickableNoRipple(onClick = onClick)
+            .testTag("drawer-automation-tasks"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Schedule,
+            contentDescription = null,
+            tint = colors.labelSecondary,
+            modifier = Modifier
+                .size(28.dp)
+                .padding(DshSpacing.sm),
+        )
+        Spacer(Modifier.width(DshSpacing.md))
+        Text(
+            text = "Automation tasks",
+            style = DshType.bodyMedium,
+            color = colors.labelSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.weight(1f))
+        if (activeCount > 0) {
+            Text(
+                text = if (activeCount == 1) "1 active" else "$activeCount active",
+                style = DshType.micro,
+                color = colors.labelTertiary,
+                maxLines = 1,
+            )
+        }
+        Spacer(Modifier.width(DshSpacing.md))
     }
 }
 

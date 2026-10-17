@@ -480,6 +480,9 @@ fun ChatScreen(vm: DshViewModel) {
     var showPresets by rememberSaveable { mutableStateOf(false) }
     var showJobs by rememberSaveable { mutableStateOf(false) }
     var showBrowser by rememberSaveable { mutableStateOf(false) }
+    // Host-wide, and read on open rather than on a timer: the sheet issues its own
+    // `schedule/catalog` call, so nothing here costs anything until it is asked for.
+    var showAutomations by rememberSaveable { mutableStateOf(false) }
 
     // The `conversation.view` strip. The host registers exactly two views — chat
     // (order 0, and the hard-coded default in `view-selection.ts`) and trajectory
@@ -901,6 +904,13 @@ fun ChatScreen(vm: DshViewModel) {
                         // first back gesture.
                         scope.launch { drawerState.close() }
                     },
+                    // Same reason as About: the drawer's own scrim goes first, or the
+                    // first back gesture is spent on a sheet nobody can see.
+                    onAutomations = {
+                        showAutomations = true
+                        scope.launch { drawerState.close() }
+                    },
+                    activeScheduleTotal = ui.activeScheduleTotal,
                 )
             }
         },
@@ -1649,6 +1659,33 @@ fun ChatScreen(vm: DshViewModel) {
             workspaces = ui.workspaces,
             sessionsLoading = ui.sessionsLoading,
             onUnarchive = vm::unarchiveSession,
+        )
+    }
+
+    // Host-wide, so it is a sheet over whatever is open rather than a session view.
+    // The read happens on open (inside the sheet), never here.
+    if (showAutomations) {
+        AutomationSheet(
+            page = ui.schedulePage,
+            historyTaskId = ui.scheduleHistoryTaskId,
+            history = ui.scheduleHistory,
+            deletingId = ui.deletingScheduleId,
+            actionError = ui.scheduleActionError,
+            notice = ui.scheduleNotice,
+            // The catalogue carries only the session id; a title is this client's own
+            // roster fact, and a session it does not hold is shown by id.
+            sessionTitle = { id -> ui.sessions.firstOrNull { it.id == id }?.title },
+            onOpen = vm::openAutomationTasks,
+            onRetry = vm::retryAutomationTasks,
+            onHistory = vm::loadScheduleHistory,
+            onLoadMoreHistory = vm::loadMoreScheduleHistory,
+            onDelete = vm::deleteSchedule,
+            onDismissAction = vm::dismissScheduleAction,
+            onOpenSession = { id ->
+                showAutomations = false
+                vm.openSession(id)
+            },
+            onDismiss = { showAutomations = false },
         )
     }
 
