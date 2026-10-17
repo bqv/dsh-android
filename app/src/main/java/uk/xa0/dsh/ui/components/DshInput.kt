@@ -116,15 +116,15 @@ fun DshTextField(
     /**
      * What the IME may do to the value.
      *
-     * `None` and `false` are the defaults rather than `Unspecified` and `true`:
-     * nearly every field on these screens holds a credential, an identifier or a
-     * query, and an IME that capitalises or rewrites one of those silently hands
-     * the app a different value. The one prose surface — the composer — is not
-     * this component. A password ignores both in favour of [dshKeyboardOptions]'s
+     * These default to the component's previous behaviour rather than to the
+     * safest possible setting, because this field also draws a prose answer (the
+     * approval card's free-text box). A caller that knows its value is an
+     * identifier or a query must say so — the sign-in form does, for the account
+     * name — and a password ignores both in favour of [dshKeyboardOptions]'s
      * fixed secret contract.
      */
     keyboardCapitalization: KeyboardCapitalization = KeyboardCapitalization.None,
-    autoCorrect: Boolean = false,
+    autoCorrect: Boolean = true,
     imeAction: ImeAction = ImeAction.Default,
     /**
      * The field's submit path for the IME's `Done`/`Go` action.
