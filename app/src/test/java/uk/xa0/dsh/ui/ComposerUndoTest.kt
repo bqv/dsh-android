@@ -221,11 +221,11 @@ class ComposerUndoTest {
         rule.waitForIdle()
         rule.runOnIdle { assertEquals("hello", state.text.toString()) }
 
-        field.performKeyPress(ctrl(KeyEvent.KEYCODE_Z))
+        field.performKeyPress(ctrl(android.view.KeyEvent.KEYCODE_Z))
         rule.waitForIdle()
         rule.runOnIdle { assertEquals("", state.text.toString()) }
 
-        field.performKeyPress(ctrl(KeyEvent.KEYCODE_Z, shift = true))
+        field.performKeyPress(ctrl(android.view.KeyEvent.KEYCODE_Z, shift = true))
         rule.waitForIdle()
         rule.runOnIdle { assertEquals("hello", state.text.toString()) }
     }
@@ -239,11 +239,11 @@ class ComposerUndoTest {
         val field = rule.onNode(hasSetTextAction())
         field.performTextInput("hello")
         rule.waitForIdle()
-        field.performKeyPress(ctrl(KeyEvent.KEYCODE_Z))
+        field.performKeyPress(ctrl(android.view.KeyEvent.KEYCODE_Z))
         rule.waitForIdle()
         rule.runOnIdle { assertEquals("", state.text.toString()) }
 
-        field.performKeyPress(ctrl(KeyEvent.KEYCODE_Y))
+        field.performKeyPress(ctrl(android.view.KeyEvent.KEYCODE_Y))
         rule.waitForIdle()
         rule.runOnIdle { assertEquals("hello", state.text.toString()) }
     }
