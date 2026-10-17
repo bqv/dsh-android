@@ -2,6 +2,7 @@ package uk.xa0.dsh.ui
 
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.LayoutInfo
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -10,7 +11,9 @@ import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.printToString
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -99,6 +102,60 @@ class QueueDockEditTest {
         // clock is advanced rather than left to settle so a node is measured.
         rule.mainClock.advanceTimeBy(1_000)
         rule.waitForIdle()
+    }
+
+    /**
+     * Diagnostic, not an assertion: prints where the editor's Save control sits when the
+     * display check refuses it.
+     *
+     * `assertIsDisplayed` can only say *that* the control is not on screen; it cannot say
+     * which ancestor failed to place it or clipped it away. This walks the chain and
+     * prints every ancestor's placement, size and class, plus the unmerged semantics tree,
+     * so one run names the layer that is wrong. It asserts nothing on purpose, and should
+     * be deleted once the answer is in.
+     */
+    @Test
+    fun `diagnostic - where the editor's Save control sits`() {
+        composeDock(listOf(hostRow("run the tests")))
+
+        // Before the swap, so the same chain can be compared with the state that fails.
+        reportNode("Edit queued message", unmerged = false)
+
+        rule.onNodeWithContentDescription("Edit queued message").performClick()
+        rule.mainClock.advanceTimeBy(1_000)
+        rule.waitForIdle()
+
+        reportNode("Save queued message", unmerged = false)
+        reportNode("Save queued message", unmerged = true)
+        println(
+            "[probe] nodes after the swap: edit=" +
+                rule.onAllNodesWithContentDescription("Edit queued message")
+                    .fetchSemanticsNodes().size +
+                " save=" +
+                rule.onAllNodesWithContentDescription("Save queued message")
+                    .fetchSemanticsNodes().size,
+        )
+        println("[probe] tree:\n" + rule.onRoot(useUnmergedTree = true).printToString())
+    }
+
+    /** Prints a node's size and bounds, then every ancestor's placement and size. */
+    private fun reportNode(label: String, unmerged: Boolean) {
+        val node = rule.onNodeWithContentDescription(label, useUnmergedTree = unmerged)
+            .fetchSemanticsNode()
+        println(
+            "[probe] '$label' unmerged=$unmerged size=${node.size} " +
+                "root=${node.boundsInRoot} window=${node.boundsInWindow}",
+        )
+        var info: LayoutInfo? = node.layoutInfo
+        var depth = 0
+        while (info != null) {
+            println(
+                "[probe]   [$depth] ${info.javaClass.simpleName} placed=${info.isPlaced} " +
+                    "attached=${info.isAttached} ${info.width}x${info.height}",
+            )
+            info = info.parentInfo
+            depth++
+        }
     }
 
     @Test
