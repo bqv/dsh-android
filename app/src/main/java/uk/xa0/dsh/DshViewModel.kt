@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -60,6 +61,15 @@ import uk.xa0.dsh.model.activeTaskCounts
 import uk.xa0.dsh.model.AutomationCatalog
 import uk.xa0.dsh.model.readAutomationCatalog
 import uk.xa0.dsh.model.ScheduleSignalLatch
+import uk.xa0.dsh.model.ScheduleCatalogRead
+import uk.xa0.dsh.model.ScheduleDeleteOutcome
+import uk.xa0.dsh.model.ScheduleEntry
+import uk.xa0.dsh.model.ScheduleHistoryRead
+import uk.xa0.dsh.model.activeScheduleCount
+import uk.xa0.dsh.model.readScheduleDeleteResult
+import uk.xa0.dsh.model.readScheduleEntries
+import uk.xa0.dsh.model.readScheduleHistory
+import uk.xa0.dsh.model.sortScheduleEntries
 import uk.xa0.dsh.model.MissingMembersLatch
 import uk.xa0.dsh.model.omittedMembersWarning
 import uk.xa0.dsh.model.FilePreview
@@ -314,6 +324,58 @@ sealed interface BalanceState {
     data object NoKey : BalanceState
     data class Ready(val account: AccountBalance) : BalanceState
     data class Failed(val message: String) : BalanceState
+}
+
+/**
+ * The host-wide Automation tasks list, as one `schedule/catalog` read left it.
+ *
+ * This is a *management* view and is read when the sheet opens, not from every roster
+ * pull: the marks need one field pair per task, while this needs the whole row. The two
+ * reads are independent, so a page that fails to open cannot take the clock marks down
+ * with it, and a stale roster cannot make the page show a task that no longer exists.
+ *
+ * [Ready] keeps the losses alongside the rows rather than hiding them: a skipped row or
+ * an unreadable `status` means the list is incomplete, and a screen that stays silent
+ * about that is the defect this app keeps re-learning.
+ */
+sealed interface SchedulePageState {
+    data object Idle : SchedulePageState
+    data object Loading : SchedulePageState
+    data class Ready(
+        val entries: List<ScheduleEntry>,
+        val droppedRows: Int = 0,
+        val unknownStatusRows: Int = 0,
+        val unknownKindRows: Int = 0,
+    ) : SchedulePageState
+
+    data class Failed(val message: String) : SchedulePageState
+
+    /** The rows a list can draw; empty for every state that has none to show. */
+    val rows: List<ScheduleEntry>
+        get() = (this as? Ready)?.entries ?: emptyList()
+}
+
+/**
+ * One task's saved delivery records, newest first.
+ *
+ * The host pages them by message identity, not by time, and each request needs the
+ * task's original session binding as well as its id — which is why this state is only
+ * ever loaded for a row the catalogue has already handed over.
+ */
+sealed interface ScheduleHistoryState {
+    data object Idle : ScheduleHistoryState
+    data object Loading : ScheduleHistoryState
+
+    data class Ready(
+        val page: ScheduleHistoryRead.Loaded,
+        /** A further page is in flight, so the control says so and stays disabled. */
+        val loadingMore: Boolean = false,
+        /** Why the *further* page failed, kept beside the records already shown. */
+        val moreError: String? = null,
+    ) : ScheduleHistoryState
+
+    /** The host does not hold that task, or the answer was not one this build reads. */
+    data class Unavailable(val message: String) : ScheduleHistoryState
 }
 
 data class ModelOption(
@@ -759,6 +821,37 @@ data class UiState(
      * rather than on every launch.
      */
     val balance: BalanceState = BalanceState.Idle,
+    /**
+     * The host-wide Automation tasks catalogue, from the sheet's own read.
+     *
+     * [SchedulePageState.Idle] until the sheet is first opened; opening re-reads, so a
+     * list left on screen is never the reason a stale row stays actionable.
+     */
+    val schedulePage: SchedulePageState = SchedulePageState.Idle,
+    /** The task whose delivery records are loaded or loading, or null for none. */
+    val scheduleHistoryTaskId: String? = null,
+    val scheduleHistory: ScheduleHistoryState = ScheduleHistoryState.Idle,
+    /** The task a delete is in flight for, so exactly that row shows a busy state. */
+    val deletingScheduleId: String? = null,
+    /** A failed schedule action, said on the sheet's own surface. */
+    val scheduleActionError: String? = null,
+    /**
+     * What the last delete or refresh established, when there is nothing wrong.
+     *
+     * Separate from [scheduleActionError] on purpose: "that task was already gone" is
+     * not a failure, but it is also not silence — the row the reader tapped did vanish,
+     * and saying so is how a refresh does not look like a tap that did nothing.
+     */
+    val scheduleNotice: String? = null,
+    /**
+     * How many schedules the host says will fire again, host-wide.
+     *
+     * The drawer's badge, and the same catalogue the marks come from — folded from the
+     * roster read's `schedule/catalog` answer, so it is current without the management
+     * sheet ever being opened. Zero covers both "no active task" and "the read has
+     * never settled".
+     */
+    val activeScheduleTotal: Int = 0,
     /**
      * The current session's dock rows, from the host control stream plus any
      * local submission echo the host has not admitted yet. Host `queued` and
@@ -2381,18 +2474,32 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         runCatching {
             val value = client.rpcRaw("schedule/catalog")
             val catalog = value as? JSONArray
-            val sample: Pair<Map<String, Int>, String?> = if (catalog == null) {
+            val sample: Triple<Map<String, Int>, Int, String?> = if (catalog == null) {
                 // The call answered, but not with the array. The marks read as none, so
                 // this is a loss and not a "no schedules exist" answer.
-                emptyMap<String, Int>() to
-                    "the host answered schedule/catalog with ${scheduleAnswerShape(value)}, not the task array it returns"
+                Triple(
+                    emptyMap<String, Int>(),
+                    0,
+                    "the host answered schedule/catalog with ${scheduleAnswerShape(value)}, not the task array it returns",
+                )
             } else {
                 val read = readAutomationCatalog(catalog)
-                activeTaskCounts(read.tasks) to scheduleCatalogLoss(read)
+                Triple(
+                    activeTaskCounts(read.tasks),
+                    read.tasks.count { it.active },
+                    scheduleCatalogLoss(read),
+                )
             }
             sample
-        }.onSuccess { (counts, loss) ->
+        }.onSuccess { (counts, active, loss) ->
             scheduleCounts = counts
+            // The drawer's badge, not the sheet's list: this is the one read that
+            // happens on every roster pull, so it keeps the count current without the
+            // management sheet ever being opened. Only a changed count is published —
+            // a copy per pull would repaint the drawer for nothing.
+            if (_ui.value.activeScheduleTotal != active) {
+                _ui.value = _ui.value.copy(activeScheduleTotal = active)
+            }
             noteScheduleSignal(loss)
         }.onFailure { error ->
             noteScheduleSignal(
@@ -2456,6 +2563,345 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         runCatching {
             Log.w(SCHEDULE_TAG, "schedule marks lost: $line")
         }
+    }
+
+    // ------------------------------------------------------- automation tasks
+
+    /** The management catalogue's own read, so opening twice does not race itself. */
+    private var schedulePageJob: Job? = null
+
+    /** One task's delivery-history read; superseded by opening another task's. */
+    private var scheduleHistoryJob: Job? = null
+
+    /**
+     * Which catalogue read is current.
+     *
+     * `rpcRaw` blocks in OkHttp, so cancelling the job does not stop the call: a read
+     * superseded while it was in flight would otherwise land after the newer one and
+     * repaint the list with older rows. Every write checks this before it happens.
+     */
+    private var schedulePageGeneration: Int = 0
+
+    /** The same guard for the history read, where the wrong task's records are worse. */
+    private var scheduleHistoryGeneration: Int = 0
+
+    /**
+     * Opens the Automation tasks sheet: a fresh catalogue read every time.
+     *
+     * The sheet is the only reader of this, and it is opened deliberately, so the read
+     * is cheap and always current. The clock marks do not use it — they keep their own
+     * per-roster-pull read — so a failure here cannot take them down.
+     */
+    fun openAutomationTasks() {
+        schedulePageJob?.cancel()
+        val generation = ++schedulePageGeneration
+        _ui.value = _ui.value.copy(
+            schedulePage = SchedulePageState.Loading,
+            scheduleActionError = null,
+            scheduleNotice = null,
+            scheduleHistoryTaskId = null,
+            scheduleHistory = ScheduleHistoryState.Idle,
+        )
+        schedulePageJob = viewModelScope.launch { readSchedulePage(generation) }
+    }
+
+    /** The sheet's Retry control. Same read, from the beginning of the list. */
+    fun retryAutomationTasks() = openAutomationTasks()
+
+    /**
+     * Reads the host-wide catalogue for the management list.
+     *
+     * `schedule/catalog` takes no arguments and answers with a bare array, so it goes
+     * through [DshClient.rpcRaw]. Every way the answer can be short of a list is said
+     * on the sheet *and* logged: a page that silently shows eight of twelve tasks is
+     * the failure mode this screen exists to end.
+     */
+    private suspend fun readSchedulePage(generation: Int) {
+        try {
+            val value = client.rpcRaw("schedule/catalog")
+            if (generation != schedulePageGeneration) return
+            val catalog = value as? JSONArray
+            if (catalog == null) {
+                val reason = "the host answered schedule/catalog with ${scheduleAnswerShape(value)}, " +
+                    "not the task array it returns"
+                Log.w(SCHEDULE_TAG, "schedule list unreadable: $reason")
+                _ui.value = _ui.value.copy(
+                    schedulePage = SchedulePageState.Failed(
+                        "Could not read the schedule list: $reason.",
+                    ),
+                )
+                return
+            }
+            val read = readScheduleEntries(catalog)
+            _ui.value = _ui.value.copy(
+                schedulePage = SchedulePageState.Ready(
+                    entries = sortScheduleEntries(read.entries),
+                    droppedRows = read.droppedRows,
+                    unknownStatusRows = read.unknownStatusRows,
+                    unknownKindRows = read.unknownKindRows,
+                ),
+                activeScheduleTotal = activeScheduleCount(read.entries),
+            )
+            schedulePageLoss(read)?.let {
+                Log.w(SCHEDULE_TAG, "schedule list is incomplete: $it")
+            }
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            if (generation != schedulePageGeneration) return
+            val reason = describe(error)
+            Log.w(SCHEDULE_TAG, "schedule list read failed: $reason")
+            if (error is DshAuthException) onAuthFailure("schedule/catalog", error)
+            _ui.value = _ui.value.copy(
+                schedulePage = SchedulePageState.Failed(
+                    "Could not read the schedule list: $reason",
+                ),
+            )
+        }
+    }
+
+    /**
+     * The reason a *successful* catalogue read still leaves the list short, or null.
+     *
+     * Three different losses, stated apart because each needs a different fix: rows
+     * missing from the answer, a status this build cannot read (such a task is never
+     * counted as running), and a rule kind it cannot render (the task is still listed,
+     * because it can still be opened and deleted). None of them is repaired here.
+     */
+    private fun schedulePageLoss(read: ScheduleCatalogRead): String? {
+        val clauses = ArrayList<String>(3)
+        if (read.droppedRows > 0) {
+            clauses += "${read.droppedRows} of ${read.rows} rows named no task id or no sessionId and are not listed"
+        }
+        if (read.unknownStatusRows > 0) {
+            clauses += "${read.unknownStatusRows} of ${read.rows} tasks carried a status this build does not know, " +
+                "so they are not counted as running"
+        }
+        if (read.unknownKindRows > 0) {
+            clauses += "${read.unknownKindRows} of ${read.rows} tasks carry a rule kind this build does not know, " +
+                "so their timing is not rendered"
+        }
+        if (clauses.isEmpty()) return null
+        return clauses.joinToString("; ")
+    }
+
+    /**
+     * Loads one task's saved delivery records, newest first.
+     *
+     * The request needs the task's id *and* the session it was stored against, because
+     * the host checks the binding before it reads a row; [entry] is a catalogue row, so
+     * both are in hand.
+     */
+    fun loadScheduleHistory(entry: ScheduleEntry) {
+        scheduleHistoryJob?.cancel()
+        val generation = ++scheduleHistoryGeneration
+        _ui.value = _ui.value.copy(
+            scheduleHistoryTaskId = entry.id,
+            scheduleHistory = ScheduleHistoryState.Loading,
+            scheduleActionError = null,
+        )
+        scheduleHistoryJob = viewModelScope.launch {
+            readScheduleHistoryPage(entry, before = null, generation = generation)
+        }
+    }
+
+    /** Appends the next page, using the oldest message identity already shown. */
+    fun loadMoreScheduleHistory(entry: ScheduleEntry) {
+        val current = _ui.value.scheduleHistory
+        if (current !is ScheduleHistoryState.Ready || current.loadingMore) return
+        val before = current.page.nextBefore ?: return
+        val generation = ++scheduleHistoryGeneration
+        _ui.value = _ui.value.copy(
+            scheduleHistory = current.copy(loadingMore = true, moreError = null),
+        )
+        scheduleHistoryJob = viewModelScope.launch {
+            readScheduleHistoryPage(entry, before, generation)
+        }
+    }
+
+    /**
+     * One page of delivery records, first or next.
+     *
+     * A further page's failure does not throw away the records already on screen: it is
+     * reported beside them, which is the only reading that stays true — the page that
+     * failed is missing, not the ones that arrived.
+     */
+    private suspend fun readScheduleHistoryPage(
+        entry: ScheduleEntry,
+        before: String?,
+        generation: Int,
+    ) {
+        try {
+            // The gateway binds these remotes by *named* argument and refuses any
+            // field that is not one of them (`assertExactArguments` in
+            // `dsh-api-gateway`), so the schedule request rides under `request` —
+            // the same shape the host's generated descriptor declares, and the same
+            // one `session/create` and `session/prompt` already use.
+            val request = JSONObject()
+                .put("id", entry.id)
+                .put("sessionId", entry.sessionId)
+                .put("limit", SCHEDULE_HISTORY_LIMIT)
+            if (before != null) request.put("before", before)
+            val value = client.rpcRaw("schedule/history", JSONObject().put("request", request))
+            if (generation != scheduleHistoryGeneration) return
+            when (val read = readScheduleHistory(value)) {
+                is ScheduleHistoryRead.Loaded -> {
+                    val previous = _ui.value.scheduleHistory
+                    val merged = if (before == null || previous !is ScheduleHistoryState.Ready) {
+                        read
+                    } else {
+                        read.copy(records = previous.page.records + read.records)
+                    }
+                    _ui.value = _ui.value.copy(
+                        scheduleHistory = ScheduleHistoryState.Ready(page = merged),
+                    )
+                }
+
+                is ScheduleHistoryRead.Gone -> {
+                    Log.w(SCHEDULE_TAG, "schedule/history ${entry.id} is gone: ${read.code}")
+                    _ui.value = _ui.value.copy(
+                        scheduleHistory = ScheduleHistoryState.Unavailable(
+                            "This task is no longer on the host.",
+                        ),
+                    )
+                }
+
+                is ScheduleHistoryRead.Unusable -> {
+                    Log.w(SCHEDULE_TAG, "schedule/history ${entry.id} unreadable: ${read.reason}")
+                    _ui.value = _ui.value.copy(
+                        scheduleHistory = ScheduleHistoryState.Unavailable(
+                            "Could not load delivery records: ${read.reason}.",
+                        ),
+                    )
+                }
+            }
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            if (generation != scheduleHistoryGeneration) return
+            val reason = describe(error)
+            Log.w(SCHEDULE_TAG, "schedule/history ${entry.id} failed: $reason")
+            if (error is DshAuthException) onAuthFailure("schedule/history", error)
+            val previous = _ui.value.scheduleHistory
+            _ui.value = _ui.value.copy(
+                scheduleHistory = if (before != null && previous is ScheduleHistoryState.Ready) {
+                    previous.copy(
+                        loadingMore = false,
+                        moreError = "Could not load more records: $reason",
+                    )
+                } else {
+                    ScheduleHistoryState.Unavailable("Could not load delivery records: $reason")
+                },
+            )
+        }
+    }
+
+    /**
+     * Deletes one schedule, after the sheet's own confirmation.
+     *
+     * This is the only mutation this client performs on a schedule. The request carries
+     * the task id and its session binding, nothing else: `schedule/delete` is not a
+     * compare-and-update, so there is no record to echo back and no conflict to lose.
+     *
+     * Three outcomes, all of them said on screen and all of them logged:
+     *  - `deleted: true` — the row is removed locally and the count drops;
+     *  - `deleted: false` with `schedule_not_found` — somebody else's delete got there
+     *    first; the row is removed and the reader is told, rather than left with a row
+     *    that will never work;
+     *  - a thrown host error or an answer this build cannot read — nothing is removed,
+     *    and the reason is shown and logged.
+     *
+     * A successful delete is **not** re-read from the host: the call's own answer is the
+     * authority for the row it removed, and a catalogue read issued after the tap would
+     * be a second, slower truth about the same fact.
+     */
+    fun deleteSchedule(entry: ScheduleEntry) {
+        if (_ui.value.deletingScheduleId != null) {
+            // Refusing silently would be the app's oldest defect: a tap that acts
+            // on nothing and says nothing. One delete at a time, and the sheet is
+            // told why the second one did not start.
+            _ui.value = _ui.value.copy(
+                scheduleActionError = "Another task is still being deleted. Try again in a moment.",
+            )
+            return
+        }
+        _ui.value = _ui.value.copy(
+            deletingScheduleId = entry.id,
+            scheduleActionError = null,
+            scheduleNotice = null,
+        )
+        viewModelScope.launch {
+            try {
+                // Named, not flat: `schedule/delete` declares one wire argument,
+                // `request`, and the gateway rejects both missing and extra fields.
+                val value = client.rpcRaw(
+                    "schedule/delete",
+                    JSONObject().put(
+                        "request",
+                        JSONObject().put("id", entry.id).put("sessionId", entry.sessionId),
+                    ),
+                )
+                when (val outcome = readScheduleDeleteResult(value)) {
+                    ScheduleDeleteOutcome.Deleted -> {
+                        Log.i(SCHEDULE_TAG, "schedule/delete removed ${entry.id}")
+                        removeScheduleRow(entry.id, notice = "Task deleted.")
+                    }
+
+                    ScheduleDeleteOutcome.NotFound -> {
+                        Log.w(SCHEDULE_TAG, "schedule/delete ${entry.id} found nothing to delete")
+                        removeScheduleRow(
+                            entry.id,
+                            notice = "That task had already gone from the host, so it has been removed from the list.",
+                        )
+                    }
+
+                    is ScheduleDeleteOutcome.Unusable -> {
+                        Log.w(
+                            SCHEDULE_TAG,
+                            "schedule/delete ${entry.id} answered with something unreadable: ${outcome.reason}",
+                        )
+                        _ui.value = _ui.value.copy(
+                            deletingScheduleId = null,
+                            scheduleActionError = "Could not delete the task: ${outcome.reason}.",
+                        )
+                    }
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                val reason = describe(error)
+                Log.w(SCHEDULE_TAG, "schedule/delete ${entry.id} failed: $reason")
+                if (error is DshAuthException) onAuthFailure("schedule/delete", error)
+                _ui.value = _ui.value.copy(
+                    deletingScheduleId = null,
+                    scheduleActionError = "Could not delete the task: $reason",
+                )
+            }
+        }
+    }
+
+    /**
+     * Drops one row from the management list after the host has confirmed it is gone.
+     *
+     * Only the rows already read are touched, so this cannot invent a task, and the
+     * badge is recomputed from the same rows so it cannot keep counting the deleted one.
+     * A history view belonging to the deleted task is cleared with it.
+     */
+    private fun removeScheduleRow(id: String, notice: String) {
+        val page = _ui.value.schedulePage
+        val entries = page.rows.filterNot { it.id == id }
+        val clearsHistory = _ui.value.scheduleHistoryTaskId == id
+        _ui.value = _ui.value.copy(
+            schedulePage = if (page is SchedulePageState.Ready) page.copy(entries = entries) else page,
+            activeScheduleTotal = activeScheduleCount(entries),
+            deletingScheduleId = null,
+            scheduleNotice = notice,
+            scheduleHistoryTaskId = if (clearsHistory) null else _ui.value.scheduleHistoryTaskId,
+            scheduleHistory = if (clearsHistory) ScheduleHistoryState.Idle else _ui.value.scheduleHistory,
+        )
+    }
+
+    /** Clears the sheet's action line once it has been read. */
+    fun dismissScheduleAction() {
+        if (_ui.value.scheduleActionError == null && _ui.value.scheduleNotice == null) return
+        _ui.value = _ui.value.copy(scheduleActionError = null, scheduleNotice = null)
     }
 
     /** The last running summary written to the diag file, so an unchanged pull is silent. */
@@ -7891,6 +8337,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
          * at from the screen. See [refreshScheduleCounts].
          */
         const val SCHEDULE_TAG = "DshSchedule"
+
+        /**
+         * How many delivery records one `schedule/history` page asks for.
+         *
+         * The host's own bound is 1 through 100, and it refuses anything outside it. A
+         * page this size keeps one request small on a phone while still showing enough
+         * of a busy task to be useful; older records are a "Load more" away.
+         */
+        const val SCHEDULE_HISTORY_LIMIT = 20
         const val APPROVAL_TIMEOUT_MS = 5 * 60 * 1000L
 
         /**
