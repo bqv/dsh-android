@@ -6,6 +6,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -48,7 +49,15 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * callbacks the dock hands back.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], application = HarnessApplication::class)
+@Config(
+    sdk = [34],
+    application = HarnessApplication::class,
+    // Robolectric's default display is w320dp-h470dp. The dock is short, but the
+    // editor is an animated swap and this class drives it with real touch input;
+    // a phone-sized window keeps the whole exchange inside the composed surface,
+    // the same way `PasswordFieldTest` does for the sign-in form.
+    qualifiers = "w411dp-h891dp",
+)
 class QueueDockEditTest {
 
     @get:Rule
@@ -103,6 +112,13 @@ class QueueDockEditTest {
         rule.mainClock.advanceTimeBy(1_000)
         rule.waitForIdle()
 
+        // The actions are a crossfade, so the incoming Save/Cancel row can be
+        // composed a frame before it is placed. Waiting for displayed-ness and then
+        // asserting it keeps the assertion the point — nothing here is relaxed to
+        // "exists"; it just stops reading the swap mid-frame.
+        rule.waitUntil(5_000L) {
+            rule.onNodeWithContentDescription("Save queued message").isDisplayed()
+        }
         rule.onNodeWithContentDescription("Save queued message").assertIsDisplayed()
         rule.onNodeWithContentDescription("Cancel editing").assertIsDisplayed()
     }
@@ -115,6 +131,11 @@ class QueueDockEditTest {
         rule.onNodeWithContentDescription("Edit queued message").performClick()
         rule.mainClock.advanceTimeBy(1_000)
         rule.waitForIdle()
+        // Same swap as above: the Save control has to be placed before a real touch
+        // can be injected into it.
+        rule.waitUntil(5_000L) {
+            rule.onNodeWithContentDescription("Save queued message").isDisplayed()
+        }
         rule.onNodeWithContentDescription("Save queued message").performClick()
         rule.mainClock.advanceTimeBy(1_000)
         rule.waitForIdle()
