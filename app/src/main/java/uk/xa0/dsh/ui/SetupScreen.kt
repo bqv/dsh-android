@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -20,6 +21,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import uk.xa0.dsh.model.StartupCopy
@@ -82,6 +85,22 @@ fun SetupScreen(
     var cookie by rememberSaveable { mutableStateOf("") }
     var advanced by rememberSaveable { mutableStateOf(false) }
 
+    // One sign-in is one request. The latch is written synchronously by the tap
+    // or by the IME's Done, so a second event in the same frame — a double tap,
+    // or Done followed by a tap — is dropped before it can post the same
+    // credentials a second time. A second request in flight is exactly how a
+    // user adds a strike to their own account. The latch is released when the
+    // attempt ends: `busy` returns to false on a failure, and the screen has to
+    // be usable again.
+    var submitting by remember { mutableStateOf(false) }
+    LaunchedEffect(busy) { if (!busy) submitting = false }
+    val submit: () -> Unit = {
+        if (!submitting && !busy && url.isNotBlank()) {
+            submitting = true
+            onConnect(url, lanUrl, username, password, cookie)
+        }
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -125,6 +144,15 @@ fun SetupScreen(
                 onValueChange = { username = it },
                 placeholder = "username",
                 label = "Account",
+                // A username is an identifier, not prose: an IME that capitalises
+                // it or autocorrects it submits a different account than the one
+                // typed, and repeated failures are how an account gets locked.
+                // The type stays Text rather than Email, which would change the
+                // keyboard layout for a field that is not an address.
+                keyboardType = KeyboardType.Text,
+                keyboardCapitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+                imeAction = ImeAction.Next,
             )
             DshTextField(
                 value = password,
@@ -132,6 +160,10 @@ fun SetupScreen(
                 placeholder = "password",
                 label = "Password",
                 isPassword = true,
+                // Done posts the form rather than only putting the keyboard away,
+                // which is what it did when no keyboard actions were wired.
+                imeAction = ImeAction.Done,
+                onImeDone = submit,
             )
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -192,8 +224,8 @@ fun SetupScreen(
                     busy -> startupStep?.let { StartupCopy.title(it) } ?: "Connecting…"
                     else -> "Connect"
                 },
-                enabled = !busy && url.isNotBlank(),
-                onClick = { onConnect(url, lanUrl, username, password, cookie) },
+                enabled = !busy && !submitting && url.isNotBlank(),
+                onClick = submit,
             )
 
             if (busy) {
