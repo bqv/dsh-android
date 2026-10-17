@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
@@ -105,56 +106,92 @@ class QueueDockEditTest {
     }
 
     /**
-     * Diagnostic, not an assertion: prints where the editor's Save control sits when the
-     * display check refuses it.
+     * Diagnostic, not an assertion: prints what the dock is showing at each point around
+     * the editor swap, and again if the display wait times out.
      *
-     * `assertIsDisplayed` can only say *that* the control is not on screen; it cannot say
-     * which ancestor failed to place it or clipped it away. This walks the chain and
-     * prints every ancestor's placement, size and class, plus the unmerged semantics tree,
-     * so one run names the layer that is wrong. It asserts nothing on purpose, and should
-     * be deleted once the answer is in.
+     * The previous version fetched single nodes, so the first missing or duplicated node
+     * threw and the post-swap chain was never printed. This one counts instead of fetching,
+     * dumps before the click, straight after it, after the clock advance, after idle, and
+     * once more on the timeout path, so the failing path cannot hide the evidence. It
+     * asserts nothing on purpose; delete it once the answer is in.
      */
     @Test
     fun `diagnostic - where the editor's Save control sits`() {
         composeDock(listOf(hostRow("run the tests")))
-
-        // Before the swap, so the same chain can be compared with the state that fails.
-        reportNode("Edit queued message", unmerged = false)
+        dump("before the click")
 
         rule.onNodeWithContentDescription("Edit queued message").performClick()
-        rule.mainClock.advanceTimeBy(1_000)
-        rule.waitForIdle()
+        dump("straight after the click, before the clock is advanced")
 
-        reportNode("Save queued message", unmerged = false)
-        reportNode("Save queued message", unmerged = true)
-        println(
-            "[probe] nodes after the swap: edit=" +
-                rule.onAllNodesWithContentDescription("Edit queued message")
-                    .fetchSemanticsNodes().size +
-                " save=" +
-                rule.onAllNodesWithContentDescription("Save queued message")
-                    .fetchSemanticsNodes().size,
-        )
-        println("[probe] tree:\n" + rule.onRoot(useUnmergedTree = true).printToString())
+        rule.mainClock.advanceTimeBy(1_000)
+        dump("after the clock advance, before waitForIdle")
+        rule.waitForIdle()
+        dump("after waitForIdle", withTree = true)
+
+        val wait = runCatching {
+            rule.waitUntil(5_000L) {
+                rule.onNodeWithContentDescription("Save queued message").isDisplayed()
+            }
+        }
+        if (wait.isFailure) {
+            dump("after the waitUntil timed out", withTree = true)
+            throw wait.exceptionOrNull()!!
+        }
     }
 
-    /** Prints a node's size and bounds, then every ancestor's placement and size. */
-    private fun reportNode(label: String, unmerged: Boolean) {
-        val node = rule.onNodeWithContentDescription(label, useUnmergedTree = unmerged)
-            .fetchSemanticsNode()
-        println(
-            "[probe] '$label' unmerged=$unmerged size=${node.size} " +
-                "root=${node.boundsInRoot} window=${node.boundsInWindow}",
+    /**
+     * Counts every control that says which state the dock is in, and prints each match's
+     * bounds and ancestor chain. Nothing here fetches a single node, so a missing or
+     * duplicated control is reported as a count rather than thrown.
+     */
+    private fun dump(where: String, withTree: Boolean = false) {
+        println("[probe] ===== $where =====")
+        val labels = listOf(
+            "Edit queued message",
+            "Save queued message",
+            "Cancel editing",
+            "Remove queued message",
+            "Steer queued message",
+            "Contains non-text content; editing is not supported yet",
         )
-        var info: LayoutInfo? = node.layoutInfo
-        var depth = 0
-        while (info != null) {
-            println(
-                "[probe]   [$depth] ${info.javaClass.simpleName} placed=${info.isPlaced} " +
-                    "attached=${info.isAttached} ${info.width}x${info.height}",
-            )
-            info = info.parentInfo
-            depth++
+        for (label in labels) {
+            for (unmerged in listOf(false, true)) {
+                val nodes = runCatching {
+                    rule.onAllNodesWithContentDescription(label, useUnmergedTree = unmerged)
+                        .fetchSemanticsNodes()
+                }.getOrElse {
+                    println("[probe] '$label' unmerged=$unmerged unreadable: $it")
+                    emptyList()
+                }
+                println("[probe] '$label' unmerged=$unmerged count=${nodes.size}")
+                nodes.forEachIndexed { index, node ->
+                    runCatching {
+                        println(
+                            "[probe]   [$index] size=${node.size} root=${node.boundsInRoot} " +
+                                "window=${node.boundsInWindow}",
+                        )
+                        var info: LayoutInfo? = node.layoutInfo
+                        var depth = 0
+                        while (info != null) {
+                            println(
+                                "[probe]     [$depth] ${info.javaClass.simpleName} " +
+                                    "placed=${info.isPlaced} attached=${info.isAttached} " +
+                                    "${info.width}x${info.height}",
+                            )
+                            info = info.parentInfo
+                            depth++
+                        }
+                    }.onFailure { println("[probe]   [$index] unreadable: $it") }
+                }
+            }
+        }
+        val fields = runCatching {
+            rule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().size
+        }
+        println("[probe] text fields = ${fields.getOrElse { "unreadable: $it" }}")
+        if (withTree) {
+            val tree = runCatching { rule.onRoot(useUnmergedTree = true).printToString() }
+            println("[probe] tree:\n" + tree.getOrElse { "unreadable: $it" })
         }
     }
 
