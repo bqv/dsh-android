@@ -82,7 +82,7 @@ class ComposerDraftTest {
     @Test
     fun `the field's own saver keeps the text and the selection`() {
         val state = TextFieldState("hello /mod", initialSelection = TextRange(10))
-        val saved = requireNotNull(TextFieldState.Saver.save(AnythingScope, state))
+        val saved = requireNotNull(with(AnythingScope) { TextFieldState.Saver.save(state) })
         val restored = requireNotNull(TextFieldState.Saver.restore(saved))
 
         assertEquals("hello /mod", restored.text.toString())

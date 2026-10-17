@@ -268,7 +268,7 @@ class ComposerUndoTest {
         rule.waitForIdle()
 
         rule.runOnIdle {
-            val saved = requireNotNull(TextFieldState.Saver.save(AnythingScope, state))
+            val saved = requireNotNull(with(AnythingScope) { TextFieldState.Saver.save(state) })
             val restored = requireNotNull(TextFieldState.Saver.restore(saved))
 
             assertEquals("hello", restored.text.toString())
