@@ -105,7 +105,8 @@ class SearchClearTest {
     /**
      * The affordance is opt-in. A password, a host URL or an API key keeps the
      * field it had, so a form cannot grow a control that offers to throw away what
-     * the user cannot read back.
+     * the user cannot read back. A password field's trailing slot is already taken
+     * by the reveal toggle, the one control there that helps rather than discards.
      */
     @Test
     fun `a field with no onClear draws no affordance`() {

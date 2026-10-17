@@ -16,13 +16,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,7 +41,10 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -104,6 +113,26 @@ fun DshTextField(
     label: String? = null,
     isPassword: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
+    /**
+     * What the IME may do to the value.
+     *
+     * `None` and `false` are the defaults rather than `Unspecified` and `true`:
+     * nearly every field on these screens holds a credential, an identifier or a
+     * query, and an IME that capitalises or rewrites one of those silently hands
+     * the app a different value. The one prose surface — the composer — is not
+     * this component. A password ignores both in favour of [dshKeyboardOptions]'s
+     * fixed secret contract.
+     */
+    keyboardCapitalization: KeyboardCapitalization = KeyboardCapitalization.None,
+    autoCorrect: Boolean = false,
+    imeAction: ImeAction = ImeAction.Default,
+    /**
+     * The field's submit path for the IME's `Done`/`Go` action.
+     *
+     * Without it Compose's default for `Done` is to put the keyboard away, which
+     * on a sign-in form looks like a submit that did nothing.
+     */
+    onImeDone: (() -> Unit)? = null,
     singleLine: Boolean = true,
     minHeight: Dp = 44.dp,
     /**
@@ -133,6 +162,14 @@ fun DshTextField(
     // requester is preferred because it names the same node.
     val ownFocus = remember { FocusRequester() }
     val fieldFocus = focusRequester ?: ownFocus
+    // Masked until the person using the screen asks otherwise, including after a
+    // rotation: the last thing typed into a password field is not the thing to
+    // uncover by default.
+    var revealed by rememberSaveable { mutableStateOf(false) }
+    val masked = isPassword && !revealed
+    val keyboardActions = onImeDone?.let { done ->
+        KeyboardActions(onDone = { done() }, onGo = { done() })
+    } ?: KeyboardActions.Default
 
     Column(modifier) {
         if (label != null) {
@@ -162,8 +199,15 @@ fun DshTextField(
                         singleLine = singleLine,
                         textStyle = DshType.messageBody.copy(color = colors.labelPrimary),
                         cursorBrush = SolidColor(colors.accent),
-                        visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
-                        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                        visualTransformation = if (masked) PasswordVisualTransformation() else VisualTransformation.None,
+                        keyboardOptions = dshKeyboardOptions(
+                            keyboardType = keyboardType,
+                            capitalization = keyboardCapitalization,
+                            autoCorrect = autoCorrect,
+                            imeAction = imeAction,
+                            isPassword = isPassword,
+                        ),
+                        keyboardActions = keyboardActions,
                         // Let the text drive its own height for single-line fields so a
                         // larger font scale can never clip the value.
                         modifier = Modifier
@@ -172,33 +216,68 @@ fun DshTextField(
                             .then(if (singleLine) Modifier else Modifier.heightIn(min = minHeight)),
                     )
                 }
-                // Only while there is something to clear, which is also what takes
-                // it away again the moment the last character is backspaced out —
-                // there is no separate visibility state to fall out of step.
-                if (onClear != null && value.isNotEmpty()) {
-                    Icon(
+                // One trailing slot, never two controls stacked. A password's slot
+                // is always the reveal toggle, whether or not there is anything to
+                // reveal: it must not appear with the first character or grow on
+                // the flip, or the field would resize under the thumb that just
+                // tapped it. That also settles the collision with the clear
+                // affordance — a secret keeps the one control that helps it, and
+                // the "x" stays a query affordance. The clear is drawn only while
+                // there is something to clear, which is what takes it away the
+                // moment the last character is backspaced out; there is no
+                // separate visibility state to fall out of step.
+                when {
+                    isPassword -> TrailingIcon(
+                        imageVector = if (revealed) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                        contentDescription = if (revealed) "Hide password" else "Show password",
+                        // Deliberately no focus request: revealing is not editing,
+                        // so the caret and the keyboard stay exactly where they
+                        // were and the value is untouched.
+                        onClick = { revealed = !revealed },
+                    )
+
+                    onClear != null && value.isNotEmpty() -> TrailingIcon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = clearContentDescription,
-                        tint = colors.labelTertiary,
-                        modifier = Modifier
-                            // One line of `messageBody` (14sp/24sp) at the default
-                            // font scale, so the affordance stays inside the height
-                            // the text already claims. A box taller than the line
-                            // would grow the field the moment the first character
-                            // was typed and shove everything below it down the
-                            // screen. The inset leaves a 16dp glyph in that target.
-                            .size(24.dp)
-                            .clip(CircleShape)
-                            .clickableNoRipple {
-                                fieldFocus.requestFocus()
-                                onClear()
-                            }
-                            .padding(DshSpacing.xs),
+                        onClick = {
+                            fieldFocus.requestFocus()
+                            onClear()
+                        },
                     )
                 }
             }
         }
     }
+}
+
+/**
+ * One trailing control, at the size of the line the field already claims.
+ *
+ * Sizing lives before the glyph, not inside it, so the slot has the same
+ * footprint whatever is drawn in it — which is what makes the reveal toggle
+ * unable to move the field when it flips.
+ */
+@Composable
+private fun TrailingIcon(
+    imageVector: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    Icon(
+        imageVector = imageVector,
+        contentDescription = contentDescription,
+        tint = DshTheme.colors.labelTertiary,
+        modifier = Modifier
+            // One line of `messageBody` (14sp/24sp) at the default font scale, so
+            // the affordance stays inside the height the text already claims. A
+            // box taller than the line would grow the field the moment it was
+            // drawn and shove everything below it down the screen. The inset
+            // leaves a 16dp glyph in that target.
+            .size(24.dp)
+            .clip(CircleShape)
+            .clickableNoRipple(onClick = onClick)
+            .padding(DshSpacing.xs),
+    )
 }
 
 /** Flat primary button used on the setup screen. */
