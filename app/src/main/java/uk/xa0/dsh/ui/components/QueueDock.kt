@@ -321,12 +321,6 @@ fun QueueDock(
                                         .background(colors.borderL1),
                                 )
                             }
-                            // PROBE — temporary with QueueDockEditTest's diagnostic:
-                            // what this row is told about the edit it would be showing.
-                            println(
-                                "[probe] row ${row.id} editing=$editing " +
-                                    "seen=${editing?.takeIf { it.first == row.id }?.second}",
-                            )
                             QueueRow(
                                 row = row,
                                 showLead = shown.size == 1,
@@ -334,12 +328,7 @@ fun QueueDock(
                                 busy = busy,
                                 running = running,
                                 editing = editing?.takeIf { it.first == row.id }?.second,
-                                onStartEdit = { text ->
-                                    // PROBE — temporary with QueueDockEditTest's diagnostic:
-                                    // does the control's handler run at all?
-                                    println("[probe] onStartEdit ${row.id} text=${text.take(16)}")
-                                    editing = row.id to text
-                                },
+                                onStartEdit = { text -> editing = row.id to text },
                                 onCancelEdit = { editing = null },
                                 onSubmitEdit = { text ->
                                     editing = null
