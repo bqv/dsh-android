@@ -9,6 +9,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -16,7 +17,9 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -40,8 +43,9 @@ import uk.xa0.dsh.ui.theme.DshTheme
  *     will do ("Show password" while masked, "Hide password" while revealed);
  *  2. the reveal control is in the tree before any text is typed and occupies
  *     the same bounds after a flip, so it cannot appear under or shove the field;
- *  3. `Done` on the password field posts the form, and neither a second `Done`
- *     nor a tap after it posts a second time.
+ *  3. `Done` on the password field posts the form, and neither a second `Done`,
+ *     nor a tap after it, nor two taps on Connect in the same frame post a
+ *     second time.
  *
  * ## What these cannot show
  *
@@ -54,9 +58,20 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * claims. Finally, the `Account` field's own options are not visible in the
  * semantics tree at all; that wiring is read from `SetupScreen` source, while
  * this file proves only the password path end to end.
+ *
+ * The screen is composed on a display tall enough for the whole form. That is
+ * not decoration: `performClick` on Android is a real touch injection, not the
+ * semantic click action, and Robolectric's default screen is 470dp high while
+ * this form's Connect button starts at roughly 530dp. Without the height below,
+ * a "click" lands outside the window, reaches nothing, and reads as a form that
+ * posted zero times.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], application = HarnessApplication::class)
+@Config(
+    sdk = [34],
+    application = HarnessApplication::class,
+    qualifiers = "w480dp-h1000dp",
+)
 class PasswordFieldTest {
 
     @get:Rule
@@ -231,18 +246,32 @@ class PasswordFieldTest {
     }
 
     /**
-     * A double tap is two activations of the same button. The second one still
-     * reaches the handler, because a disabled `clickable` keeps its semantic
-     * action, so the assertion is about the latch and not about the harness
-     * quietly dropping the event.
+     * A thumb's double tap: both taps are queued and dispatched before any
+     * recomposition, which is the test API's documented behaviour and the exact
+     * window the latch exists for. The button is still enabled when the second
+     * tap arrives (its pointer node is only updated on recomposition), so the
+     * second tap does reach `submit`, and only the latch can stop it.
+     *
+     * `assertIsEnabled` first is deliberate: if the form ever lapsed into a
+     * state where the button was dead before the first tap, this test would say
+     * so on that line rather than reporting "submitted zero times", which is
+     * also what a tap that missed the window looks like.
      */
     @Test
     fun `a double tap on Connect submits once`() {
         var calls = 0
         showSetup { _, _, _, _, _ -> calls += 1 }
 
-        rule.onNodeWithText("Connect").performClick()
-        rule.onNodeWithText("Connect").performClick()
+        val connect = rule.onNodeWithText("Connect")
+        connect.assertIsEnabled()
+        // The form scrolls on a short screen; a touch at a point outside the
+        // viewport reaches nothing, which is what made this test read as zero
+        // submissions before the height above and this scroll were added.
+        connect.performScrollTo()
+        connect.performTouchInput {
+            click()
+            click()
+        }
 
         rule.runOnIdle { assertEquals(1, calls) }
     }
@@ -257,7 +286,9 @@ class PasswordFieldTest {
         field.performTextInput("hunter2")
         field.performImeAction()
         rule.waitForIdle()
-        rule.onNodeWithText("Connect").performClick()
+        val connect = rule.onNodeWithText("Connect")
+        connect.performScrollTo()
+        connect.performClick()
 
         rule.runOnIdle { assertEquals(1, calls) }
     }
