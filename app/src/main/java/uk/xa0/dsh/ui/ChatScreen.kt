@@ -11,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -34,6 +35,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
@@ -91,7 +93,7 @@ import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -165,6 +167,7 @@ import uk.xa0.dsh.ui.composer.ComposerTriggers
 import uk.xa0.dsh.ui.composer.composerTriggers
 import uk.xa0.dsh.ui.composer.consumeTrigger
 import uk.xa0.dsh.ui.composer.replaceTrigger
+import uk.xa0.dsh.ui.composer.restoreSendFailure
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
@@ -175,7 +178,11 @@ import uk.xa0.dsh.ui.theme.DshType
  * collapses to: modal sidebar (drawer), a 76dp-equivalent header, the transcript
  * column, and the sticky composer.
  */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    // `TextFieldState.undoState` — the undo history the composer offers.
+    ExperimentalFoundationApi::class,
+)
 @Composable
 fun ChatScreen(vm: DshViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
@@ -372,14 +379,24 @@ fun ChatScreen(vm: DshViewModel) {
     // deferred new-session screen, which is a composer with no session to file under.
     // `rememberSaveable` alone lost the text on a switch (the key change recreates the
     // state) and on any cold start; a draft is what someone was in the middle of.
+    //
+    // `TextFieldState.Saver` is the platform's own saver for the stateful field: it
+    // persists the text, the selection *and* the undo history, and it is the one
+    // `rememberTextFieldState` uses internally. That function has no inputs, so it
+    // would keep a single state across a session switch and file every draft under
+    // the first key; passing `draftKey` here is what keeps the box per-session.
     val draftKey = ui.currentSessionId ?: PENDING_DRAFT_KEY
-    var draft by rememberSaveable(draftKey, stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(vm.draftFor(draftKey)))
+    val draft = rememberSaveable(draftKey, saver = TextFieldState.Saver) {
+        TextFieldState(vm.draftFor(draftKey))
     }
+    // Read once per composition: `TextFieldState.text` is a snapshot-backed
+    // `CharSequence`, and this is the read that subscribes the screen to the field.
+    // The trigger derivation below needs a `String` anyway.
+    val draftText = draft.text.toString()
     // Written on every change rather than on a timer, and after every other way the text
     // moves — send clears it, a failed send hands it back — so the file always holds what
     // is on screen. An empty draft is a deletion on the store's side.
-    LaunchedEffect(draftKey, draft.text) { vm.saveDraft(draftKey, draft.text) }
+    LaunchedEffect(draftKey, draftText) { vm.saveDraft(draftKey, draftText) }
 
     // …and a draft typed on the deferred screen follows the session it turns into.
     //
@@ -390,25 +407,67 @@ fun ChatScreen(vm: DshViewModel) {
     // hero's key. The store already moves a draft on materialisation; this is the same
     // rule for the composed case, which is the one a reader can see.
     var trackedKey by remember { mutableStateOf(draftKey) }
-    var trackedText by remember { mutableStateOf(draft.text) }
-    LaunchedEffect(draftKey, draft.text) {
+    var trackedText by remember { mutableStateOf(draftText) }
+    LaunchedEffect(draftKey, draftText) {
         if (draftKey == trackedKey) {
-            trackedText = draft.text
+            trackedText = draftText
         } else {
-            if (trackedKey == PENDING_DRAFT_KEY && draft.text.isEmpty() && trackedText.isNotBlank()) {
-                draft = TextFieldValue(trackedText)
+            if (trackedKey == PENDING_DRAFT_KEY && draftText.isEmpty() && trackedText.isNotBlank()) {
+                draft.edit { replace(0, length, trackedText) }
             }
             trackedKey = draftKey
-            trackedText = draft.text
+            trackedText = draft.text.toString()
         }
     }
 
-    // A send that never reached a session hands its text back here. Restored only
-    // into an empty draft: text the reader has typed since must not be overwritten.
+    // The box a send emptied, and whether it may still take that send's text back.
+    //
+    // A send clears the composer; if it never reached a session the host hands the text
+    // back through `ui.draftRestore`. Asking only whether the box is empty stopped being
+    // the right question once undo could empty it too, so the restore is keyed on the
+    // send itself: `restoreArmed` is set by the clear, and an undo since then rules the
+    // restore out. `canRedo` is true exactly when an undo has happened since the last
+    // edit, and it is read in the effect below rather than watched in a collector — an
+    // undo and a failure's restore can land in the same frame, and a read at decision
+    // time cannot be overtaken by the order two coroutines resume in. Reading it also
+    // means an undo from any route counts: the row's seat, a Ctrl chord, or the field's
+    // own built-in binding. Typing needs nothing extra: a non-empty box already fails
+    // the rule. See [restoreSendFailure] for the rule itself.
+    //
+    // Unscoped by `draftKey` on purpose. A failed first send off the pending seat
+    // materialises a session first, so the key changes between the send and the failure
+    // that hands the text back; scoping the arming to the old key would lose the reader's
+    // only copy.
+    var restoreArmed by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(ui.draftRestore) {
         val restore = ui.draftRestore ?: return@LaunchedEffect
-        if (draft.text.isEmpty()) draft = TextFieldValue(restore.text)
+        val undone = draft.undoState.canRedo
+        if (restoreSendFailure(restoreArmed, undone, draft.text)) {
+            draft.edit {
+                replace(0, length, restore.text)
+                // The old `TextFieldValue(restore.text)` parked the caret at 0. A
+                // restored draft is one the reader was in the middle of, so it comes
+                // back with the caret after the last character instead.
+                selection = TextRange(length)
+            }
+        }
+        restoreArmed = false
         vm.consumeDraftRestore()
+    }
+
+    // What a submission does to the box, in the one place all three send paths share.
+    // The text is taken before the clear, so the send carries exactly what was on
+    // screen; the clear goes through `state.edit`, which is also what wipes the undo
+    // history — a message that has been sent must not come back on Ctrl+Z. Arming the
+    // restore here is what lets a send that never reaches a session hand the text back
+    // without a later undo being mistaken for the same empty box.
+    fun takeDraftForSend(): String {
+        val sent = draft.text.toString()
+        draft.edit { replace(0, length, "") }
+        // Only a send that carried text can need that text back; an attachment-only
+        // send arms nothing, and a send in between disarms the one before it.
+        restoreArmed = sent.isNotEmpty()
+        return sent
     }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     // The About sheet is pure local state, so unlike Settings it needs no read on
@@ -595,8 +654,13 @@ fun ChatScreen(vm: DshViewModel) {
      */
     // The `+` menu's roster, also the `/` menu's catalogue, built from the host.
     val commandEntries = remember(hostCommands) { composerCommandEntries(hostCommands) }
+    // The caret, not the end of the draft, and the text the caret lives in: this is the
+    // same derivation the old `TextFieldValue` produced, now read off the field's own
+    // state. `selection.end` is the caret for a collapsed selection and the moving end
+    // for a range, which is what the trigger grammar has always been given.
     val triggers = rememberComposerTriggers(
-        value = draft,
+        text = draftText,
+        caret = draft.selection.end,
         commandEntries = commandEntries,
         searchReferences = vm::searchReferences,
         clearReferences = vm::clearReferences,
@@ -613,24 +677,28 @@ fun ChatScreen(vm: DshViewModel) {
         // A pick from the typed menu consumes the token it was typed as, wherever
         // the caret sits; the `+` launcher types no token, so it either seeds the
         // bare token for an input-taking command or changes nothing at all.
+        //
+        // Through `state.edit`: a pick is an edit the client makes, not typing, so it
+        // is not recorded on the undo stack (and, like every `edit`, it clears the
+        // history it found — see the note in `ui/components/Composer.kt`).
         val token = triggers.slash
         when (entry.name) {
             "file" -> {
-                draft = draft.consumeTrigger(token)
+                draft.edit { consumeTrigger(token) }
                 attachLauncher.launch("*/*")
             }
             "model" -> {
-                draft = draft.consumeTrigger(token)
+                draft.edit { consumeTrigger(token) }
                 showModels = true
             }
             "permission" -> {
-                draft = draft.consumeTrigger(token)
+                draft.edit { consumeTrigger(token) }
                 showPermission = true
             }
             else -> if (entry.takesInput) {
-                draft = draft.replaceTrigger(token, "/${entry.name} ")
+                draft.edit { replaceTrigger(token, "/${entry.name} ") }
             } else {
-                draft = draft.consumeTrigger(token)
+                draft.edit { consumeTrigger(token) }
                 vm.executeCommand("/${entry.name}")
             }
         }
@@ -1018,8 +1086,7 @@ fun ChatScreen(vm: DshViewModel) {
                 Box(Modifier.weight(1f)) {
                     HeroBody(
                         modifier = Modifier.fillMaxSize(),
-                        value = draft,
-                        onValueChange = { draft = it },
+                        state = draft,
                         running = ui.running,
                         modelTrigger = modelTrigger,
                         onModelClick = { showModels = true },
@@ -1048,8 +1115,7 @@ fun ChatScreen(vm: DshViewModel) {
                             showPresets = true
                         },
                         onSend = {
-                            val text = draft.text
-                            draft = TextFieldValue("")
+                            val text = takeDraftForSend()
                             followFrom++
                             vm.send(text)
                         },
@@ -1433,8 +1499,7 @@ fun ChatScreen(vm: DshViewModel) {
                 ComposerPopups(
                     triggers = triggers,
                     references = references,
-                    value = draft,
-                    onValueChange = { draft = it },
+                    state = draft,
                     menuOpen = menuOpen,
                     onPickCommand = onPickCommand,
                     clearReferences = vm::clearReferences,
@@ -1462,19 +1527,16 @@ fun ChatScreen(vm: DshViewModel) {
                     )
                 } else {
                     Composer(
-                        value = draft,
-                        onValueChange = { draft = it },
+                        state = draft,
                         onSend = {
-                            val text = draft.text
-                            draft = TextFieldValue("")
+                            val text = takeDraftForSend()
                             // Sending is one of the two moments that mean "follow
                             // again", wherever the reader had got to.
                             followFrom++
                             vm.send(text, vm.submitMode())
                         },
                         onSendMode = { mode ->
-                            val text = draft.text
-                            draft = TextFieldValue("")
+                            val text = takeDraftForSend()
                             followFrom++
                             vm.send(text, mode)
                         },
@@ -2705,18 +2767,24 @@ private fun Modifier.drawerDrag(drawerState: DrawerState, width: Dp): Modifier {
  * `@` did nothing there while the identical typing worked one screen later.
  *
  * The derivation itself lives in `ui/composer`, out of this 2100-line file; this
- * only drives the host callbacks the derived query feeds.
+ * only drives the host callbacks the derived query feeds. [text] and [caret] are
+ * passed in rather than a value object because the field's state is the source of
+ * both — the caller reads `state.text` and `state.selection.end` and hands them
+ * over, so the same derivation runs against any caret position, mid-text included.
  */
 @Composable
 private fun rememberComposerTriggers(
-    value: TextFieldValue,
+    text: String,
+    caret: Int,
     commandEntries: List<CommandEntry>,
     searchReferences: (String) -> Unit,
     clearReferences: () -> Unit,
     sessionId: String?,
     refreshCommands: () -> Unit,
 ): ComposerTriggers {
-    val triggers = remember(value, commandEntries) { composerTriggers(value, commandEntries) }
+    val triggers = remember(text, caret, commandEntries) {
+        composerTriggers(text, caret, commandEntries)
+    }
     LaunchedEffect(triggers.referenceQuery) {
         val query = triggers.referenceQuery
         if (query != null) searchReferences(query) else clearReferences()
@@ -2736,8 +2804,7 @@ private fun rememberComposerTriggers(
 private fun ComposerPopups(
     triggers: ComposerTriggers,
     references: List<ReferenceCandidate>,
-    value: TextFieldValue,
-    onValueChange: (TextFieldValue) -> Unit,
+    state: TextFieldState,
     menuOpen: Boolean,
     onPickCommand: (CommandEntry) -> Unit,
     clearReferences: () -> Unit,
@@ -2750,7 +2817,7 @@ private fun ComposerPopups(
             onPick = { candidate ->
                 // Replace the token under the caret, keeping whatever surrounds
                 // it in the draft; a pick must never rewrite the draft's end.
-                onValueChange(value.replaceTrigger(triggers.reference, candidate.mention + " "))
+                state.edit { replaceTrigger(triggers.reference, candidate.mention + " ") }
                 clearReferences()
             },
             modifier = modifier,
@@ -2765,8 +2832,7 @@ private fun ComposerPopups(
 @Composable
 private fun HeroBody(
     modifier: Modifier,
-    value: TextFieldValue,
-    onValueChange: (TextFieldValue) -> Unit,
+    state: TextFieldState,
     running: Boolean,
     modelTrigger: ModelTriggerState?,
     onModelClick: () -> Unit,
@@ -2866,8 +2932,7 @@ private fun HeroBody(
         ComposerPopups(
             triggers = triggers,
             references = references,
-            value = value,
-            onValueChange = onValueChange,
+            state = state,
             menuOpen = menuOpen,
             onPickCommand = onPickCommand,
             clearReferences = clearReferences,
@@ -2877,8 +2942,7 @@ private fun HeroBody(
             SubagentReadOnlyComposer(reason = readOnlyReason)
         } else {
             Composer(
-                value = value,
-                onValueChange = onValueChange,
+                state = state,
                 onSend = onSend,
                 onStop = onStop,
                 running = running,

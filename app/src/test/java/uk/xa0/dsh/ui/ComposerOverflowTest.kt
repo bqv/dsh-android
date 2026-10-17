@@ -4,7 +4,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsNode
@@ -15,7 +17,6 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
@@ -106,9 +107,16 @@ class ComposerOverflowTest {
                         (if (fixed != null) Modifier.width(fixed) else Modifier.fillMaxWidth())
                             .testTag(SLOT),
                     ) {
+                        // Remembered: a fresh `TextFieldState` on every recomposition
+                        // would throw away the text the field had written, and the
+                        // width loop below recomposes the slot on purpose. The undo
+                        // seat this row now carries is part of the width budget the
+                        // assertions below measure; with no history it is disabled but
+                        // still holds its 28dp, which is the point of the "keeps its
+                        // bounds" test in `ComposerUndoTest`.
+                        val state = remember { TextFieldState("hello") }
                         Composer(
-                            value = TextFieldValue("hello"),
-                            onValueChange = {},
+                            state = state,
                             onSend = {},
                             onStop = {},
                             running = false,

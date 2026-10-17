@@ -1,7 +1,7 @@
 package uk.xa0.dsh.ui.composer
 
+import androidx.compose.foundation.text.input.TextFieldBuffer
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.TextFieldValue
 import uk.xa0.dsh.ui.components.CommandEntry
 
 /**
@@ -139,9 +139,20 @@ class ComposerTriggers(
  * an empty query is the sectioned roster. The web hides a row carrying an
  * `input.hint` unless the token is leading, but this client's [CommandEntry] has
  * no hint field, so no roster row is position-gated.
+ *
+ * The composer's text is a [CharSequence] because that is what
+ * `TextFieldState.text` hands back; [detectTriggerToken] keeps its `String`
+ * receiver so the grammar above is byte-for-byte the one it has always been.
+ * The caret is passed in rather than read from a value object: with the
+ * stateful field it is `TextFieldState.selection.end`, and passing it explicitly
+ * is what lets a test ask about any position without composing a field.
  */
-fun composerTriggers(value: TextFieldValue, commandEntries: List<CommandEntry>): ComposerTriggers {
-    val token = detectTriggerToken(value.text, value.selection.end)
+fun composerTriggers(
+    text: CharSequence,
+    caret: Int,
+    commandEntries: List<CommandEntry>,
+): ComposerTriggers {
+    val token = detectTriggerToken(text.toString(), caret)
     val slash = token?.takeIf { it.trigger == '/' }
     val reference = token?.takeIf { it.trigger == '@' }
     val query = slash?.query
@@ -164,15 +175,18 @@ fun composerTriggers(value: TextFieldValue, commandEntries: List<CommandEntry>):
  * A null [token] means the pick came from the `+` launcher, which types no token;
  * the insertion then replaces the caret's selection. The recorded span is clamped
  * because a pick can land in the frame between an IME commit and recomposition,
- * and an out-of-range `replaceRange` would crash rather than misplace a word.
+ * and an out-of-range `replace` would crash rather than misplace a word.
+ *
+ * This is the `TextFieldState` form of the rule. It runs inside `state.edit`,
+ * which does not record an undo step: a pick is the client's edit of the draft,
+ * not the reader's typing, and the history is cleared by it — see the undo note
+ * in `ui/components/Composer.kt`.
  */
-fun TextFieldValue.replaceTrigger(token: TriggerToken?, insertion: String): TextFieldValue {
-    val start = (token?.start ?: selection.min).coerceIn(0, text.length)
-    val end = (token?.end ?: selection.max).coerceIn(start, text.length)
-    return copy(
-        text = text.replaceRange(start, end, insertion),
-        selection = TextRange(start + insertion.length),
-    )
+fun TextFieldBuffer.replaceTrigger(token: TriggerToken?, insertion: String) {
+    val start = (token?.start ?: selection.min).coerceIn(0, length)
+    val end = (token?.end ?: selection.max).coerceIn(start, length)
+    replace(start, end, insertion)
+    selection = TextRange(start + insertion.length)
 }
 
 /**
@@ -181,5 +195,6 @@ fun TextFieldValue.replaceTrigger(token: TriggerToken?, insertion: String): Text
  * launcher, which typed nothing: the draft and any selection in it stay as they
  * are, because such a pick must not delete text the user selected.
  */
-fun TextFieldValue.consumeTrigger(token: TriggerToken?): TextFieldValue =
-    if (token == null) this else replaceTrigger(token, "")
+fun TextFieldBuffer.consumeTrigger(token: TriggerToken?) {
+    if (token != null) replaceTrigger(token, "")
+}
