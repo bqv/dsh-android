@@ -1,6 +1,6 @@
 package uk.xa0.dsh.ui
 
-import android.view.KeyEvent
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.saveable.SaverScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.getBoundsInRoot
@@ -112,14 +113,28 @@ class ComposerUndoTest {
         override fun canBeSaved(value: Any): Boolean = true
     }
 
-    /** One Ctrl chord, as a hardware keyboard reports it. */
+    /**
+     * One Ctrl chord, as a hardware keyboard reports it.
+     *
+     * `performKeyPress` takes Compose's `KeyEvent`, which is a value class wrapping
+     * the platform event, so the Android event is the argument to that wrapper and
+     * not to the test helper. Handing the platform event straight to
+     * `performKeyPress` is a type mismatch; the JVM signature makes them look
+     * interchangeable, and they are not.
+     */
     private fun ctrl(keyCode: Int, shift: Boolean = false): KeyEvent = KeyEvent(
-        0L,
-        0L,
-        KeyEvent.ACTION_DOWN,
-        keyCode,
-        0,
-        if (shift) KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON else KeyEvent.META_CTRL_ON,
+        AndroidKeyEvent(
+            0L,
+            0L,
+            AndroidKeyEvent.ACTION_DOWN,
+            keyCode,
+            0,
+            if (shift) {
+                AndroidKeyEvent.META_CTRL_ON or AndroidKeyEvent.META_SHIFT_ON
+            } else {
+                AndroidKeyEvent.META_CTRL_ON
+            },
+        ),
     )
 
     /**
