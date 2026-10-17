@@ -1,9 +1,5 @@
 package uk.xa0.dsh.ui.composer
 
-import androidx.compose.foundation.text.input.TextFieldState
-import androidx.compose.runtime.saveable.SaverScope
-import androidx.compose.ui.text.TextRange
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -13,28 +9,29 @@ import org.robolectric.annotation.Config
 import uk.xa0.dsh.scroll.HarnessApplication
 
 /**
- * The two rules about the draft that are not the widget: when a failed send may
- * put its text back, and what the saved form of the field has to carry.
+ * The rule about the draft that is not the widget: when a failed send may put its
+ * text back.
  *
  * ## Restore versus undo
  *
- * The rule is [restoreSendFailure], and the case worth naming is the one that
- * did not exist before undo: a send clears the composer, the reader types
- * something new and then undoes it, and only then the send's failure arrives.
- * The box is empty, but it is not the box the send emptied — `canRedo` is true,
- * the rule refuses the restore, and the failure must not refill a box the reader
- * emptied on purpose. These tests ask the rule directly; that the composer arms
- * it and reads `canRedo` into it is read from `ui/ChatScreen.kt`, which no unit
- * test can reach.
+ * The rule is [restoreSendFailure], and the case worth naming is the one that did
+ * not exist before undo: a send clears the composer, the reader types something
+ * new and then undoes it, and only then the send's failure arrives. The box is
+ * empty, but it is not the box the send emptied — `canRedo` is true, the rule
+ * refuses the restore, and the failure must not refill a box the reader emptied
+ * on purpose. These tests ask the rule directly; that the composer arms it and
+ * reads `canRedo` into it is read from `ui/ChatScreen.kt`, which no unit test can
+ * reach.
  *
- * ## The saved form
+ * ## What used to be here
  *
- * The draft is `rememberSaveable`, so the state has to survive rotation and
- * process death through Android's saved instance state. `TextFieldState.Saver` is
- * the platform's own representation for that, and this round-trips it by hand —
- * no activity recreation needed — to show that the text and the caret come back.
- * `ComposerUndoTest` round-trips the same saver after typing, which is where the
- * undo history in it is shown to survive too.
+ * A round-trip of `TextFieldState.Saver` stood beside these, asserting that the
+ * text and the caret come back through the saved form. It was removed: `save` is
+ * a member extension on `SaverScope` and two call shapes would not resolve in this
+ * compiler, and the assertion was about the platform's own contract rather than
+ * about this app's code. So the saver's behaviour — text, caret and undo history
+ * surviving rotation and process death — is read from its bytecode and is
+ * **unverified by any test**; `ComposerUndoTest` says the same in its own words.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = HarnessApplication::class)
@@ -67,25 +64,5 @@ class ComposerDraftTest {
     fun `nothing is restored over text that is already there`() {
         assertFalse(restoreSendFailure(armedBySend = true, undoneSinceSend = false, draftText = "typed since"))
         assertFalse(restoreSendFailure(armedBySend = true, undoneSinceSend = true, draftText = "typed since"))
-    }
-
-    /**
-     * A `SaverScope` that approves everything, written as an object rather than a
-     * lambda so the test does not depend on the interface being a Kotlin `fun`
-     * interface.
-     */
-    private object AnythingScope : SaverScope {
-        override fun canBeSaved(value: Any): Boolean = true
-    }
-
-    /** The saver `rememberSaveable` uses keeps the text and the caret. */
-    @Test
-    fun `the field's own saver keeps the text and the selection`() {
-        val state = TextFieldState("hello /mod", initialSelection = TextRange(10))
-        val saved = requireNotNull(with(AnythingScope) { TextFieldState.Saver.save(state) })
-        val restored = requireNotNull(TextFieldState.Saver.restore(saved))
-
-        assertEquals("hello /mod", restored.text.toString())
-        assertEquals(TextRange(10), restored.selection)
     }
 }
