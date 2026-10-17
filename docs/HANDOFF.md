@@ -826,3 +826,26 @@ above), so the first instinct is to hunt a stray `/*` that is not there.
 `git diff <commit>` is empty, confirm the symbols exist, then wipe `app/build` and rebuild
 before changing a line. And note this is the second trap here whose lesson is *the compiler is
 describing something that is not real*.
+
+## trap: `stopActivity` deletes schedules, and archiving is refused without it
+
+Archiving a session that has active schedule tasks is **refused** by the host:
+
+```
+cannot archive session 'x': the session is active (schedule)
+```
+
+That reads like a bug in the app's archive call, and the obvious one-word "fix" is to
+pass `stopActivity: true` on `workspace/session-stop`. **Do not, unless the confirmation
+names the schedules.** With that flag the Schedule plugin calls `stopSessionTasks`, which
+**deletes every active task for that session** — permanently, with no undo path.
+
+So the refusal is the *safe* behaviour: it is the host telling us a standing instruction
+depends on this session. A dialog offering "Archive and stop its schedules" is the right
+shape if that is ever wanted; a silent flag is not.
+
+Related, from the same read of `dsh-schedule`: `schedule/update` has **no `status`
+member** and refuses an inactive row with `schedule_ended`, so no edit path can revive an
+ended task — only a new one can. There is also **no `schedule/create` remote**: creation
+lives on the agent tool `schedule_create`, which binds the task to the agent's own
+session, which is why the web's "New" button starts a session instead of showing a form.
