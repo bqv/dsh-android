@@ -2776,6 +2776,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------------ setup
 
     fun saveSetup(baseUrl: String, lanUrl: String, username: String, password: String, manualCookie: String) {
+        // The authority behind the setup screen's own latch: a connect already in
+        // flight owns this action, and a second one would post the same
+        // credentials while the host is still answering the first — the quickest
+        // way to earn a lockout. `busy` is set below, before this returns, so a
+        // second call in the same frame is refused here even if the screen's
+        // snapshot has not recomposed yet.
+        if (_ui.value.busy) return
         val config = configStore.load().copy(
             baseUrl = baseUrl.trim().trimEnd('/'),
             lanUrl = lanUrl.trim().trimEnd('/'),
@@ -2784,6 +2791,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             manualCookie = manualCookie.trim(),
         )
         configStore.save(config)
+        // Claimed synchronously rather than left to the coroutine `reconnect`
+        // starts: this is the window a double submit would otherwise slip through.
+        _ui.value = _ui.value.copy(busy = true)
         applySetupConfig(config)
     }
 
