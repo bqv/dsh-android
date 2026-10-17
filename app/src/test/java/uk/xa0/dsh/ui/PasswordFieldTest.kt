@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsEnabled
@@ -18,6 +19,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
@@ -272,6 +274,26 @@ class PasswordFieldTest {
             click()
             click()
         }
+
+        rule.runOnIdle { assertEquals(1, calls) }
+    }
+
+    /**
+     * The latch itself, independent of touch dispatch and of the viewport. A
+     * disabled `clickable` keeps its semantic action and that action calls the
+     * handler, so two semantic activations both reach `submit` — the case a
+     * pointer-level "disabled means no second tap" would hide. This is the test
+     * that stays red if the `submitting` guard is removed; without it the count
+     * is two.
+     */
+    @Test
+    fun `two activations that both reach the handler submit once`() {
+        var calls = 0
+        showSetup { _, _, _, _, _ -> calls += 1 }
+
+        val connect = rule.onNodeWithText("Connect")
+        connect.performSemanticsAction(SemanticsActions.OnClick)
+        connect.performSemanticsAction(SemanticsActions.OnClick)
 
         rule.runOnIdle { assertEquals(1, calls) }
     }
