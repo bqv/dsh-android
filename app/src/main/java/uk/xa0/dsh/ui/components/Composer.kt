@@ -133,14 +133,17 @@ private val SEND_BUTTON_NUDGE = 2.dp
  * `state.selection.end` for the caret the `/` and `@` menus follow.
  *
  * That is also where undo and redo come from. `state.undoState` keeps the history
- * of edits the **reader** made; [UndoRedoButton] and the Ctrl chords below are
- * the two ways to reach it. What is deliberately *not* undoable is the rest of
- * the draft's life: `state.edit` — which is how a send clears the box, how a
- * failed send is handed its text back, and how a `/` or `@` pick rewrites its
- * token — commits an edit without recording an undo step and clears the history
- * it found. So Ctrl+Z never resurrects a message that has been sent, a restored
- * failure is not one keystroke away from disappearing again, and a pick is
- * treated as the client's edit rather than as typing.
+ * of edits the **reader** made, and three routes reach it: [UndoRedoButton], the
+ * Ctrl chords below, and the software keyboard's own undo and redo, which arrive
+ * as `android.R.id.undo`/`redo` context-menu actions and are routed here by
+ * [ComposerImeUndo]. The third is the one that was missing: the stateful field's
+ * input connection returns false for both ids. What is deliberately *not*
+ * undoable is the rest of the draft's life: `state.edit` — which is how a send
+ * clears the box, how a failed send is handed its text back, and how a `/` or
+ * `@` pick rewrites its token — commits an edit without recording an undo step
+ * and clears the history it found. So Ctrl+Z never resurrects a message that has
+ * been sent, a restored failure is not one keystroke away from disappearing
+ * again, and a pick is treated as the client's edit rather than as typing.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -242,10 +245,12 @@ fun Composer(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                // PROBE — temporary: logs the IME's connection calls; see
-                // ImeUndoProbe.kt. The field keeps its own connection and its own
-                // behaviour, so a log line is the only thing this adds.
-                ProbeComposerInput {
+                // The field's own InputConnection, with the IME's undo and redo
+                // answered from this state's history. See [ComposerImeUndo]: the
+                // stateful field in Compose 1.7.0 returns false for
+                // `android.R.id.undo` and `android.R.id.redo`, which is why a
+                // keyboard's toolbar button did nothing here.
+                ComposerImeUndo(state) {
                     BasicTextField(
                         state = state,
                         textStyle = DshType.messageBody.copy(color = colors.labelPrimary),
@@ -268,17 +273,10 @@ fun Composer(
                                     ctrl = event.isCtrlPressed,
                                     shift = event.isShiftPressed,
                                     down = event.type == KeyEventType.KeyDown,
-                                )
-                                imeUndoProbe(
-                                    "previewKey(keyCode=${event.nativeKeyEvent.keyCode} " +
-                                        "metaState=${event.nativeKeyEvent.metaState} " +
-                                        "action=${event.nativeKeyEvent.action} " +
-                                        "shortcut=$shortcut)",
-                                ) // PROBE — temporary
-                                if (shortcut == null) return@onPreviewKeyEvent false
+                                ) ?: return@onPreviewKeyEvent false
                                 when (shortcut) {
-                                    ComposerShortcut.UNDO -> state.probeUndo("ctrl+z")
-                                    ComposerShortcut.REDO -> state.probeRedo("ctrl+shift+z or ctrl+y")
+                                    ComposerShortcut.UNDO -> state.undoState.undo()
+                                    ComposerShortcut.REDO -> state.undoState.redo()
                                 }
                                 true
                             },
@@ -322,8 +320,8 @@ fun Composer(
                 UndoRedoButton(
                     canUndo = canUndo,
                     canRedo = canRedo,
-                    onUndo = { state.probeUndo("button") }, // PROBE — temporary
-                    onRedo = { state.probeRedo("button long press") }, // PROBE — temporary
+                    onUndo = { state.undoState.undo() },
+                    onRedo = { state.undoState.redo() },
                 )
                 Spacer(Modifier.width(DshSpacing.sm))
 
