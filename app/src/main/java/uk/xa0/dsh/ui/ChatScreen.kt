@@ -430,8 +430,8 @@ fun ChatScreen(vm: DshViewModel) {
     // edit, and it is read in the effect below rather than watched in a collector — an
     // undo and a failure's restore can land in the same frame, and a read at decision
     // time cannot be overtaken by the order two coroutines resume in. Reading it also
-    // means an undo from any route counts: the row's seat, a Ctrl chord, or the field's
-    // own built-in binding. Typing needs nothing extra: a non-empty box already fails
+    // means an undo from any route counts: the keyboard's context-menu undo or a Ctrl
+    // chord. Typing needs nothing extra: a non-empty box already fails
     // the rule. See [restoreSendFailure] for the rule itself.
     //
     // Unscoped by `draftKey` on purpose. A failed first send off the pending seat

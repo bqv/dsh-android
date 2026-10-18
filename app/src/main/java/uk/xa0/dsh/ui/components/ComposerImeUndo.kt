@@ -44,9 +44,8 @@ import androidx.compose.ui.platform.PlatformTextInputSession
  * wrapped in one that hands back [ComposerImeUndoConnection]; the request itself
  * is passed straight through, so the session, the field and every other
  * `InputConnection` call are Compose's own. Undo and redo are claimed and routed
- * to `TextFieldState.undoState`, which is the same history the in-app control and
- * the Ctrl chords use. Everything else, including `copy` and `paste`, falls
- * through to the field.
+ * to `TextFieldState.undoState`, which is the same history the Ctrl chords use.
+ * Everything else, including `copy` and `paste`, falls through to the field.
  *
  * The connection's callbacks are delivered on the main thread, but a wrapper
  * that calls back into snapshot state is not the place to rely on that: if it
@@ -58,8 +57,8 @@ import androidx.compose.ui.platform.PlatformTextInputSession
  * A keyboard that undoes only its own composing text, instead of asking the
  * field to undo, never reaches this or any other app-side hook: it edits the
  * text it is composing and nothing it has already committed can come back. And
- * a keyboard with no undo control at all has nothing to route — that is why the
- * in-app seat stays.
+ * a keyboard with no undo control at all has nothing to route: the composer has
+ * no in-app fallback for either case, a deliberate trade rather than an oversight.
  *
  * `@ExperimentalComposeUiApi` is the only API Compose 1.7.0 offers for reaching
  * a field's `InputConnection` at all; the alternative is no IME undo path.

@@ -33,13 +33,11 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.Redo
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material.icons.rounded.Undo
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -133,17 +131,20 @@ private val SEND_BUTTON_NUDGE = 2.dp
  * `state.selection.end` for the caret the `/` and `@` menus follow.
  *
  * That is also where undo and redo come from. `state.undoState` keeps the history
- * of edits the **reader** made, and three routes reach it: [UndoRedoButton], the
- * Ctrl chords below, and the software keyboard's own undo and redo, which arrive
- * as `android.R.id.undo`/`redo` context-menu actions and are routed here by
- * [ComposerImeUndo]. The third is the one that was missing: the stateful field's
- * input connection returns false for both ids. What is deliberately *not*
- * undoable is the rest of the draft's life: `state.edit` — which is how a send
- * clears the box, how a failed send is handed its text back, and how a `/` or
- * `@` pick rewrites its token — commits an edit without recording an undo step
- * and clears the history it found. So Ctrl+Z never resurrects a message that has
- * been sent, a restored failure is not one keystroke away from disappearing
- * again, and a pick is treated as the client's edit rather than as typing.
+ * of edits the **reader** made, and two routes reach it: the Ctrl chords below,
+ * and the software keyboard's own undo and redo, which arrive as
+ * `android.R.id.undo`/`redo` context-menu actions and are routed here by
+ * [ComposerImeUndo]. There is no in-app undo control: undo now depends on the
+ * keyboard supporting that action (a hardware keyboard uses the chords), so a
+ * keyboard that undoes only its own composing text, or has no undo at all, leaves
+ * the app with none. That is a deliberate trade, not an oversight. What is
+ * deliberately *not* undoable is the rest of the draft's life: `state.edit` —
+ * which is how a send clears the box, how a failed send is handed its text back,
+ * and how a `/` or `@` pick rewrites its token — commits an edit without
+ * recording an undo step and clears the history it found. So Ctrl+Z never
+ * resurrects a message that has been sent, a restored failure is not one keystroke
+ * away from disappearing again, and a pick is treated as the client's edit rather
+ * than as typing.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -178,15 +179,13 @@ fun Composer(
     val colors = DshTheme.colors
     val focusManager = LocalFocusManager.current
     // One read of the state's text, shared by the placeholder, the send gate and the
-    // stop/send swap. It is also what subscribes this composable to the field, which
-    // is why the history button below sees a fresh `canUndo` after every keystroke.
+    // stop/send swap. It is also what subscribes this composable to the field, so each
+    // keystroke recomposes the row with the current text.
     val text = state.text
     // An attachment is a message all by itself: a screenshot with no caption is a
     // perfectly ordinary thing to send, and requiring text made the picture
     // unsendable.
     val canSend = text.isNotBlank() || running || attachments.isNotEmpty()
-    val canUndo = state.undoState.canUndo
-    val canRedo = state.undoState.canRedo
     val shape = RoundedCornerShape(DshRadius.bubble)
 
     Column(modifier.fillMaxWidth()) {
@@ -314,17 +313,6 @@ fun Composer(
                     Spacer(Modifier.width(DshSpacing.sm))
                 }
 
-                // Beside the `+` and ahead of the chips, because it is the one
-                // control here that is about the text rather than about what the
-                // turn will do with it.
-                UndoRedoButton(
-                    canUndo = canUndo,
-                    canRedo = canRedo,
-                    onUndo = { state.undoState.undo() },
-                    onRedo = { state.undoState.redo() },
-                )
-                Spacer(Modifier.width(DshSpacing.sm))
-
                 if (permissionLabel != null) {
                     ModeChip(label = permissionLabel, onClick = onPermissionClick)
                     Spacer(Modifier.width(DshSpacing.sm))
@@ -392,67 +380,6 @@ fun Composer(
                 }
             }
         }
-    }
-}
-
-/**
- * The composer's edit-history seat: undo on a tap, redo on a long press, 28dp in
- * the same family as the `+` control beside it.
- *
- * **One seat, not two.** The action row is the tightest thing on this screen: on
- * a 320dp phone the model chip is already the child that gives way so that send
- * keeps the margin, and a second 28dp control plus its gap comes out of exactly
- * that budget. A redo with nowhere to live would be worse than no redo, so redo
- * lives on the long press — the same grammar the send button already teaches in
- * this row, where a long press opens the delivery mode. The long-press label is
- * passed to `combinedClickable` so a screen reader announces it.
- *
- * **The seat is always there.** It is composed whether or not there is history,
- * and only its enabled state and tint change, so enabling it after the first
- * keystroke cannot move the chips beside it. With neither direction available it
- * is disabled and still holds its 28dp.
- *
- * **When only redo is left the seat becomes the redo control.** Undoing all the
- * way back empties the undo stack while the redo stack is full; a seat pinned to
- * "Undo" would then be disabled exactly when redo is the only thing worth
- * offering, which is a one-way trap. So the glyph and the description follow the
- * direction that can act: Undo while `canUndo`, Redo when the undo stack is
- * exhausted but `canRedo`, and Undo disabled with neither. The undo action
- * itself — the one the request names — is enabled only while `canUndo` is true.
- */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun UndoRedoButton(
-    canUndo: Boolean,
-    canRedo: Boolean,
-    onUndo: () -> Unit,
-    onRedo: () -> Unit,
-) {
-    val colors = DshTheme.colors
-    val showingRedo = !canUndo && canRedo
-    val enabled = canUndo || canRedo
-    val interaction = remember { MutableInteractionSource() }
-    Box(
-        Modifier
-            .size(28.dp)
-            .clip(CircleShape)
-            .background(colors.selector)
-            .combinedClickable(
-                interactionSource = interaction,
-                indication = null,
-                enabled = enabled,
-                onLongClickLabel = if (canRedo) "Redo" else null,
-                onLongClick = { if (canRedo) onRedo() },
-                onClick = { if (canUndo) onUndo() else if (canRedo) onRedo() },
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = if (showingRedo) Icons.Rounded.Redo else Icons.Rounded.Undo,
-            contentDescription = if (showingRedo) "Redo" else "Undo",
-            tint = if (enabled) colors.labelPrimary else colors.labelCaption,
-            modifier = Modifier.size(14.dp),
-        )
     }
 }
 

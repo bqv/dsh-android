@@ -5,9 +5,10 @@ import androidx.compose.ui.input.key.Key
 /**
  * The edit-history chords the composer takes from a hardware keyboard.
  *
- * A phone with a keyboard attached is the case this exists for: the on-screen row
- * has one 28dp seat for history, and typing on a real keyboard is exactly when
- * the fingers reach for the familiar chord instead. Ctrl+Z undoes;
+ * A phone with a keyboard attached is the case this exists for: the on-screen
+ * composer has no undo control, so the chords are the history's only route from a
+ * physical keyboard — and typing on one is exactly when the fingers reach for the
+ * familiar chord instead. Ctrl+Z undoes;
  * Ctrl+Shift+Z and Ctrl+Y both redo, because both spellings are in wide use and
  * neither costs anything to accept.
  */
