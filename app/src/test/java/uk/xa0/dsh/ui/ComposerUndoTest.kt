@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package uk.xa0.dsh.ui
 
 import android.content.Context
