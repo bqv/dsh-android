@@ -1,3 +1,8 @@
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
+
 package uk.xa0.dsh.ui.components
 
 import android.os.Handler
