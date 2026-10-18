@@ -1,21 +1,21 @@
 package uk.xa0.dsh.ui
 
+import android.content.Context
+import android.view.View
+import android.view.inputmethod.BaseInputConnection
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.KeyEvent
-import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyPress
 import androidx.compose.ui.test.performTextInput
+import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -23,32 +23,45 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import uk.xa0.dsh.scroll.HarnessApplication
 import uk.xa0.dsh.ui.components.Composer
+import uk.xa0.dsh.ui.components.ComposerImeUndoConnection
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
 
 /**
- * Undo and redo in the composer, through both affordances.
+ * Undo and redo in the composer, through the two routes that remain.
  *
- * The migration to Compose's stateful text API is what makes these possible at
- * all: `TextFieldState.undoState` keeps the history, and the composer exposes it
- * as a 28dp seat in the action row and as the Ctrl chords a hardware keyboard
- * sends. What is pinned here:
+ * `TextFieldState.undoState` keeps the history of edits the **reader** made, and
+ * two routes reach it: the Ctrl chords a hardware keyboard sends, and the software
+ * keyboard's own undo and redo, which arrive as `android.R.id.undo`/`redo`
+ * context-menu actions and are wired to the history by `ComposerImeUndo`. The
+ * in-app seat that used to sit beside `+` is gone — the keyboard's route is the
+ * one the user now uses — so what is pinned here is that both remaining routes
+ * move the same history:
  *
- *  * the seat exists before there is any history, and is disabled rather than
- *    absent — the row must not reflow when it becomes usable;
- *  * a tap undoes one edit and the seat becomes Redo when the undo stack empties,
- *    which is how redo keeps a home without a second 28dp control;
+ *  * the keyboard's undo action drops the typed text, and its redo action brings
+ *    it back;
  *  * Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y reach the same history through the field's
  *    preview key handler.
  *
+ * ## How the keyboard route is driven here
+ *
+ * The JVM harness never starts an IME session, so the connection `ComposerImeUndo`
+ * installs around the real field cannot be reached from a test. What is driven
+ * instead is the same [ComposerImeUndoConnection] over the state the composed
+ * field writes to, with the composer's two history steps as its callbacks: the
+ * `performContextMenuAction(android.R.id.undo)` call below is the call the
+ * keyboard makes. That pins the history and the wrapper's call values; that the
+ * wrapper is installed in the session is not shown by any test on this harness.
+ *
  * ## What these cannot show
  *
- * That the seat *looks* enabled: the harness cannot read colour, so only the
- * semantic enabled state is asserted, not the tint that carries it on screen.
- * The chords are injected through `performKeyPress`, which is not an IME and not
- * a physical keyboard — whether a particular keyboard reports Ctrl+Shift+Z with
- * the shift bit set is a device claim, and the mapping itself is covered without
- * a window in `components/ComposerShortcutTest`.
+ * That a particular keyboard sends these ids: that is a device claim, observed on
+ * the phone, and the bridge's own boundary is pinned in
+ * `components/ComposerImeUndoTest`. The chords are injected through
+ * `performKeyPress`, which is not an IME and not a physical keyboard — whether a
+ * particular keyboard reports Ctrl+Shift+Z with the shift bit set is a device
+ * claim, and the mapping itself is covered without a window in
+ * `components/ComposerShortcutTest`.
  *
  * **Persistence is unverified.** `ChatScreen` seeds the draft with
  * `rememberSaveable(draftKey, saver = TextFieldState.Saver)`, and the saver's
@@ -60,9 +73,8 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * about the platform's own contract. Neither rotation nor process death is
  * exercised by this file.
  *
- * The display is a phone's: the composer sits at the top of this box, and every
- * touch below is a real injection, so the window has to be tall enough to hold
- * the control it aims at.
+ * The display is a phone's, and the composer is composed with no model trigger,
+ * so the action row cannot affect what is under test.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = HarnessApplication::class, qualifiers = "w411dp-h891dp")
@@ -108,6 +120,23 @@ class ComposerUndoTest {
     }
 
     /**
+     * The keyboard's route, over the composed composer's own state.
+     *
+     * The target is a real `BaseInputConnection` over a plain view: it is the
+     * delegation target, and nothing here needs it to edit text. `fullEditor =
+     * false` keeps it from asking the view for an editable it does not have. Undo
+     * and redo call the same two `undoState` steps the composer's bridge calls.
+     */
+    private fun keyboardConnection(state: TextFieldState): ComposerImeUndoConnection {
+        val context: Context = ApplicationProvider.getApplicationContext()
+        return ComposerImeUndoConnection(
+            target = BaseInputConnection(View(context), false),
+            onUndo = { state.undoState.undo() },
+            onRedo = { state.undoState.redo() },
+        )
+    }
+
+    /**
      * One Ctrl chord, as a keyboard reports it.
      *
      * `performKeyPress` takes Compose's `KeyEvent`, a value class wrapping the
@@ -133,23 +162,9 @@ class ComposerUndoTest {
         ),
     )
 
-    /**
-     * The seat is composed before any history exists. `assertIsNotEnabled` is the
-     * assertion that it cannot be tapped yet; the existence check beside it is the
-     * one that matters for layout — a control that appears with the first keystroke
-     * would push the chips along the row.
-     */
+    /** The keyboard's undo action removes the typed edit from the field. */
     @Test
-    fun `the history seat is present and disabled with nothing to undo`() {
-        show(TextFieldState())
-
-        rule.onNodeWithContentDescription("Undo").assertExists()
-        rule.onNodeWithContentDescription("Undo").assertIsNotEnabled()
-    }
-
-    /** Undo removes the typed text; with the undo stack empty the seat is Redo. */
-    @Test
-    fun `undo drops the typed text and the seat offers redo`() {
+    fun `the keyboard's undo drops the typed text`() {
         val state = TextFieldState()
         show(state)
 
@@ -157,53 +172,30 @@ class ComposerUndoTest {
         rule.waitForIdle()
         rule.runOnIdle { assertEquals("hello", state.text.toString()) }
 
-        rule.onNodeWithContentDescription("Undo").assertIsEnabled().performClick()
+        val keyboard = keyboardConnection(state)
+        assertTrue(rule.runOnIdle { keyboard.performContextMenuAction(android.R.id.undo) })
         rule.waitForIdle()
 
         rule.runOnIdle { assertEquals("", state.text.toString()) }
-        rule.onNodeWithContentDescription("Redo").assertIsEnabled()
     }
 
-    /** Redo is the same history walked forward, from the seat the undo left. */
+    /** Redo is the same history walked forward, through the keyboard's own action. */
     @Test
-    fun `redo brings the undone text back`() {
+    fun `the keyboard's redo brings the undone text back`() {
         val state = TextFieldState()
         show(state)
 
         rule.onNode(hasSetTextAction()).performTextInput("hello")
         rule.waitForIdle()
-        rule.onNodeWithContentDescription("Undo").performClick()
+        val keyboard = keyboardConnection(state)
+        rule.runOnIdle { keyboard.performContextMenuAction(android.R.id.undo) }
         rule.waitForIdle()
-        rule.onNodeWithContentDescription("Redo").performClick()
+        rule.runOnIdle { assertEquals("", state.text.toString()) }
+
+        assertTrue(rule.runOnIdle { keyboard.performContextMenuAction(android.R.id.redo) })
         rule.waitForIdle()
 
         rule.runOnIdle { assertEquals("hello", state.text.toString()) }
-    }
-
-    /**
-     * The disabled seat and the enabled one occupy the same bounds. That is the
-     * whole reason it is drawn disabled instead of omitted: the row is measured
-     * once, and the first keystroke cannot shift the controls beside it.
-     *
-     * The box starts with text but no history — a seeded `TextFieldState` is a
-     * programmatic edit, so the seat is disabled — and one typed character makes
-     * it enabled. Starting with text keeps the placeholder out of this comparison:
-     * the empty box draws a ghost line that the filled one does not, and that is a
-     * different measurement from the one the seat's own state changes.
-     */
-    @Test
-    fun `the seat keeps its bounds when it becomes enabled`() {
-        val state = TextFieldState("hello")
-        show(state)
-
-        rule.onNodeWithContentDescription("Undo").assertIsNotEnabled()
-        val before = rule.onNodeWithContentDescription("Undo").getBoundsInRoot()
-        rule.onNode(hasSetTextAction()).performTextInput("!")
-        rule.waitForIdle()
-        rule.onNodeWithContentDescription("Undo").assertIsEnabled()
-        val after = rule.onNodeWithContentDescription("Undo").getBoundsInRoot()
-
-        assertEquals(before, after)
     }
 
     /** Ctrl+Z is the chord a keyboard sends; it must reach the same history. */
