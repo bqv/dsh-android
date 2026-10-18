@@ -316,12 +316,15 @@ of where the app stands against them.
 - [x] Slash commands (`commands/list` → `commands/execute`)
 - [x] **Undo and redo in the draft, which the web has no equivalent of.** The composer
       runs on Compose's stateful text field (`TextFieldState`), so the history is the
-      platform's: a 28dp seat beside `+` undoes on a tap and redoes on a long press, and
-      the seat becomes Redo once the undo stack is empty rather than going dead with the
-      redo still available. Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y do the same from a physical
-      keyboard. A send, a failed send's restore and a `/` or `@` pick are programmatic
-      edits, so they are not on the undo stack; a failed send is put back only into the
-      box that send cleared, so an empty box left by undo is not mistaken for it
+      platform's. Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y drive it from a physical keyboard, and
+      the software keyboard's own undo and redo are answered when it sends
+      `android.R.id.undo`/`redo` context-menu actions (`ui/components/ComposerImeUndo.kt`).
+      There is no in-app undo control: undo now depends on the keyboard supporting that
+      action, so a keyboard that undoes only its composing text, or has none, leaves the
+      app with no undo — a deliberate trade, not an oversight. A send, a failed send's
+      restore and a `/` or `@` pick are programmatic edits, so they are not on the undo
+      stack; a failed send is put back only into the box that send cleared, so an empty
+      box left by undo is not mistaken for it
       (`ui/components/Composer.kt`, `ui/composer/ComposerDraft.kt`)
 - [x] Subagent messaging: an addressed continuable child sends `subagents/prompt`, Stop
       sends `subagents/interruptByParent`, and the composer seat becomes a read-only status

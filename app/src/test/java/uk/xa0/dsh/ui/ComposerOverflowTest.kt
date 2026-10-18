@@ -59,6 +59,11 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * same 16dp inset the chat screen gives its composer, so the composer is handed
  * 320 − 32 = 288dp and its action row has 288 − 16 of its own padding left for five
  * controls.
+ *
+ * The undo seat that used to sit beside `+` is gone: it held 28dp plus a 6dp gap, so
+ * the model chip — the child the row squeezes — has 34dp more to work with. The worst
+ * case the seat made tight, plan mode with "Full access" at 320dp, now has a test of
+ * its own.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = HarnessApplication::class, qualifiers = "w320dp-h640dp")
@@ -95,7 +100,11 @@ class ComposerOverflowTest {
      * Composes the real composer at the width of a 320dp phone, or at [width] when a
      * test needs to change the room the row has while it is on screen.
      */
-    private fun composeRow(trigger: ModelTriggerState?, width: () -> Dp? = { null }) {
+    private fun composeRow(
+        trigger: ModelTriggerState?,
+        planMode: Boolean = false,
+        width: () -> Dp? = { null },
+    ) {
         rule.setContent {
             DshTheme {
                 Box(Modifier.fillMaxWidth().padding(horizontal = DshSpacing.xl)) {
@@ -110,10 +119,8 @@ class ComposerOverflowTest {
                         // Remembered: a fresh `TextFieldState` on every recomposition
                         // would throw away the text the field had written, and the
                         // width loop below recomposes the slot on purpose. The undo
-                        // seat this row now carries is part of the width budget the
-                        // assertions below measure; with no history it is disabled but
-                        // still holds its 28dp, which is the point of the "keeps its
-                        // bounds" test in `ComposerUndoTest`.
+                        // seat that used to take 28dp plus a 6dp gap from this row is
+                        // gone, and the row is measured without it.
                         val state = remember { TextFieldState("hello") }
                         Composer(
                             state = state,
@@ -124,7 +131,7 @@ class ComposerOverflowTest {
                             onModelClick = {},
                             permissionLabel = "Full access",
                             onPermissionClick = {},
-                            planActive = false,
+                            planActive = planMode,
                             onExitPlan = {},
                             contextPercent = 12,
                             contextTokens = 12_000,
@@ -205,6 +212,26 @@ class ComposerOverflowTest {
         )
 
         assertSendIsWhole("the unavailable caption")
+    }
+
+    /**
+     * The narrowest real row, and the one the removed undo seat made tight: 320dp,
+     * plan mode on, and the access chip reading "Full access". Send must still be
+     * whole.
+     *
+     * This is scenario coverage rather than a measurement of the reclaimed 34dp:
+     * stub metrics give the labels almost no width, so this row fits under the
+     * harness with or without the seat. The arithmetic is in the class KDoc; this
+     * pins the arrangement that has to survive it.
+     */
+    @Test
+    fun `plan mode and Full access leave send whole at 320dp`() {
+        composeRow(
+            ModelTriggerState(label = label, marker = "when created", description = TRIGGER),
+            planMode = true,
+        )
+
+        assertSendIsWhole("plan mode with Full access")
     }
 
     @Test
