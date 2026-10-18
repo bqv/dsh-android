@@ -242,36 +242,48 @@ fun Composer(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                BasicTextField(
-                    state = state,
-                    textStyle = DshType.messageBody.copy(color = colors.labelPrimary),
-                    cursorBrush = SolidColor(colors.accent),
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.Sentences,
-                        imeAction = ImeAction.Default,
-                    ),
-                    // Preview, not the field's own handler: this runs before the
-                    // text input does, so the chord is ours and the field never
-                    // also applies it. (The stateful field has its own undo
-                    // bindings; taking the event here is what keeps one press from
-                    // stepping twice.) Only the three chords the request named are
-                    // taken; everything else falls through to the field.
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onPreviewKeyEvent { event ->
-                            val shortcut = composerShortcut(
-                                key = event.key,
-                                ctrl = event.isCtrlPressed,
-                                shift = event.isShiftPressed,
-                                down = event.type == KeyEventType.KeyDown,
-                            ) ?: return@onPreviewKeyEvent false
-                            when (shortcut) {
-                                ComposerShortcut.UNDO -> state.undoState.undo()
-                                ComposerShortcut.REDO -> state.undoState.redo()
-                            }
-                            true
-                        },
-                )
+                // PROBE — temporary: logs the IME's connection calls; see
+                // ImeUndoProbe.kt. The field keeps its own connection and its own
+                // behaviour, so a log line is the only thing this adds.
+                ProbeComposerInput {
+                    BasicTextField(
+                        state = state,
+                        textStyle = DshType.messageBody.copy(color = colors.labelPrimary),
+                        cursorBrush = SolidColor(colors.accent),
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.Sentences,
+                            imeAction = ImeAction.Default,
+                        ),
+                        // Preview, not the field's own handler: this runs before the
+                        // text input does, so the chord is ours and the field never
+                        // also applies it. (The stateful field has its own undo
+                        // bindings; taking the event here is what keeps one press from
+                        // stepping twice.) Only the three chords the request named are
+                        // taken; everything else falls through to the field.
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onPreviewKeyEvent { event ->
+                                val shortcut = composerShortcut(
+                                    key = event.key,
+                                    ctrl = event.isCtrlPressed,
+                                    shift = event.isShiftPressed,
+                                    down = event.type == KeyEventType.KeyDown,
+                                )
+                                imeUndoProbe(
+                                    "previewKey(keyCode=${event.nativeKeyEvent.keyCode} " +
+                                        "metaState=${event.nativeKeyEvent.metaState} " +
+                                        "action=${event.nativeKeyEvent.action} " +
+                                        "shortcut=$shortcut)",
+                                ) // PROBE — temporary
+                                if (shortcut == null) return@onPreviewKeyEvent false
+                                when (shortcut) {
+                                    ComposerShortcut.UNDO -> state.probeUndo("ctrl+z")
+                                    ComposerShortcut.REDO -> state.probeRedo("ctrl+shift+z or ctrl+y")
+                                }
+                                true
+                            },
+                    )
+                }
             }
 
             // A single action row, but the two dropdowns sit inline and abbreviated
@@ -310,8 +322,8 @@ fun Composer(
                 UndoRedoButton(
                     canUndo = canUndo,
                     canRedo = canRedo,
-                    onUndo = { state.undoState.undo() },
-                    onRedo = { state.undoState.redo() },
+                    onUndo = { state.probeUndo("button") }, // PROBE — temporary
+                    onRedo = { state.probeRedo("button long press") }, // PROBE — temporary
                 )
                 Spacer(Modifier.width(DshSpacing.sm))
 
