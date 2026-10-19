@@ -343,10 +343,11 @@ class AttentionCenter(private val context: Context) {
 
     fun stop() {
         detach()
-        // Release the waits before the maps that name them are dropped: a question
-        // is handed back and a gate is withdrawn, so neither old handler stays
-        // asleep on its own full cap. Both then find their slot already gone and
-        // settle nothing — see [awaitQuestion]'s ownership check.
+        // Release the waits before the maps that name them are dropped. A question
+        // is woken with the ordinary hand-back but does not send it — the slot is
+        // already gone, so its ownership check settles nothing, and the answer would
+        // have to travel on the connection being abandoned. A gate is withdrawn the
+        // same way. Neither handler then stays asleep for its full cap.
         val waitingQuestions = pending.values.toList()
         pending.clear()
         waitingQuestions.forEach { it.complete(JSONObject().put("kind", "next")) }
@@ -716,7 +717,12 @@ class AttentionCenter(private val context: Context) {
         }
 
         val deferred = CompletableDeferred<JSONObject>()
-        pending[eventId] = deferred
+        // A re-announcement on a new generation replaces this waterfall's wait. The
+        // replaced one is handed back now rather than left asleep on its own cap;
+        // its ownership check sees the slot is no longer its own and settles
+        // nothing, so the old socket's handler can end instead of outliving the
+        // socket by up to the question timeout.
+        pending.put(eventId, deferred)?.complete(JSONObject().put("kind", "next"))
         // Resolved once: it drives both the notification title and the card, and
         // the session list can change under us while the question is pending.
         val subjectIsSubagent = sessionId != null && isSubagent(sessionId)
