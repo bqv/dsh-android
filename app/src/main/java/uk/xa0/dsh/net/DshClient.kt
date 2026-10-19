@@ -39,6 +39,29 @@ class DshRpcException(
 ) : Exception(message)
 
 /**
+ * What a person is told when a gateway call is answered by a page instead of the
+ * host's envelope.
+ *
+ * Such a body is markup: nginx's own 504 and 502 pages, the auth gate's page while
+ * the carrier restarts, a portal's sign-in screen, a web server's 404. Pasted into
+ * a banner, hundreds of characters of `<!DOCTYPE html>` bury the one fact worth
+ * reading, the status, along with anything the banner says after it — which is how
+ * a failed send came to look like an app fault with no explanation. A body that is
+ * short and plain is still the web server's own words ("upstream timed out"), so
+ * that is kept.
+ *
+ * The status is not repeated in the answer because the exception's code already
+ * carries it; see `DshViewModel.describe`.
+ */
+fun gatewayAnswerText(body: String): String {
+    val trimmed = body.trim()
+    val markup = trimmed.isEmpty() ||
+        trimmed.startsWith("<") ||
+        trimmed.contains("<html", ignoreCase = true)
+    return if (markup) "the host did not answer; its web server replied instead" else trimmed.take(200)
+}
+
+/**
  * The host could not be reached at all — a timeout, a dropped socket, a bad route.
  *
  * Distinct from [DshAuthException] on purpose: a slow or briefly-down host used to
@@ -834,7 +857,11 @@ class DshClient(context: Context) {
                     // not, and treating it as one set the LAN door aside until the
                     // network changed.
                     onRouteFailure(doorFaultForAnswer(response.code))
-                    throw DshRpcException("http/${response.code}", text.take(400), null)
+                    throw DshRpcException(
+                        "http/${response.code}",
+                        gatewayAnswerText(text),
+                        null,
+                    )
                 }
                 val result = parsed.optJSONObject("result")
                     ?: run {
@@ -861,8 +888,9 @@ class DshClient(context: Context) {
      *
      * `workspaceFiles/readBytes` answers `multipart/form-data` on 0.2.0, holding the
      * file's bytes in its first part. [rpcRaw] reads the body as a string and, when it
-     * will not parse as an envelope, throws with the first 400 characters as the
-     * message — which is why the Files panel used to display an HTTP response body
+     * will not parse as an envelope, throws with the body's own words — one sentence
+     * instead of a page when the body is markup, see [gatewayAnswerText] — which is
+     * why the Files panel used to display an HTTP response body
      * (`Content-Disposition: form-data; name="bytes-0"` over PNG chunks) where a
      * picture belonged.
      *

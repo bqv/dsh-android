@@ -8356,7 +8356,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun describe(error: Throwable): String = when (error) {
         is DshAuthException -> AUTH_ERROR
-        is DshRpcException -> "${error.code}: ${error.message}"
+        is DshRpcException -> when {
+            // An answer that was a page rather than an envelope has no host error
+            // code of its own: the HTTP status *is* the failure and is the part a
+            // reader can act on ("HTTP 504"), where the bare `http/504` token read
+            // as something internal. The message carries the explanation; see
+            // `gatewayAnswerText`.
+            error.code.startsWith("http/") ->
+                "HTTP ${error.code.removePrefix("http/")}: ${error.message}"
+
+            else -> "${error.code}: ${error.message}"
+        }
+
         else -> error.message ?: error.javaClass.simpleName
     }
 
