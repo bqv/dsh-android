@@ -93,7 +93,6 @@ import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -165,9 +164,9 @@ import uk.xa0.dsh.ui.scroll.TailFollow
 import uk.xa0.dsh.ui.components.composerCommandEntries
 import uk.xa0.dsh.ui.composer.ComposerTriggers
 import uk.xa0.dsh.ui.composer.composerTriggers
+import uk.xa0.dsh.ui.composer.applySendRestore
 import uk.xa0.dsh.ui.composer.consumeTrigger
 import uk.xa0.dsh.ui.composer.replaceTrigger
-import uk.xa0.dsh.ui.composer.restoreSendFailure
 import uk.xa0.dsh.ui.theme.DshRadius
 import uk.xa0.dsh.ui.theme.DshSpacing
 import uk.xa0.dsh.ui.theme.DshTheme
@@ -427,12 +426,13 @@ fun ChatScreen(vm: DshViewModel) {
     // the right question once undo could empty it too, so the restore is keyed on the
     // send itself: `restoreArmed` is set by the clear, and an undo since then rules the
     // restore out. `canRedo` is true exactly when an undo has happened since the last
-    // edit, and it is read in the effect below rather than watched in a collector — an
-    // undo and a failure's restore can land in the same frame, and a read at decision
-    // time cannot be overtaken by the order two coroutines resume in. Reading it also
+    // edit, and it is read at the decision — inside `applySendRestore`, called from the
+    // effect below — rather than watched in a collector: an undo and a failure's
+    // restore can land in the same frame, and a read at decision time cannot be
+    // overtaken by the order two coroutines resume in. Reading it also
     // means an undo from any route counts: the keyboard's context-menu undo or a Ctrl
     // chord. Typing needs nothing extra: a non-empty box already fails
-    // the rule. See [restoreSendFailure] for the rule itself.
+    // the rule. See [restoreSendFailure] and [applySendRestore] for the rule itself.
     //
     // Unscoped by `draftKey` on purpose. A failed first send off the pending seat
     // materialises a session first, so the key changes between the send and the failure
@@ -441,18 +441,12 @@ fun ChatScreen(vm: DshViewModel) {
     var restoreArmed by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(ui.draftRestore) {
         val restore = ui.draftRestore ?: return@LaunchedEffect
-        val undone = draft.undoState.canRedo
-        if (restoreSendFailure(restoreArmed, undone, draft.text)) {
-            draft.edit {
-                replace(0, length, restore.text)
-                // The old `TextFieldValue(restore.text)` parked the caret at 0. A
-                // restored draft is one the reader was in the middle of, so it comes
-                // back with the caret after the last character instead.
-                selection = TextRange(length)
-            }
-        }
+        // The rule, and the act of applying it, live together in
+        // `applySendRestore`. Its answer is what the banner reports: the text is
+        // only said to be back when it is.
+        val restored = applySendRestore(draft, restore.text, restoreArmed)
         restoreArmed = false
-        vm.consumeDraftRestore()
+        vm.consumeDraftRestore(restored)
     }
 
     // What a submission does to the box, in the one place all three send paths share.

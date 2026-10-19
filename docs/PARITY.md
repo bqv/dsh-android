@@ -324,8 +324,11 @@ of where the app stands against them.
       app with no undo — a deliberate trade, not an oversight. A send, a failed send's
       restore and a `/` or `@` pick are programmatic edits, so they are not on the undo
       stack; a failed send is put back only into the box that send cleared, so an empty
-      box left by undo is not mistaken for it
-      (`ui/components/Composer.kt`, `ui/composer/ComposerDraft.kt`)
+      box left by undo is not mistaken for it. Every send is covered, not only the first
+      one off the pending seat: a prompt into an open session that is refused, or whose
+      answer is the web server's page rather than the host's (a 504), hands its text back
+      through the same path, and the banner says so
+      (`ui/components/Composer.kt`, `ui/composer/ComposerDraft.kt`, `DshViewModel.dispatchSend`)
 - [x] Subagent messaging: an addressed continuable child sends `subagents/prompt`, Stop
       sends `subagents/interruptByParent`, and the composer seat becomes a read-only status
       frame unless `subagents/list` reports the parent available

@@ -71,6 +71,7 @@ import uk.xa0.dsh.model.readScheduleEntries
 import uk.xa0.dsh.model.readScheduleHistory
 import uk.xa0.dsh.model.sortScheduleEntries
 import uk.xa0.dsh.model.MissingMembersLatch
+import uk.xa0.dsh.model.failedSendBanner
 import uk.xa0.dsh.model.omittedMembersWarning
 import uk.xa0.dsh.model.FilePreview
 import uk.xa0.dsh.model.ExplorerState
@@ -3782,9 +3783,27 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _ui.value = _ui.value.copy(draftRestore = DraftRestore(text, ++draftRestoreNonce))
     }
 
-    /** The composer has taken the restored draft; clear it so it cannot re-apply. */
-    fun consumeDraftRestore() {
-        _ui.value = _ui.value.copy(draftRestore = null)
+    /**
+     * The composer has taken the restored draft; clear it so it cannot re-apply.
+     *
+     * [restored] is the composer's answer to whether the text actually went back
+     * into the box — it does not, by design, when the reader has typed something
+     * since the send, or has undone their way to an empty box. Only the composer
+     * knows that, so it is the composer that says it; the banner must not claim the
+     * words are back when they are not, because a reader who believes it looks away
+     * and loses them.
+     */
+    fun consumeDraftRestore(restored: Boolean) {
+        val current = _ui.value
+        val error = current.error
+        _ui.value = current.copy(
+            draftRestore = null,
+            error = if (error != null && !current.errorNeedsSignIn) {
+                failedSendBanner(error, restored)
+            } else {
+                error
+            },
+        )
     }
 
     /**
@@ -6891,10 +6910,17 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         if (text.isBlank() && riding.isEmpty()) return
         val sessionId = _ui.value.currentSessionId
         if (sessionId != null) {
-            dispatchSend(sessionId, text, riding, mode, restoreOnFailure = false)
+            dispatchSend(sessionId, text, riding, mode)
             return
         }
-        val pending = _ui.value.pendingSession ?: return
+        val pending = _ui.value.pendingSession
+        if (pending == null) {
+            // The composer cleared the box before it called this, so there is
+            // nothing left on screen to hold what was typed. Nowhere to send is
+            // not a reason to keep it: hand it straight back.
+            restoreDraft(text)
+            return
+        }
         sendFromPending(pending, text, riding, mode)
     }
 
@@ -6924,22 +6950,31 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 restoreDraft(text)
                 return@launch
             }
-            dispatchSend(id, text, riding, mode, restoreOnFailure = true)
+            dispatchSend(id, text, riding, mode)
         }
     }
 
     /**
-     * Echos one submission and sends it. [restoreOnFailure] hands the text back to
-     * the composer when the prompt itself is refused — set for a send that came off
-     * the pending seat, where the reader has already had one failure mode reported
-     * and the draft is the only copy of what they wrote.
+     * Echos one submission and sends it.
+     *
+     * A prompt the host refuses, an answer that is the web server's page instead
+     * of the host's envelope, a timeout, a dropped socket: every one of those
+     * arrives here as a thrown failure, and every one of them hands [text] back to
+     * the composer. This used to be a flag set only for a send that came off the
+     * pending seat, which meant the ordinary send — into a session that already
+     * exists — dropped what the reader wrote on any refusal. The text was taken
+     * off the screen by the send that carried it, so a failure that does not put
+     * it back is the loss the reader sees.
+     *
+     * Whether it lands in the box is not decided here: the composer restores only
+     * into the box the send emptied, and it reports back whether it did, which is
+     * what the banner says. A reader who has typed since keeps what they typed.
      */
     private fun dispatchSend(
         sessionId: String,
         text: String,
         riding: List<PendingAttachment>,
         mode: String,
-        restoreOnFailure: Boolean,
     ) {
         val requestId = UUID.randomUUID().toString()
         // The content is built before anything is echoed, because an addressed
@@ -6951,7 +6986,9 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         if (child != null && hasFileContentPart(content)) {
             // The refusal the web raises before ever reaching the subagent route,
             // surfaced through the same banner a host error of that code would
-            // use; the staged receipt is left on the rail to be taken off.
+            // use; the staged receipt is left on the rail to be taken off. The
+            // text comes back for the same reason a later failure's does: the
+            // composer cleared the box for a send that never left the phone.
             showFailure(
                 DshRpcException(
                     code = SUBAGENT_ATTACHMENT_INVALID,
@@ -6960,6 +6997,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 ),
                 "subagents/prompt",
             )
+            restoreDraft(text)
             return
         }
         // The web derives the echo's placement the same way (`beginSubmission`):
@@ -7036,8 +7074,17 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 publishQueue()
                 bumpTranscript()
                 _ui.value = _ui.value.copy(running = false)
-                showFailure(error, if (child != null) "subagents/prompt" else "session/prompt")
-                if (restoreOnFailure) restoreDraft(text)
+                showFailure(
+                    error,
+                    if (child != null) "subagents/prompt" else "session/prompt",
+                    "Send failed: ",
+                )
+                // The only trace a refused prompt leaves is this line: the banner
+                // carries the words and is gone the moment it is dismissed, so
+                // "what did the app actually say when the send failed" has no
+                // other answer. The text is deliberately not logged.
+                Log.d(TAG, "prompt failed: ${describe(error)}")
+                restoreDraft(text)
             }
             refreshSessionsSoon()
         }
