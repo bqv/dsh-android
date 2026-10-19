@@ -264,11 +264,55 @@ class AttentionCenter(private val context: Context) {
      * live `eventsJob` there would leave the new mux with no `onWaterfall`
      * handler, and the host fails every approval and question with `NO_PROVIDER`;
      * so a changed instance tears the old registration down first.
+     *
+     * That teardown is a full [stop]: the cards and their notifications belonged
+     * to a different host (or to credentials that have just been dropped), so they
+     * go with it. A connection that is being rebuilt against the *same* host wants
+     * [reattach] instead, which keeps them.
      */
     fun start(client: DshClient) {
         val mux = runCatching { client.mux() }.getOrNull() ?: return
         if (attachedMux === mux && eventsJob?.isActive == true) return
         stop()
+        attach(client, mux)
+    }
+
+    /**
+     * Re-point this centre at a new mux **without dropping what is on screen**.
+     *
+     * A transport restart, a route move and a rewire all replace the multiplexer
+     * under a centre that is still the reader's only view of an approval or a
+     * question. Those cards are a person's outstanding work, not transport state:
+     * dropping them would make a restart look as though the agent had given up,
+     * and re-raising them through [start] would buzz the phone a second time for
+     * a prompt it had already announced.
+     *
+     * Nothing here needs to guess whether a card is still real. Opening `$events`
+     * on the new mux is a new generation, and the host re-announces every waterfall
+     * it is still holding before anything else on that stream; [handleGeneration]
+     * reconciles the held cards against that roster. A card the host no longer
+     * names is taken down after the grace, and one it does name is refreshed in
+     * place by [awaitApproval]'s re-announcement path — the same machinery that
+     * already carries a card across a dropped socket.
+     */
+    fun reattach(client: DshClient) {
+        val mux = runCatching { client.mux() }.getOrNull() ?: return
+        if (attachedMux === mux && eventsJob?.isActive == true) return
+        detach()
+        attach(client, mux)
+    }
+
+    /** Drops the registration without touching any card; see [reattach]. */
+    private fun detach() {
+        eventsJob?.cancel()
+        eventsJob = null
+        stateJob?.cancel()
+        stateJob = null
+        attachedMux = null
+    }
+
+    /** Points this centre at [mux]; the caller owns whatever clearing it needs. */
+    private fun attach(client: DshClient, mux: RemoteMux) {
         mux.postEventResult = { args -> client.rpc("\$events/result", args) }
         mux.onWaterfall = { frame, send -> handleWaterfall(frame, send) }
         mux.onWaterfallCancel = { eventId -> handleCancel(eventId) }
@@ -298,12 +342,15 @@ class AttentionCenter(private val context: Context) {
     }
 
     fun stop() {
-        eventsJob?.cancel()
-        eventsJob = null
-        stateJob?.cancel()
-        stateJob = null
-        attachedMux = null
+        detach()
+        // Release the waits before the maps that name them are dropped: a question
+        // is handed back and a gate is withdrawn, so neither old handler stays
+        // asleep on its own full cap. Both then find their slot already gone and
+        // settle nothing — see [awaitQuestion]'s ownership check.
+        val waitingQuestions = pending.values.toList()
         pending.clear()
+        waitingQuestions.forEach { it.complete(JSONObject().put("kind", "next")) }
+        answerGates.values.forEach { it.withdraw() }
         answerGates.clear()
         // The cards are being dropped wholesale, so the roster that describes them
         // must go too, and no reconciliation may fire against a card that is gone.
@@ -690,6 +737,15 @@ class AttentionCenter(private val context: Context) {
         )
         val outcome = withTimeoutOrNull(QUESTION_TIMEOUT_MS) { deferred.await() }
             ?: JSONObject().put("kind", "next")
+        // Only the wait that still owns this waterfall may settle it. A
+        // re-announcement on a new generation — a reconnect, a route move or a
+        // transport restart — installs a fresh deferred and card for the same
+        // eventId, and this older wait is still asleep on its own copy. Letting it
+        // run the two lines below would remove the *new* deferred (so the reader's
+        // answer would go nowhere) and send its stale outcome through a socket that
+        // no longer exists. The approval path has the same ownership rule, enforced
+        // by its gate; a question's deferred is the equivalent token.
+        if (pending[eventId] !== deferred) return
         pending.remove(eventId)
         removeQuestions(eventId)?.let {
             Attention.cancel(context, Attention.questionId(it.sessionId))
