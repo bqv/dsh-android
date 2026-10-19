@@ -348,6 +348,39 @@ class DshClient(context: Context) {
     }
 
     /**
+     * Tear the transport down so the next attempt builds it again.
+     *
+     * The deliberate, in-process counterpart to a force-stop: the configuration,
+     * the cookie jar, the trust anchors and every other piece of process state are
+     * untouched, and only what was learned about *this* connection is dropped.
+     *
+     * Two things go. The multiplexer is shut down and forgotten, which ends every
+     * logical stream on it — the event stream's registrations, the followed
+     * session, the control and workspace streams, the terminal attachment — and
+     * stops its supervisor from re-dialling a socket this action has declared dead.
+     * And [EndpointResolver.restart] forgets the door holds, the cached winner and
+     * the last probed answer, because those are exactly the records that can wedge
+     * a route: a wrong-answer verdict survives every clock change, and a cached
+     * winner can be an answer about a wire that is gone.
+     *
+     * It does **not** resolve on its own. The caller owns the fresh dial (the view
+     * model's connect), which probes both doors and builds the multiplexer on the
+     * answer — resolving here as well would ask the same question twice.
+     *
+     * The route-failure cooldown goes too: it bounded probes for the calls the
+     * previous transport was making, and a connection that is one call old should
+     * not inherit its reluctance.
+     */
+    fun resetTransport() {
+        synchronized(this) {
+            endpoint.restart()
+            lastRouteFailureAt = 0L
+            mux?.shutdown()
+            mux = null
+        }
+    }
+
+    /**
      * The LAN address to try for this config: the explicit one, or — for an
      * install that predates the field — the primary URL itself when it is
      * already a private address, so a LAN-only setup keeps working untouched.
