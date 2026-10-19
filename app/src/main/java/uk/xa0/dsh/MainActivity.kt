@@ -120,7 +120,9 @@ class MainActivity : ComponentActivity() {
                 // Composed before the screen so the screen's own Back handlers — the
                 // drawer, the sheets, the Files panel, a non-Chat view — are asked
                 // first; what reaches the gate is the press with nothing to dismiss.
-                BackGate(onExit = { finish() })
+                // `finish()` closes this Activity only: the process, its client and
+                // the connection service carry on, which is why the gate says Close.
+                BackGate(onClose = { finish() })
                 Box(
                     Modifier
                         .fillMaxSize()

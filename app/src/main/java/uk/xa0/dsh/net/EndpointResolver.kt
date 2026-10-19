@@ -264,11 +264,40 @@ class EndpointResolver(
     fun update(primary: HttpUrl?, lan: HttpUrl?) {
         this.primary = primary
         this.lan = lan
+        restart()
+    }
+
+    /**
+     * Forget everything this resolver learned about the doors on the current
+     * network, keeping the configured candidates.
+     *
+     * This is the state a deliberate transport restart has to clear, and nothing
+     * else does: [invalidate] throws away the TTL but keeps the winner on purpose,
+     * [grantRetry] lifts only the transport holds a resume is allowed to lift, and
+     * [forgiveByUser] clears the records but leaves the cached answer to stand until
+     * the next resolution. A person rebuilding the connection is saying something
+     * stronger than any of those — the route may be wedged by a fault, by a winner
+     * that was right for a wire which no longer exists, or by both — so all of it
+     * goes:
+     *
+     *  * every [Fault], including a [DoorFault.WrongAnswer] verdict;
+     *  * the cached [winner] and whether it was the LAN door;
+     *  * the TTL that would otherwise serve that answer without probing;
+     *  * [lastProbed], so the first resolution afterwards is reported as a change
+     *    rather than as news the route stayed put. That is what makes a racing
+     *    multiplexer — one built by the connection service's keep-alive between the
+     *    restart and the fresh dial — get dropped instead of adopted.
+     *
+     * [peek] therefore answers with the primary until a probe lands, which is the
+     * honest "nothing has been resolved yet" state rather than a stale winner.
+     */
+    fun restart() {
         faults.clear()
         winner = null
         winnerIsLan = false
         resolved = false
         resolvedAt = 0L
+        lastProbed = null
     }
 
     /**

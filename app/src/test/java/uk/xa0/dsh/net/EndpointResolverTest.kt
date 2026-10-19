@@ -657,4 +657,69 @@ class EndpointResolverTest {
         r.invalidate()
         assertEquals(lan, r.resolve().url)
     }
+
+    @Test
+    fun `a restart drops the cached winner so the next dial really probes`() = runBlocking {
+        // The cached winner is exactly the kind of answer a wedged connection
+        // leaves behind: it was true for the wire the app could not use, and a TTL
+        // would keep serving it without asking. A person rebuilding the
+        // connection is owed a fresh question.
+        val probed = mutableListOf<String>()
+        val r = EndpointResolver(
+            isDshHost = { url -> probed += url.host; url.host == "192.168.1.110" },
+            localIpv4 = { null },
+        )
+        r.update(primary = public, lan = lan)
+        assertEquals(lan, r.resolve().url)
+        assertEquals(lan, r.peek())
+        val before = probed.size
+
+        r.restart()
+
+        assertFalse("no LAN winner survives a restart", r.isLan)
+        assertEquals("peek falls back to the primary until a probe lands", public, r.peek())
+        assertEquals(lan, r.resolve().url)
+        assertTrue("the restart re-probed the doors", probed.size > before)
+        assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `a restart clears a wrong-answer verdict and every hold`() = runBlocking {
+        // The verdict is the one hold nothing automatic may lift, so a transport
+        // restart has to be stronger than the automatic paths — otherwise a door
+        // that once answered with a captive portal stays out of the running for
+        // the rest of the process, however many times the reader rebuilds the
+        // connection.
+        val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
+        val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
+        r.update(primary = public, lan = lan)
+
+        r.noteFailure(lan, DoorFault.WrongAnswer)
+        r.noteFailure(public, DoorFault.Transport)
+        r.invalidate()
+        assertEquals(public, r.resolve().url)
+        assertEquals(DoorFault.WrongAnswer, r.lanDoorFault)
+
+        r.restart()
+
+        assertNull("no door is avoided after a restart", r.lanDoorFault)
+        assertEquals("the LAN door is back in the running", lan, r.resolve().url)
+        assertTrue(r.isLan)
+    }
+
+    @Test
+    fun `the first resolution after a restart counts as a move`() = runBlocking {
+        // What lets the client drop a multiplexer a racing caller may have built
+        // between the restart and the fresh dial: the resolution that follows
+        // reports a change even when it lands on the same door, so nothing bound
+        // to the old answer is adopted.
+        val r = resolver(answering = setOf("cloud.xa0.uk"))
+        r.update(primary = public, lan = lan)
+
+        assertTrue("the first probe ever is a move", r.resolve().changed)
+        assertFalse("a cached answer is not", r.resolve().changed)
+
+        r.restart()
+        assertTrue("a restart's first answer is a move again", r.resolve().changed)
+    }
 }

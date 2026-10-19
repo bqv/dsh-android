@@ -606,7 +606,7 @@ fun ChatScreen(vm: DshViewModel) {
         }
     }
 
-    // Back walks *up* the screen before it is allowed anywhere near the app's exit.
+    // Back walks *up* the screen before it is allowed anywhere near the close gate.
     //
     // One handler with an explicit order rather than several `BackHandler`s: which of
     // those wins is a question about registration order, and the answer here has to be
@@ -616,7 +616,7 @@ fun ChatScreen(vm: DshViewModel) {
     // Chat, then go up to the parent.
     //
     // `enabled` only while one of those applies, which matters: a handler always
-    // consumes the press, and consuming one it cannot use would hold the exit dialog
+    // consumes the press, and consuming one it cannot use would hold the close dialog
     // hostage. The sheets (jobs, lineage, settings, about) are modal and already
     // dismiss themselves. Composed here rather than at the root because this is where
     // the state lives, and the root gate is asked only after the screen declines.
@@ -1718,6 +1718,12 @@ fun ChatScreen(vm: DshViewModel) {
             // The host's own DSH version, from its `$events` opening frame. Never
             // this app's version; see `model/HostVersion.kt`.
             hostVersion = ui.hostVersion,
+            // The transport-level repair, beside the route facts that explain why a
+            // reader might need it. It rebuilds the socket in this process, so the
+            // connection service and every waiting approval survive; that is the
+            // action the Close control was mistaken for.
+            onRestartConnection = vm::restartConnection,
+            connectionRestart = ui.connectionRestart,
             // The other door, and what this app accepts as the host's identity. Here
             // rather than in Settings: a signed-in session has no way back to setup,
             // and a certificate that can only be pinned before signing in is one
