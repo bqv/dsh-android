@@ -612,7 +612,7 @@ fun ChatScreen(vm: DshViewModel) {
         }
     }
 
-    // Back walks *up* the screen before it is allowed anywhere near the app's exit.
+    // Back walks *up* the screen before it is allowed anywhere near the close gate.
     //
     // One handler with an explicit order rather than several `BackHandler`s: which of
     // those wins is a question about registration order, and the answer here has to be
@@ -622,7 +622,7 @@ fun ChatScreen(vm: DshViewModel) {
     // Chat, then go up to the parent.
     //
     // `enabled` only while one of those applies, which matters: a handler always
-    // consumes the press, and consuming one it cannot use would hold the exit dialog
+    // consumes the press, and consuming one it cannot use would hold the close dialog
     // hostage. The sheets (jobs, lineage, settings, about) are modal and already
     // dismiss themselves. Composed here rather than at the root because this is where
     // the state lives, and the root gate is asked only after the screen declines.
