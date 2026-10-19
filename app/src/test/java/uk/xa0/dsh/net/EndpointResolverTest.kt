@@ -684,20 +684,27 @@ class EndpointResolverTest {
     }
 
     @Test
-    fun `a restart clears a wrong-answer verdict and every hold`() = runBlocking {
+    fun `a restart clears a wrong-answer verdict so the LAN door comes back`() = runBlocking {
         // The verdict is the one hold nothing automatic may lift, so a transport
         // restart has to be stronger than the automatic paths — otherwise a door
         // that once answered with a captive portal stays out of the running for
         // the rest of the process, however many times the reader rebuilds the
         // connection.
+        //
+        // Only the LAN door is held here, deliberately. A hold reorders the
+        // candidates; it never removes one, and a door that is being avoided is
+        // still used when no *unheld* door answers (`resolve`'s fallback). Holding
+        // the public door as well would make the pre-restart state pick the LAN
+        // door too, and the pair would read as two copies of the same state rather
+        // than proof that the verdict was what moved the route.
         val answering = mutableSetOf("192.168.1.110", "cloud.xa0.uk")
         val r = EndpointResolver(isDshHost = { it.host in answering }, localIpv4 = { null })
         r.update(primary = public, lan = lan)
 
         r.noteFailure(lan, DoorFault.WrongAnswer)
-        r.noteFailure(public, DoorFault.Transport)
         r.invalidate()
         assertEquals(public, r.resolve().url)
+        assertFalse(r.isLan)
         assertEquals(DoorFault.WrongAnswer, r.lanDoorFault)
 
         r.restart()
