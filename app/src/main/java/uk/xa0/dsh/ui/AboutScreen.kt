@@ -39,7 +39,12 @@ import androidx.compose.ui.unit.dp
 import uk.xa0.dsh.BuildConfig
 import uk.xa0.dsh.ModelOption
 import uk.xa0.dsh.PermissionOption
+import uk.xa0.dsh.model.CONNECTION_RESTART_ACTION
+import uk.xa0.dsh.model.CONNECTION_RESTART_NOTE
+import uk.xa0.dsh.model.CONNECTION_RESTART_RUNNING
+import uk.xa0.dsh.model.ConnectionRestart
 import uk.xa0.dsh.model.HostVersion
+import uk.xa0.dsh.model.connectionRestartNote
 import uk.xa0.dsh.net.AcceptedCert
 import uk.xa0.dsh.net.CertReadout
 import uk.xa0.dsh.net.DoorFault
@@ -70,10 +75,12 @@ import java.security.cert.X509Certificate
  * the `UiState` slice the sheets are handed, so the view model has no field for
  * either.
  *
- * Every row here is local, and every one stays truthful with the socket down. The
- * one action that reaches the network is **Check certificate**, which reads what the
- * host presents and is explicit about doing so. The one row that is neither local
- * nor a call of its own is the host's DSH version: it is folded from the `$events`
+ * Every row here is local, and every one stays truthful with the socket down. Two
+ * actions reach the network: **Check certificate**, which reads what the host
+ * presents and is explicit about doing so, and **Restart connection**, which
+ * rebuilds the transport in-process and states both its progress and its outcome.
+ * The one row that is neither local nor a call of its own is the host's DSH
+ * version: it is folded from the `$events`
  * opening frame the app already receives, and a host that names no version is said
  * to have named none. Facts that would need a host call to *print* — the host's own
  * build, the machine it runs on — are deliberately absent rather than guessed.
@@ -140,6 +147,21 @@ fun AboutContent(
      * usual `Unknown` rather than omitting the row.
      */
     hostVersion: HostVersion = HostVersion.Unknown,
+    /**
+     * The reader's "Restart connection": tear the transport down and build it
+     * again without killing the process. Null hides the action.
+     *
+     * It belongs in this section because this is where a wedged route is *read*:
+     * the Route, Active URL, LAN-fault and DSH-version rows above are the evidence
+     * a reader has for wanting it, and one surface that holds both the diagnosis
+     * and the repair is worth more than a second, faster entry point. A drawer
+     * item or a long-press would put a transport-level action one stray tap from
+     * navigation, and a gesture nobody can see is no faster for the reader who
+     * does not already know it exists. See [connectionRestartNote].
+     */
+    onRestartConnection: (() -> Unit)? = null,
+    /** What the restart is doing, or what it last did; see [ConnectionRestart]. */
+    connectionRestart: ConnectionRestart = ConnectionRestart.Idle,
     /**
      * The LAN door's own address, and where an edit goes. Committed by the Save
      * action rather than per keystroke: a new LAN address re-resolves the endpoint
@@ -317,6 +339,51 @@ fun AboutContent(
         // in words rather than being left blank or filled in with this app's version.
         InfoRow("DSH version", hostVersionLabel(hostVersion), HOST_VERSION_VALUE_TAG)
 
+        // The transport-level action, beside the facts that explain it. One action,
+        // one effect: it rebuilds the socket and re-asks both doors, and leaves the
+        // process — and therefore the connection service, the cookie jar and every
+        // waiting approval — alone. The busy and outcome lines are not decoration:
+        // a restart takes a moment and this app's recurring defect is doing
+        // something deliberate and saying nothing.
+        val restart = onRestartConnection
+        if (restart != null) {
+            val running = connectionRestart == ConnectionRestart.Running
+            Column(Modifier.padding(horizontal = DshSpacing.xxl)) {
+                Spacer(Modifier.height(DshSpacing.sm))
+                Text(
+                    text = if (running) CONNECTION_RESTART_RUNNING else CONNECTION_RESTART_ACTION,
+                    style = DshType.bodyMedium,
+                    color = if (running) colors.labelCaption else colors.link,
+                    modifier = Modifier
+                        .testTag(RESTART_CONNECTION_TAG)
+                        // Disabled while it runs: a second tap would ask for a
+                        // second teardown before the first has finished probing.
+                        .clickableNoRipple(enabled = !running) { restart() },
+                )
+            }
+            val note = connectionRestartNote(connectionRestart)
+            if (note == null) {
+                SectionNote(CONNECTION_RESTART_NOTE)
+            } else {
+                Text(
+                    text = note,
+                    style = DshType.bodySmall,
+                    // Failure is the one outcome drawn in the error tint; success
+                    // and progress stay in the ordinary note colour, so the page
+                    // does not shout about a rebuild that worked.
+                    color = if (connectionRestart is ConnectionRestart.Failed) {
+                        colors.error
+                    } else {
+                        colors.labelTertiary
+                    },
+                    modifier = Modifier.padding(
+                        horizontal = DshSpacing.xxl,
+                        vertical = DshSpacing.xs,
+                    ),
+                )
+            }
+        }
+
         // What this host is pinned to, or what it presented when it was refused. Bound
         // to locals because a nullable parameter does not smart-cast inside a lambda.
         val check = onCheckCertificate
@@ -473,6 +540,13 @@ private fun InfoRow(label: String, value: String?, valueTag: String? = null) {
  * than one row, so counting the word cannot tell them apart.
  */
 const val HOST_VERSION_VALUE_TAG = "about-host-dsh-version"
+
+/**
+ * The restart action's seat, for `AboutRestartTest`: the same words also appear in
+ * the busy and done notes, so matching by text alone could not tell the control
+ * from the line describing it.
+ */
+const val RESTART_CONNECTION_TAG = "about-restart-connection"
 
 /**
  * What the About page says when the LAN door is being avoided, one sentence per

@@ -53,6 +53,7 @@ import uk.xa0.dsh.ModelOption
 import uk.xa0.dsh.PermissionOption
 import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
+import uk.xa0.dsh.model.ConnectionRestart
 import uk.xa0.dsh.model.HostSettings
 import uk.xa0.dsh.model.HostVersion
 import uk.xa0.dsh.model.ModelChoice
@@ -178,6 +179,10 @@ fun AboutSheet(
     onRetryLanRoute: (() -> Unit)? = null,
     /** The DSH version the connected host named in its `$events` opening frame. */
     hostVersion: HostVersion = HostVersion.Unknown,
+    /** The reader's "Restart connection"; see [AboutContent]. */
+    onRestartConnection: (() -> Unit)? = null,
+    /** What that restart is doing, or last did; see [AboutContent]. */
+    connectionRestart: ConnectionRestart = ConnectionRestart.Idle,
     /**
      * The other door's address, and the certificates this app has accepted — with the
      * last thing a host presented when it was refused. All of it belongs on this page
@@ -221,6 +226,8 @@ fun AboutSheet(
             lanRouteConfigured = lanRouteConfigured,
             onRetryLanRoute = onRetryLanRoute,
             hostVersion = hostVersion,
+            onRestartConnection = onRestartConnection,
+            connectionRestart = connectionRestart,
             lanUrl = lanUrl,
             onLanUrl = onLanUrl,
             acceptedCerts = acceptedCerts,

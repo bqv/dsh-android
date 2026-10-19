@@ -33,6 +33,7 @@ import uk.xa0.dsh.model.AccountBalance
 import uk.xa0.dsh.model.ApprovalAnswer
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.model.ChatEntry
+import uk.xa0.dsh.model.ConnectionRestart
 import uk.xa0.dsh.model.JobsMarker
 import uk.xa0.dsh.model.JobObservation
 import uk.xa0.dsh.model.JobOutput
@@ -993,6 +994,16 @@ data class UiState(
      */
     val muxState: MuxState = MuxState.IDLE,
     /**
+     * What the About page's "Restart connection" action is doing, or last did.
+     *
+     * A field of its own rather than [busy] or [error]: those two belong to the
+     * connect and to every other action, while this is one deliberate transport
+     * rebuild on one surface. It carries the outcome as well as the progress so
+     * the reader is told which of the two happened — a restart that silently did
+     * nothing, or quietly failed, is the defect this app keeps repeating.
+     */
+    val connectionRestart: ConnectionRestart = ConnectionRestart.Idle,
+    /**
      * The DSH version the connected host named in its `$events` opening frame.
      *
      * Read from that frame and nowhere else: the app talks to a remote host, so the
@@ -1240,6 +1251,30 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private var controlJob: Job? = null
     private var workspacesJob: Job? = null
     private var muxWired = false
+    /**
+     * Every coroutine [ensureMuxWiring] started, so a rewire can cancel exactly
+     * those instead of stacking another set.
+     *
+     * Three of them mirror the attention centre's pending state into [UiState] and
+     * one is the once-a-second mux poll. They are bound to one multiplexer — the
+     * poll reads `client.mux()` afresh, the mirrors do not — so leaving them running
+     * across a replaced socket means four more live coroutines per rewire, each
+     * still writing to a UI that a newer generation also writes. That was a
+     * documented, deliberately unfixed leak; a "Restart connection" action that
+     * re-wires would have made it four per press, so the handles are held now and
+     * [detachMuxWiring] ends them.
+     */
+    private var muxWiringJobs: List<Job> = emptyList()
+    /**
+     * The configured primary the current wiring was built for.
+     *
+     * Decides whether a replacement mux may keep the attention centre's cards:
+     * the same host is a route move or a transport restart, whose new `$events`
+     * generation re-announces what the host still holds; a different host is a
+     * configuration change, where those cards belong to a connection this app has
+     * left and [AttentionCenter.start] drops them.
+     */
+    private var wiredHost: String? = null
     private var previousRunning: Set<String> = emptySet()
 
     /**
@@ -3107,7 +3142,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // Approvals and questions are handled process-wide rather than here, so a
         // reaped Activity cannot turn an agent's question into a failed tool call.
         app.attention.foreground = { app.foreground.resumed }
-        app.attention.start(client)
+        // A rewire against the same host re-points the centre at the new socket
+        // rather than dropping its cards: a waiting approval is a person's
+        // outstanding work, not transport state, and the new `$events` generation
+        // re-announces it. A different configured host is a genuine reset — those
+        // cards belong to a connection this app has left, and a host that never
+        // answers would never reconcile them away.
+        val host = _ui.value.baseUrl
+        if (wiredHost == host) app.attention.reattach(client) else app.attention.start(client)
+        wiredHost = host
         // This client deliberately does *not* subscribe to `$events` itself. The
         // host fans a waterfall out to every registered event client and only
         // settles it once each of them has answered, so a second registration
@@ -3139,66 +3182,85 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         app.attention.isSubagent = { id ->
             _ui.value.sessions.firstOrNull { it.id == id }?.isSubagent == true
         }
-        viewModelScope.launch {
-            // The UI is a view of the centre's pending state, not its owner.
-            app.attention.approval.collect { pending ->
-                if (_ui.value.approval != pending) _ui.value = _ui.value.copy(approval = pending)
-            }
-        }
-        viewModelScope.launch {
-            app.attention.questions.collect { pending ->
-                if (_ui.value.questions != pending) _ui.value = _ui.value.copy(questions = pending)
-            }
-        }
-        viewModelScope.launch {
-            // The drawer's per-session status source; a session parked on an
-            // approval or a question is not idle and must not be painted as running.
-            app.attention.pendingBySession.collect { pending ->
-                if (_ui.value.pendingInteractions != pending) {
-                    _ui.value = _ui.value.copy(pendingInteractions = pending)
+        // Held, not fire-and-forget: a rewire cancels these before it starts the
+        // next set. See [muxWiringJobs] for why that matters.
+        muxWiringJobs = listOf(
+            viewModelScope.launch {
+                // The UI is a view of the centre's pending state, not its owner.
+                app.attention.approval.collect { pending ->
+                    if (_ui.value.approval != pending) _ui.value = _ui.value.copy(approval = pending)
                 }
-            }
-        }
+            },
+            viewModelScope.launch {
+                app.attention.questions.collect { pending ->
+                    if (_ui.value.questions != pending) _ui.value = _ui.value.copy(questions = pending)
+                }
+            },
+            viewModelScope.launch {
+                // The drawer's per-session status source; a session parked on an
+                // approval or a question is not idle and must not be painted as running.
+                app.attention.pendingBySession.collect { pending ->
+                    if (_ui.value.pendingInteractions != pending) {
+                        _ui.value = _ui.value.copy(pendingInteractions = pending)
+                    }
+                }
+            },
+            viewModelScope.launch {
+                while (true) {
+                    val state = runCatching { client.mux().state.value }.getOrDefault(MuxState.IDLE)
+                    val open = state == MuxState.OPEN
+                    // Both fields move together: a CONNECTING -> CLOSED step leaves
+                    // `socketConnected` false either way but changes the word the
+                    // pill shows, so the guard is on the four-state value.
+                    if (_ui.value.muxState != state) {
+                        _ui.value = _ui.value.copy(
+                            muxState = state,
+                            socketConnected = open,
+                            // A version named by one host must not outlive the socket
+                            // that carried it: the next generation may be the other door,
+                            // or the same host after a restart. Until its opening frame
+                            // arrives the app does not know, and `Unknown` says exactly
+                            // that rather than keeping a previous host's number on screen.
+                            hostVersion = if (open) _ui.value.hostVersion else HostVersion.Unknown,
+                        )
+                    }
+                    // The widget's reading of what is running is renewed from here for as long
+                    // as this process can see the socket. A widget on a phone whose app has
+                    // stopped simply stops being renewed, which is what makes the age it draws
+                    // mean something. The publisher collapses the tick; see [publishWidgetWorking].
+                    publishWidgetWorking()
+                    // And the same tick renews the widget's reading of whether the host is
+                    // still *talking* to us — the fact that turns a running list from "still
+                    // listed" into "working". It is recomputed here rather than pushed from
+                    // the socket thread so the two readings are taken at one instant and
+                    // through one writer; the publisher draws only when the value moves.
+                    publishWidgetActivity()
+                    delay(1000)
+                }
+            },
+        )
+    }
 
-        viewModelScope.launch {
-            while (true) {
-                val state = runCatching { client.mux().state.value }.getOrDefault(MuxState.IDLE)
-                val open = state == MuxState.OPEN
-                // Both fields move together: a CONNECTING -> CLOSED step leaves
-                // `socketConnected` false either way but changes the word the
-                // pill shows, so the guard is on the four-state value.
-                if (_ui.value.muxState != state) {
-                    _ui.value = _ui.value.copy(
-                        muxState = state,
-                        socketConnected = open,
-                        // A version named by one host must not outlive the socket
-                        // that carried it: the next generation may be the other door,
-                        // or the same host after a restart. Until its opening frame
-                        // arrives the app does not know, and `Unknown` says exactly
-                        // that rather than keeping a previous host's number on screen.
-                        hostVersion = if (open) _ui.value.hostVersion else HostVersion.Unknown,
-                    )
-                }
-                // The widget's reading of what is running is renewed from here for as long
-                // as this process can see the socket. A widget on a phone whose app has
-                // stopped simply stops being renewed, which is what makes the age it draws
-                // mean something. The publisher collapses the tick; see [publishWidgetWorking].
-                publishWidgetWorking()
-                // And the same tick renews the widget's reading of whether the host is
-                // still *talking* to us — the fact that turns a running list from "still
-                // listed" into "working". It is recomputed here rather than pushed from
-                // the socket thread so the two readings are taken at one instant and
-                // through one writer; the publisher draws only when the value moves.
-                publishWidgetActivity()
-                delay(1000)
-            }
-        }
+    /**
+     * Ends the coroutines [ensureMuxWiring] started, so the next wiring is a
+     * replacement rather than a stack.
+     *
+     * Before this existed the three attention mirrors and the poll were launched
+     * with no handles and `rewireMux` reset `muxWired` and added another four per
+     * route move — a documented leak nobody had fixed. A restart action that
+     * re-wires would have made it four per press, and every extra mirror would
+     * keep writing [UiState] from a generation the reader has left.
+     */
+    private fun detachMuxWiring() {
+        muxWiringJobs.forEach { it.cancel() }
+        muxWiringJobs = emptyList()
+        muxWired = false
     }
 
     /** DshClient drops its multiplexer whenever the config changes, so rewire. */
     private fun rewireMux() {
         teardownStreams()
-        muxWired = false
+        detachMuxWiring()
         // The socket that carried the last host's identity is gone and the new one
         // has said nothing yet, so the version goes with it. The poll loop would also
         // clear it on the state change, but a swap that lands OPEN would show the old
@@ -3269,7 +3331,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             // A setup save is a person's own action, so it may lift a door hold;
             // and the client's multiplexer has just gone, so the wiring is rebuilt
             // whatever the route turns out to be.
-            reconnect(rebuildWiring = true)
+            reconnectNow(rebuildWiring = true)
         }
     }
 
@@ -3756,11 +3818,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             configStore.clearCredentials()
             followJob?.cancel()
             teardownStreams()
+            // The wiring's own coroutines go with the connection: signing back in
+            // builds a fresh set, and leaving the old poll running would stack
+            // another one beside it for the same reason `rewireMux` used to.
+            detachMuxWiring()
+            wiredHost = null
             client.mux().shutdown()
             // Drop the pending cards and their notifications with the session
             // list; the reset below has no current session for them to belong to.
             app.attention.stop()
-            muxWired = false
             queues.clear()
             pendingSubmissions.clear()
             liveProjections = null
@@ -4148,7 +4214,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // frozen process leaves its collector "active" and dead. Re-attaching with a
         // *fresh* attachment is also the only way to take input control back from
         // another client that took it while this one was asleep.
-        if (sessionId != null && terminalJob != null && _terminal.value.sessionId == sessionId) {
+        reopenTerminalIfOpen()
+    }
+
+    /**
+     * Re-attaches the Shell tab's stream when a terminal is open on the session on
+     * screen, with a *fresh* attachment: that is what re-takes input control and
+     * re-delivers the whole grid. Called after a resume and after a transport
+     * restart, the two moments the old attachment's socket is gone.
+     */
+    private fun reopenTerminalIfOpen() {
+        val sessionId = _ui.value.currentSessionId ?: return
+        if (terminalJob != null && _terminal.value.sessionId == sessionId) {
             startTerminal(sessionId, _terminal.value.seat, reuse = true)
         }
     }
@@ -4180,6 +4257,140 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * "Restart connection": tear the transport down and build it again, in this
+     * process.
+     *
+     * This is the honest counterpart to the Close control. Closing only finishes
+     * the Activity while [DshApplication] keeps the client, its event socket, the
+     * attention centre and the connection service alive, so a connection that has
+     * wedged — a socket the host no longer answers, a route the resolver is
+     * avoiding for a reason that has since stopped being true — used to survive
+     * every close and could only be cleared by force-stopping the process, which
+     * also killed the notification path that exists so an agent can still reach a
+     * pocketed phone. A restart keeps that path: the service, the cookie jar and
+     * the pending approvals are all still here.
+     *
+     * What it resets:
+     *
+     *  * [uk.xa0.dsh.net.DshClient.resetTransport] shuts the multiplexer down and forgets it, so
+     *    every logical stream on it ends: `$events`, `session/control`,
+     *    `workspace/follow`, `session/follow`, the job roster and the terminal
+     *    attachment;
+     *  * the resolver's door holds (a transport hold and a wrong-answer verdict),
+     *    its cached winner, its TTL and the last probed answer;
+     *  * this view model's mux wiring — the four coroutines
+     *    [ensureMuxWiring] starts — and the stream collectors bound to the old
+     *    instance, which are cancelled and re-opened on the new one;
+     *  * the route-failure cooldown, so a call that fails immediately is not told
+     *    to wait for a window the old transport opened.
+     *
+     * What it deliberately keeps: the configuration, the cookie jar
+     * ([uk.xa0.dsh.net.PersistentCookieJar], on disk), the per-session drafts
+     * ([uk.xa0.dsh.data.DraftStore]), the trust anchors, and the attention centre's pending
+     * approvals and questions — [AttentionCenter.reattach] re-points the centre at
+     * the new socket without clearing them, and the host's fresh `$events`
+     * generation re-announces whatever it still holds.
+     *
+     * The outcome is published in [UiState.connectionRestart], and it is never
+     * silent: [ConnectionRestart.Running] while the doors are probed,
+     * [ConnectionRestart.Succeeded] with the door the fresh dial used, or
+     * [ConnectionRestart.Failed] with the app's own wording for the failure.
+     */
+    fun restartConnection() {
+        if (_ui.value.connectionRestart == ConnectionRestart.Running) return
+        if (!configStore.load().isConfigured) {
+            _ui.value = _ui.value.copy(
+                connectionRestart = ConnectionRestart.Failed("no host is configured"),
+            )
+            return
+        }
+        _ui.value = _ui.value.copy(connectionRestart = ConnectionRestart.Running)
+        viewModelScope.launch {
+            Log.d(TAG, "restart: tearing the connection down")
+            // The seat a reader is on, and what they had staged in it. The connect
+            // path re-opens that session, and opening a session deliberately drops
+            // attachments (they belong to the session being left); a restart leaves
+            // the *same* session, and the host's uploaded files outlive a socket, so
+            // the chips are put back when the same seat comes up.
+            val sessionBefore = _ui.value.currentSessionId
+            val stagedAttachments = _ui.value.attachments
+            // Everything bound to the old socket goes before the socket does, or a
+            // collector would keep reading a registration the shutdown is about to
+            // close and look alive while receiving nothing.
+            detachMuxWiring()
+            teardownStreams()
+            followJob?.cancel()
+            followJob = null
+            // The job streams ride the same mux. Their guards compare a *session
+            // id*, so a still-unwinding collector would make the post-connect
+            // `watchJobs` return early; clearing the id is what makes it re-open.
+            val expandedJob = observedJobId
+            jobsWatchJob?.cancel()
+            jobsWatchJob = null
+            jobsWatchedSession = null
+            jobFollowJob?.cancel()
+            jobFollowJob = null
+            // Say the socket is down rather than leaving the last OPEN value on
+            // screen for the second or two the two door probes take.
+            _ui.value = _ui.value.copy(
+                muxState = MuxState.CONNECTING,
+                socketConnected = false,
+                hostVersion = HostVersion.Unknown,
+            )
+            client.resetTransport()
+            val connected = try {
+                reconnectNow(rebuildWiring = true)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                // A dial that threw rather than failing inside `attemptConnectNow`
+                // still owes the reader the ordinary banner and retry.
+                Log.w(TAG, "restart failed before a dial finished: ${error.message}")
+                onConnectFailure(error, wasReady = _ui.value.phase == AppPhase.READY)
+                false
+            }
+            if (connected) {
+                // The terminal attachment is its own reconnecting loop; a fresh
+                // attachment is what re-takes input control and re-delivers the
+                // whole grid, as on a foreground resume.
+                reopenTerminalIfOpen()
+                // Put back what the reader had staged in this same seat; see the
+                // capture above for why a restart may keep it. Merged by id rather
+                // than assigned, so an upload that finished during the restart
+                // keeps its newer receipt.
+                if (stagedAttachments.isNotEmpty() &&
+                    sessionBefore != null &&
+                    _ui.value.currentSessionId == sessionBefore
+                ) {
+                    val now = _ui.value.attachments
+                    _ui.value = _ui.value.copy(
+                        attachments = now + stagedAttachments.filterNot { staged ->
+                            now.any { it.id == staged.id }
+                        },
+                    )
+                }
+                if (expandedJob != null) {
+                    // `observeJob` treats the same id as already open, which it is
+                    // not on this socket: clear it so the stream really re-opens.
+                    observedJobId = null
+                    observeJob(expandedJob)
+                }
+            }
+            val outcome = if (connected) {
+                ConnectionRestart.Succeeded(lan = _ui.value.activeRouteLan)
+            } else {
+                // The connect path has already put its own wording in `error` for
+                // the failures it reports synchronously. An auth refusal is handled
+                // in its own coroutine, so it may not have landed yet; this stays
+                // true in that case and the banner carries the reason.
+                ConnectionRestart.Failed(_ui.value.error ?: "the connection did not come back")
+            }
+            Log.d(TAG, "restart: $outcome")
+            _ui.value = _ui.value.copy(connectionRestart = outcome)
+        }
+    }
+
+    /**
      * The one way a dial begins, so every route into the app asks the same question
      * the same way.
      *
@@ -4188,6 +4399,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      * be, so the wiring cannot be left to a route *move* to rebuild.
      */
     private fun reconnect(rebuildWiring: Boolean) {
+        viewModelScope.launch { reconnectNow(rebuildWiring) }
+    }
+
+    /**
+     * [reconnect]'s body, for a caller that has to know how the dial ended.
+     *
+     * The restart action is that caller: it must say whether the rebuild worked,
+     * and a fire-and-forget launch has nowhere to put the answer. Returns true only
+     * once the app is READY, the roster has landed and the streams have been asked
+     * for — the same point at which a reader sees the app usable again.
+     */
+    private suspend fun reconnectNow(rebuildWiring: Boolean): Boolean {
         // An explicit connect starts the retry budget over, and it is also the
         // one action that clears the "already tried silently" latch.
         connectRetries = 0
@@ -4195,114 +4418,131 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // Consumed by the one attempt this starts; the retries [scheduleReconnect]
         // schedules afterwards are the app's own and keep every hold.
         routeForgives = true
-        attemptConnect(rebuildWiring)
+        return attemptConnectNow(rebuildWiring)
     }
 
     private fun attemptConnect(rebuildWiring: Boolean = false) {
-        viewModelScope.launch {
-            val wasReady = _ui.value.phase == AppPhase.READY
-            _ui.value = _ui.value.copy(
-                // A reconnect must not blank the transcript behind the loading state.
-                phase = if (wasReady) AppPhase.READY else AppPhase.LOADING,
-                busy = !wasReady,
-                error = null,
-                errorNeedsSignIn = false,
-                // A retry is not a first attempt, and the reader who has just been
-                // sent back here by a refusal is owed the difference. `connectRetries`
-                // is only ever non-zero on the retry path, and it is cleared the
-                // moment an attempt gets as far as the session list.
-                startupStep = if (connectRetries > 0) {
-                    StartupStep.RECONNECTING
-                } else {
-                    StartupStep.CHECKING_SIGN_IN
-                },
-            )
+        viewModelScope.launch { attemptConnectNow(rebuildWiring) }
+    }
 
-            // The route question comes before anything is built on the answer, and
-            // before the credentials go anywhere: a dial is a question about the wire
-            // as it is now, and the cached winner is an answer about the wire as it
-            // was — possibly on a network this process has not seen a callback for.
-            // This is what a reconnect and a fresh open have in common with each
-            // other and not with the previous attempt.
-            val forgive = routeForgives
-            routeForgives = false
-            val moved = runCatching { client.dialRoute(forgive) }.getOrDefault(false)
-            publishRoute()
-            // A config change has already had the client's multiplexer dropped, so
-            // that case rebuilds whatever the route turns out to be; a dial that
-            // moved the route has had its socket dropped by the client itself.
-            if (moved || rebuildWiring) rewireMux() else ensureMuxWiring()
-
-            client.installManualCookie()
-
-            // What is waited on here is the host's answer to the sign-in probe, and
-            // `onSignIn` moves the step on to SIGNING_IN if that probe turns out to
-            // want credentials.
-            val auth = client.ensureAuthenticated()
-            if (auth.isFailure) {
-                onConnectFailure(auth.exceptionOrNull(), wasReady)
-                return@launch
-            }
-
-            _ui.value = _ui.value.copy(startupStep = StartupStep.READING_SESSIONS)
-            val sessions = runCatching { fetchSessions() }
-            if (sessions.isFailure) {
-                onConnectFailure(sessions.exceptionOrNull(), wasReady)
-                return@launch
-            }
-
-            connectRetries = 0
-            _ui.value = _ui.value.copy(
-                phase = AppPhase.READY,
-                busy = false,
-                startupStep = null,
-                sessions = sessions.getOrThrow(),
-            )
-
-            ensureWorkspaceStream()
-            ensureControlStream()
-            runCatching { loadModels() }
-            runCatching { loadPermissionCatalog() }
-            runCatching { loadAgentPresets() }
-
-            // Reopen the session the user explicitly asked for, else the most
-            // recent conversation — a blank (provisional) session is not worth
-            // landing in, and the host reports several of them near the top of
-            // the list.
-            //
-            // "Conversation" is [uk.xa0.dsh.model.landingSessionId]'s rule, and it
-            // is more than "the first row": the roster is ordered by `updatedAt`
-            // descending, so a session an active schedule delivers into outranks
-            // every chat on the host for as long as the schedule keeps firing, and a
-            // fresh open would land on one every time. The rule passes over those
-            // rows and subagents; nothing is hidden by it, and such a row is still
-            // what opens when there is nothing else with content.
-            //
-            // The explicit pick is read (and consumed) here, in the same
-            // uninterrupted main-thread block as the open below, so it cannot be
-            // overwritten by this auto-open whichever order the two arrive in.
-            val current = _ui.value.currentSessionId
-            val explicit = explicitSession
-            explicitSession = null
-            val target = explicit
-                ?: current
-                ?: landingSessionId(sessions.getOrThrow())
-            if (target != null) {
-                if (explicit != null) Log.d(TAG, "connect honoured explicit session $explicit")
-                openSession(target)
+    /**
+     * One connect attempt, from the route question to the first session on screen.
+     *
+     * Suspend rather than launched so [reconnectNow] can answer with its outcome;
+     * [attemptConnect] is the fire-and-forget wrapper every automatic path uses.
+     * Failures are still reported through [onConnectFailure] — which owns the
+     * banner, the sign-in fallback and the retry backoff — so a caller reading the
+     * Boolean does not have to duplicate any of that.
+     */
+    private suspend fun attemptConnectNow(rebuildWiring: Boolean = false): Boolean {
+        val wasReady = _ui.value.phase == AppPhase.READY
+        _ui.value = _ui.value.copy(
+            // A reconnect must not blank the transcript behind the loading state.
+            phase = if (wasReady) AppPhase.READY else AppPhase.LOADING,
+            busy = !wasReady,
+            error = null,
+            errorNeedsSignIn = false,
+            // A retry is not a first attempt, and the reader who has just been
+            // sent back here by a refusal is owed the difference. `connectRetries`
+            // is only ever non-zero on the retry path, and it is cleared the
+            // moment an attempt gets as far as the session list.
+            startupStep = if (connectRetries > 0) {
+                StartupStep.RECONNECTING
             } else {
-                // The host holds no session at all: show the pending seat for the
-                // default Workspace rather than an empty hero. Nothing is created —
-                // the seat's target is only recorded, and the first send (or the
-                // first command, or the first staged file) is what creates.
-                preferredWorkspaceId()?.let { workspaceId ->
-                    val path = _ui.value.workspaces.firstOrNull { it.id == workspaceId }?.path
-                    enterPendingSession(
-                        PendingSessionTarget(SessionTarget.Workspace(workspaceId, path)),
-                    )
-                }
+                StartupStep.CHECKING_SIGN_IN
+            },
+        )
+
+        // The route question comes before anything is built on the answer, and
+        // before the credentials go anywhere: a dial is a question about the wire
+        // as it is now, and the cached winner is an answer about the wire as it
+        // was — possibly on a network this process has not seen a callback for.
+        // This is what a reconnect and a fresh open have in common with each
+        // other and not with the previous attempt.
+        val forgive = routeForgives
+        routeForgives = false
+        val moved = runCatching { client.dialRoute(forgive) }.getOrDefault(false)
+        publishRoute()
+        // A config change has already had the client's multiplexer dropped, so
+        // that case rebuilds whatever the route turns out to be; a dial that
+        // moved the route has had its socket dropped by the client itself.
+        if (moved || rebuildWiring) rewireMux() else ensureMuxWiring()
+
+        client.installManualCookie()
+
+        // What is waited on here is the host's answer to the sign-in probe, and
+        // `onSignIn` moves the step on to SIGNING_IN if that probe turns out to
+        // want credentials.
+        val auth = client.ensureAuthenticated()
+        if (auth.isFailure) {
+            onConnectFailure(auth.exceptionOrNull(), wasReady)
+            return false
+        }
+
+        _ui.value = _ui.value.copy(startupStep = StartupStep.READING_SESSIONS)
+        val sessions = runCatching { fetchSessions() }
+        if (sessions.isFailure) {
+            onConnectFailure(sessions.exceptionOrNull(), wasReady)
+            return false
+        }
+
+        connectRetries = 0
+        _ui.value = _ui.value.copy(
+            phase = AppPhase.READY,
+            busy = false,
+            startupStep = null,
+            sessions = sessions.getOrThrow(),
+        )
+
+        ensureWorkspaceStream()
+        ensureControlStream()
+        runCatching { loadModels() }
+        runCatching { loadPermissionCatalog() }
+        runCatching { loadAgentPresets() }
+
+        // Reopen the session the user explicitly asked for, else the most
+        // recent conversation — a blank (provisional) session is not worth
+        // landing in, and the host reports several of them near the top of
+        // the list.
+        //
+        // "Conversation" is [uk.xa0.dsh.model.landingSessionId]'s rule, and it
+        // is more than "the first row": the roster is ordered by `updatedAt`
+        // descending, so a session an active schedule delivers into outranks
+        // every chat on the host for as long as the schedule keeps firing, and a
+        // fresh open would land on one every time. The rule passes over those
+        // rows and subagents; nothing is hidden by it, and such a row is still
+        // what opens when there is nothing else with content.
+        //
+        // The explicit pick is read (and consumed) here, in the same
+        // uninterrupted main-thread block as the open below, so it cannot be
+        // overwritten by this auto-open whichever order the two arrive in.
+        val current = _ui.value.currentSessionId
+        val explicit = explicitSession
+        explicitSession = null
+        val target = explicit
+            ?: current
+            ?: landingSessionId(sessions.getOrThrow())
+        if (target != null) {
+            if (explicit != null) Log.d(TAG, "connect honoured explicit session $explicit")
+            openSession(target)
+        } else {
+            // The host holds no session at all: show the pending seat for the
+            // default Workspace rather than an empty hero. Nothing is created —
+            // the seat's target is only recorded, and the first send (or the
+            // first command, or the first staged file) is what creates.
+            preferredWorkspaceId()?.let { workspaceId ->
+                val path = _ui.value.workspaces.firstOrNull { it.id == workspaceId }?.path
+                enterPendingSession(
+                    PendingSessionTarget(SessionTarget.Workspace(workspaceId, path)),
+                )
             }
         }
+        // A connect that got through supersedes a stale restart outcome: an
+        // automatic retry after a failed restart has just succeeded, and "the
+        // connection was not restarted" would now be false. The restart action
+        // replaces this with its own Succeeded after this returns.
+        _ui.value = _ui.value.copy(connectionRestart = ConnectionRestart.Idle)
+        return true
     }
 
     // -------------------------------------------------------------- sessions

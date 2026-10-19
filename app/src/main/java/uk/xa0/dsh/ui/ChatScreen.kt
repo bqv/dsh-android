@@ -1724,6 +1724,12 @@ fun ChatScreen(vm: DshViewModel) {
             // The host's own DSH version, from its `$events` opening frame. Never
             // this app's version; see `model/HostVersion.kt`.
             hostVersion = ui.hostVersion,
+            // The transport-level repair, beside the route facts that explain why a
+            // reader might need it. It rebuilds the socket in this process, so the
+            // connection service and every waiting approval survive; that is the
+            // action the Close control was mistaken for.
+            onRestartConnection = vm::restartConnection,
+            connectionRestart = ui.connectionRestart,
             // The other door, and what this app accepts as the host's identity. Here
             // rather than in Settings: a signed-in session has no way back to setup,
             // and a certificate that can only be pinned before signing in is one
