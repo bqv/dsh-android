@@ -20,6 +20,7 @@ import uk.xa0.dsh.model.ApprovalAnswer
 import uk.xa0.dsh.model.ApprovalCopy
 import uk.xa0.dsh.model.ApprovalGate
 import uk.xa0.dsh.model.ApprovalRoster
+import uk.xa0.dsh.model.QuestionWaits
 import uk.xa0.dsh.model.arr
 import uk.xa0.dsh.model.bool
 import uk.xa0.dsh.model.obj
@@ -209,7 +210,7 @@ class AttentionCenter(private val context: Context) {
     @Volatile
     var isSubagent: (sessionId: String) -> Boolean = { false }
 
-    private val pending = ConcurrentHashMap<String, CompletableDeferred<JSONObject>>()
+    private val questionWaits = QuestionWaits()
     private var eventsJob: Job? = null
 
     /** Follows the mux's four-state value so a connect or a drop re-publishes the widget. */
@@ -344,13 +345,10 @@ class AttentionCenter(private val context: Context) {
     fun stop() {
         detach()
         // Release the waits before the maps that name them are dropped. A question
-        // is woken with the ordinary hand-back but does not send it — the slot is
-        // already gone, so its ownership check settles nothing, and the answer would
-        // have to travel on the connection being abandoned. A gate is withdrawn the
-        // same way. Neither handler then stays asleep for its full cap.
-        val waitingQuestions = pending.values.toList()
-        pending.clear()
-        waitingQuestions.forEach { it.complete(JSONObject().put("kind", "next")) }
+        // is woken with a hand-back that says there is nothing to send — the socket
+        // carrying any answer is the one being abandoned — so its handler ends
+        // instead of sleeping out the cap. A gate is withdrawn the same way.
+        questionWaits.withdrawAll()
         answerGates.values.forEach { it.withdraw() }
         answerGates.clear()
         // The cards are being dropped wholesale, so the roster that describes them
@@ -442,7 +440,7 @@ class AttentionCenter(private val context: Context) {
             // Ends the answer wait without sending: whatever the reader tapped a moment
             // ago is moot, and the host has already said so.
             answerGates.remove(eventId)?.withdraw()
-            pending.remove(eventId)?.complete(JSONObject().put("kind", "next"))
+            questionWaits.withdraw(eventId)
             // The host named this waterfall as settled, so no window of ours may decide
             // about it again, and any reconciliation already waiting is moot.
             roster.onSettled(eventId)
@@ -716,48 +714,62 @@ class AttentionCenter(private val context: Context) {
             return
         }
 
-        val deferred = CompletableDeferred<JSONObject>()
-        // A re-announcement on a new generation replaces this waterfall's wait. The
-        // replaced one is handed back now rather than left asleep on its own cap;
-        // its ownership check sees the slot is no longer its own and settles
-        // nothing, so the old socket's handler can end instead of outliving the
-        // socket by up to the question timeout.
-        pending.put(eventId, deferred)?.complete(JSONObject().put("kind", "next"))
-        // Resolved once: it drives both the notification title and the card, and
-        // the session list can change under us while the question is pending.
-        val subjectIsSubagent = sessionId != null && isSubagent(sessionId)
-        questionSets[keyFor(sessionId, eventId)] = PendingQuestionSet(
-            eventId = eventId,
-            sessionId = sessionId,
-            questions = parsed,
-            subjectIsSubagent = subjectIsSubagent,
-        )
-        publishVisible()
-        val subject = if (subjectIsSubagent) "subagent" else "agent"
-        alert(
-            id = Attention.questionId(sessionId),
-            sessionId = sessionId,
-            title = if (parsed.size == 1) "Your $subject is asking"
-            else "Your $subject is asking (${parsed.size} questions)",
-            text = parsed.first().question,
-        )
-        val outcome = withTimeoutOrNull(QUESTION_TIMEOUT_MS) { deferred.await() }
-            ?: JSONObject().put("kind", "next")
-        // Only the wait that still owns this waterfall may settle it. A
-        // re-announcement on a new generation — a reconnect, a route move or a
-        // transport restart — installs a fresh deferred and card for the same
-        // eventId, and this older wait is still asleep on its own copy. Letting it
-        // run the two lines below would remove the *new* deferred (so the reader's
-        // answer would go nowhere) and send its stale outcome through a socket that
-        // no longer exists. The approval path has the same ownership rule, enforced
-        // by its gate; a question's deferred is the equivalent token.
-        if (pending[eventId] !== deferred) return
-        pending.remove(eventId)
-        removeQuestions(eventId)?.let {
-            Attention.cancel(context, Attention.questionId(it.sessionId))
+        val wait = CompletableDeferred<QuestionWaits.Outcome>()
+        try {
+            // A re-announcement on a new generation replaces this waterfall's wait:
+            // the answer has to travel on the new generation's socket, so the fresh
+            // wait is the one that may send. The replaced wait is handed back now
+            // rather than left asleep on its own cap — woken with nothing to send, so
+            // the old socket's handler can end instead of outliving the socket by up
+            // to the question timeout. See [QuestionWaits] for why the hand-back
+            // cannot be mistaken for an answer.
+            questionWaits.install(eventId, wait)
+            // Resolved once: it drives both the notification title and the card, and
+            // the session list can change under us while the question is pending.
+            val subjectIsSubagent = sessionId != null && isSubagent(sessionId)
+            questionSets[keyFor(sessionId, eventId)] = PendingQuestionSet(
+                eventId = eventId,
+                sessionId = sessionId,
+                questions = parsed,
+                subjectIsSubagent = subjectIsSubagent,
+            )
             publishVisible()
+            val subject = if (subjectIsSubagent) "subagent" else "agent"
+            alert(
+                id = Attention.questionId(sessionId),
+                sessionId = sessionId,
+                title = if (parsed.size == 1) "Your $subject is asking"
+                else "Your $subject is asking (${parsed.size} questions)",
+                text = parsed.first().question,
+            )
+            val outcome = withTimeoutOrNull(QUESTION_TIMEOUT_MS) { wait.await() }
+                ?: QuestionWaits.Outcome(JSONObject().put("kind", "next"), deliver = true)
+            // The card and its notification belong to the wait that still owns this
+            // waterfall. A re-announcement installs a fresh wait for the same eventId
+            // and raises a live card of its own, and the replaced wait must return
+            // without taking that card down.
+            //
+            // Whether to *send* is carried by the outcome, not read from the slot. A
+            // reader's answer takes the slot as it takes the answer — so that the card
+            // can go on the same frame — and an ownership test would therefore read
+            // every answer as a replacement and drop it, which is what made a tapped
+            // answer go nowhere. Only a hand-back (a replacement, a withdrawal or a
+            // stop) says there is nothing left to send.
+            if (!outcome.deliver) return
+            if (questionWaits.release(eventId, wait)) {
+                removeQuestions(eventId)?.let {
+                    Attention.cancel(context, Attention.questionId(it.sessionId))
+                    publishVisible()
+                }
+            }
+            send(outcome.payload)
+        } finally {
+            // A handler the socket's own shutdown cancelled never reached its send, so
+            // releasing here stops its slot outliving it: a later tap would otherwise
+            // complete a wait nobody is listening to, clear the card and send nothing.
+            // Compare-and-remove, so a re-announcement's fresh wait is left alone.
+            questionWaits.release(eventId, wait)
         }
-        send(outcome)
     }
 
     // --------------------------------------------------------------- outbound
@@ -839,6 +851,16 @@ class AttentionCenter(private val context: Context) {
         publishVisible()
     }
 
+    /**
+     * The reader answered the card.
+     *
+     * Taking the answer takes the wait's slot, so the card can go on the same frame,
+     * and the wait posts the result: the outcome it is woken with says that it is
+     * deliverable, which is what keeps a reader's answer distinct from the hand-back
+     * a re-announcement sends. An answer for a waterfall that is no longer parked —
+     * it was withdrawn, or replaced while the card was being read — is not posted and
+     * does not take a live card down.
+     */
     fun answerQuestions(answers: List<Triple<String, List<String>, String?>>) {
         val current = _questions.value ?: return
         val payload = JSONArray()
@@ -847,19 +869,26 @@ class AttentionCenter(private val context: Context) {
             if (!custom.isNullOrBlank()) answer.put("custom", custom)
             payload.put(answer)
         }
-        pending.remove(current.eventId)?.complete(
-            JSONObject().put("kind", "result").put("value", JSONObject().put("answers", payload)),
-        )
+        val result = JSONObject()
+            .put("kind", "result")
+            .put("value", JSONObject().put("answers", payload))
+        if (!questionWaits.answer(current.eventId, result)) return
         removeQuestions(current.eventId)?.let {
             Attention.cancel(context, Attention.questionId(it.sessionId))
             publishVisible()
         }
     }
 
-    /** Delegates the request untouched, which surfaces the host's own refusal. */
+    /**
+     * Delegates the request untouched, which surfaces the host's own refusal.
+     *
+     * A skip is a delivered outcome like an answer, not a hand-back: the host is told
+     * that this client will not decide, so it refuses the question in its own words
+     * instead of leaving the agent blocked on silence.
+     */
     fun skipQuestions() {
         val current = _questions.value ?: return
-        pending.remove(current.eventId)?.complete(JSONObject().put("kind", "next"))
+        if (!questionWaits.skip(current.eventId)) return
         removeQuestions(current.eventId)?.let {
             Attention.cancel(context, Attention.questionId(it.sessionId))
             publishVisible()
