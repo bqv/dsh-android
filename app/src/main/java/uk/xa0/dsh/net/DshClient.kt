@@ -471,6 +471,15 @@ class DshClient(context: Context) {
         val reset = synchronized(this) {
             // Bumped before a single call is cancelled; see [transportGeneration].
             transportGeneration.incrementAndGet()
+            // Cancelled before the resolver is told to forget, so a re-resolution
+            // this client started stops at its next suspension rather than writing
+            // an answer about the wire that is being retired. The resolver also
+            // refuses such an answer by epoch (see [EndpointResolver.restart]);
+            // this is the cheaper half of the same guard.
+            val stale = scope
+            val routeJobs = stale.coroutineContext[Job]?.children?.count { it.isActive } ?: 0
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            stale.cancel()
             val doors = endpoint.restart()
             lastRouteFailureAt = 0L
             val hadMux = mux != null
@@ -485,10 +494,6 @@ class DshClient(context: Context) {
             // whose call is merely evicted stays open until its owner lets go.
             dispatcher.cancelAll()
             pool.evictAll()
-            val stale = scope
-            val routeJobs = stale.coroutineContext[Job]?.children?.count { it.isActive } ?: 0
-            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-            stale.cancel()
             TransportReset(
                 muxClosed = hadMux,
                 doorFaultsForgotten = doors.faultsForgotten,

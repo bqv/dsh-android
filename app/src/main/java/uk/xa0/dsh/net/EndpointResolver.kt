@@ -10,6 +10,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The host of a configured address, with the scheme optional.
@@ -227,6 +228,26 @@ class EndpointResolver(
     @Volatile
     private var lastProbed: HttpUrl? = null
 
+    /**
+     * Bumped by every [restart], so a probe that outlived the transport it was
+     * asked about cannot write its answer into the fresh one.
+     *
+     * Cancellation is cooperative and the probes run on OkHttp's threads, so a
+     * resolution interrupted by a restart can still return after [restart] has
+     * cleared the winner. Without this it would cache a door chosen for the old
+     * wire and report that the route moved — on top of the restart's own dial.
+     * A resolution therefore remembers the epoch it started under and discards
+     * its answer if a restart happened in between.
+     */
+    private val epoch = AtomicLong(0)
+
+    /**
+     * Makes "is this answer still current?" and the write of it one step against
+     * [restart], which is called from a different thread (the reset) than the
+     * resolution's own writes (the client's IO scope, or the view model's).
+     */
+    private val stateLock = Any()
+
     /** Serialises [refresh], so two triggers cannot race the cache. */
     private val refreshLock = Mutex()
 
@@ -294,7 +315,9 @@ class EndpointResolver(
      * Returns what it forgot so the transport reset that calls it can say so in
      * one logcat line; see [DoorReset] and [TransportReset].
      */
-    fun restart(): DoorReset {
+    fun restart(): DoorReset = synchronized(stateLock) {
+        // Retires every resolution currently in flight; see [epoch].
+        epoch.incrementAndGet()
         val forgotten = faults.size
         val hadWinner = winner != null
         faults.clear()
@@ -303,7 +326,7 @@ class EndpointResolver(
         resolved = false
         resolvedAt = 0L
         lastProbed = null
-        return DoorReset(faultsForgotten = forgotten, winnerForgotten = hadWinner)
+        DoorReset(faultsForgotten = forgotten, winnerForgotten = hadWinner)
     }
 
     /**
@@ -514,6 +537,7 @@ class EndpointResolver(
      */
     suspend fun resolve(): RouteChoice = refreshLock.withLock {
         if (resolved && clock() - resolvedAt < ttlMs) return RouteChoice(winner, changed = false)
+        val startedAt = epoch.get()
         val ordered = candidates()
         if (ordered.isEmpty()) {
             winner = null
@@ -524,26 +548,37 @@ class EndpointResolver(
         val answers = coroutineScope {
             ordered.map { (url, _) -> async { url to answersAsDshHost(url) } }.awaitAll()
         }
-        val answered = answers.filter { it.second }.map { it.first }
-        // An answering door that is not being avoided wins; failing that, an
-        // answering door that is — a door that answers is still better than one
-        // that does not, so a hold changes the order and never removes a candidate
-        // outright. With no answer at all the primary is the honest fallback, and
-        // the reported door is whichever candidate that fallback actually is (a
-        // private `baseUrl` is a LAN address even when only the LAN field named
-        // it).
-        val pick = answered.firstOrNull { !isAvoided(it) } ?: answered.firstOrNull()
-        val chosen = pick ?: primary ?: ordered.last().first
-        winnerIsLan = ordered.first { it.first == chosen }.second
-        val changed = chosen != lastProbed
-        lastProbed = chosen
-        // Cached like any other winner, so a phone between networks does not
-        // re-probe on every request; a network change and a door that failed in use
-        // both invalidate, which is when re-probing actually matters.
-        winner = chosen
-        resolved = true
-        resolvedAt = clock()
-        RouteChoice(chosen, changed)
+        // A restart while these probes were out retires their answer: they were
+        // asked about the transport it has just cleared, and caching one would
+        // resurrect the very winner the restart forgot. Nothing is written — not
+        // the winner, not the TTL, not `lastProbed` — so the next resolution is a
+        // fresh question, which is the restart's whole intent. The check and the
+        // writes share [stateLock] with [restart], so a restart cannot land
+        // between them.
+        val outcome = synchronized(stateLock) {
+            if (startedAt != epoch.get()) return@synchronized null
+            val answered = answers.filter { it.second }.map { it.first }
+            // An answering door that is not being avoided wins; failing that, an
+            // answering door that is — a door that answers is still better than one
+            // that does not, so a hold changes the order and never removes a candidate
+            // outright. With no answer at all the primary is the honest fallback, and
+            // the reported door is whichever candidate that fallback actually is (a
+            // private `baseUrl` is a LAN address even when only the LAN field named
+            // it).
+            val pick = answered.firstOrNull { !isAvoided(it) } ?: answered.firstOrNull()
+            val chosen = pick ?: primary ?: ordered.last().first
+            winnerIsLan = ordered.first { it.first == chosen }.second
+            val changed = chosen != lastProbed
+            lastProbed = chosen
+            // Cached like any other winner, so a phone between networks does not
+            // re-probe on every request; a network change and a door that failed in
+            // use both invalidate, which is when re-probing actually matters.
+            winner = chosen
+            resolved = true
+            resolvedAt = clock()
+            RouteChoice(chosen, changed)
+        }
+        outcome ?: return RouteChoice(peek(), changed = false)
     }
 
     /**

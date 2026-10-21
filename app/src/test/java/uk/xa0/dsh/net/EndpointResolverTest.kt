@@ -1,6 +1,8 @@
 package uk.xa0.dsh.net
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -728,5 +730,38 @@ class EndpointResolverTest {
 
         r.restart()
         assertTrue("a restart's first answer is a move again", r.resolve().changed)
+    }
+
+    @Test
+    fun `a restart during a probe discards the answer the probe was asked for`() = runBlocking {
+        // Cancellation is cooperative and the probes run on OkHttp's threads, so a
+        // resolution interrupted by a restart can return after the restart has
+        // cleared the winner. Writing that answer would resurrect the very route
+        // the restart forgot — and report a move on top of the restart's own dial.
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val r = EndpointResolver(
+            isDshHost = {
+                entered.complete(Unit)
+                release.await()
+                true
+            },
+            localIpv4 = { null },
+        )
+        r.update(primary = public, lan = lan)
+
+        val probe = launch { r.resolve() }
+        entered.await()
+        r.restart()
+        release.complete(Unit)
+        probe.join()
+
+        assertFalse("the retired probe's winner must not be cached", r.isLan)
+        assertEquals("peek stays on the primary until a fresh probe lands", public, r.peek())
+
+        // And the discarded answer did not set the TTL either: the next resolve is
+        // a real question, which is the whole point of a restart.
+        assertEquals(lan, r.resolve().url)
+        assertTrue(r.isLan)
     }
 }
