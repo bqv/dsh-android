@@ -4496,6 +4496,27 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * End this app's process — the About page's **Force quit**.
+     *
+     * The reader has already been asked, in words that say nothing in flight
+     * survives this; there is no second confirmation here and nothing to report.
+     * The one thing this method adds to [DshApplication.forceQuit] is the flush
+     * the composer needs: drafts are written with an asynchronous
+     * `SharedPreferences.apply` on every keystroke, so without this the last
+     * thing typed could die with the process. Then the process ends — no
+     * reconnect, no retry, no notification.
+     *
+     * Deliberately not a coroutine: there is nothing to wait for, and a launched
+     * job would race the kill.
+     */
+    fun forceQuit() {
+        Log.w(TAG, "force quit: ending the process")
+        runCatching { draftStore.flush() }
+            .onFailure { Log.w(TAG, "force quit: the draft flush failed: ${it.message}") }
+        app.forceQuit()
+    }
+
+    /**
      * The one way a dial begins, so every route into the app asks the same question
      * the same way.
      *

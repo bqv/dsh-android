@@ -829,6 +829,10 @@ fun ChatScreen(vm: DshViewModel) {
                     currentId = ui.currentSessionId,
                     drawerOpen = drawerState.isOpen,
                     loading = ui.sessionsLoading,
+                    // Why the list may be older than the host: a failed pull keeps
+                    // the rows and says so, rather than leaving yesterday's
+                    // sessions looking current.
+                    sessionsError = ui.sessionsError,
                     onSelect = {
                         vm.openSession(it)
                         scope.launch { drawerState.close() }
@@ -1724,6 +1728,10 @@ fun ChatScreen(vm: DshViewModel) {
             // action the Close control was mistaken for.
             onRestartConnection = vm::restartConnection,
             connectionRestart = ui.connectionRestart,
+            // The one action that ends the process. It is here because a restart
+            // cannot reach state below the app, and that is exactly what the reader
+            // has tried before reaching for this.
+            onForceQuit = vm::forceQuit,
             // The other door, and what this app accepts as the host's identity. Here
             // rather than in Settings: a signed-in session has no way back to setup,
             // and a certificate that can only be pinned before signing in is one

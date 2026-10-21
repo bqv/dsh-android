@@ -183,6 +183,8 @@ fun AboutSheet(
     onRestartConnection: (() -> Unit)? = null,
     /** What that restart is doing, or last did; see [AboutContent]. */
     connectionRestart: ConnectionRestart = ConnectionRestart.Idle,
+    /** The escape hatch past the restart; see [AboutContent]. */
+    onForceQuit: (() -> Unit)? = null,
     /**
      * The other door's address, and the certificates this app has accepted — with the
      * last thing a host presented when it was refused. All of it belongs on this page
@@ -228,6 +230,7 @@ fun AboutSheet(
             hostVersion = hostVersion,
             onRestartConnection = onRestartConnection,
             connectionRestart = connectionRestart,
+            onForceQuit = onForceQuit,
             lanUrl = lanUrl,
             onLanUrl = onLanUrl,
             acceptedCerts = acceptedCerts,

@@ -100,9 +100,31 @@ class DraftStore(
         editor.apply()
     }
 
+    /**
+     * Puts everything [save] has only *queued* on disk, before the process ends.
+     *
+     * `save` uses `apply()` because it runs on every keystroke and must not block
+     * the composition thread. That write is asynchronous, so a force quit a few
+     * milliseconds after a keystroke can kill the process before the last draft
+     * reached the disk. `commit()` is synchronous, but a commit with no change is
+     * skipped — and it would not re-write what an earlier `apply` still has in
+     * flight. A stamp that is always new gives this commit a change to make, and
+     * `commit()` writes the whole in-memory map, which carries every earlier
+     * apply with it.
+     *
+     * The key sits outside the `draft.` namespace, so [prune] never treats it as
+     * a draft, and nothing ever reads it back. Called only on the way out.
+     */
+    fun flush() {
+        preferences.edit().putLong(FLUSH_KEY, System.currentTimeMillis()).commit()
+    }
+
     private companion object {
         const val PREFIX = "draft."
         const val STAMP = ".at"
+
+        /** Never read; its only job is to give [flush] a change to commit. */
+        const val FLUSH_KEY = "writes.flushedAt"
 
         /** Enough for a real prompt with a pasted stack trace, small enough to bound the file. */
         const val MAX_DRAFT_CHARS = 32_000

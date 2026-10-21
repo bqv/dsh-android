@@ -21,8 +21,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.LocalCafe
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +45,12 @@ import uk.xa0.dsh.model.CONNECTION_RESTART_ACTION
 import uk.xa0.dsh.model.CONNECTION_RESTART_NOTE
 import uk.xa0.dsh.model.CONNECTION_RESTART_RUNNING
 import uk.xa0.dsh.model.ConnectionRestart
+import uk.xa0.dsh.model.FORCE_QUIT_ACTION
+import uk.xa0.dsh.model.FORCE_QUIT_BODY
+import uk.xa0.dsh.model.FORCE_QUIT_CANCEL
+import uk.xa0.dsh.model.FORCE_QUIT_CONFIRM
+import uk.xa0.dsh.model.FORCE_QUIT_NOTE
+import uk.xa0.dsh.model.FORCE_QUIT_TITLE
 import uk.xa0.dsh.model.HostVersion
 import uk.xa0.dsh.model.connectionRestartNote
 import uk.xa0.dsh.net.AcceptedCert
@@ -79,7 +87,10 @@ import java.security.cert.X509Certificate
  * actions reach the network: **Check certificate**, which reads what the host
  * presents and is explicit about doing so, and **Restart connection**, which
  * rebuilds the transport in-process and states both its progress and its outcome.
- * The one row that is neither local nor a call of its own is the host's DSH
+ * A third, **Force quit**, reaches nothing and ends everything: it is the escape
+ * hatch for a wedge below what a restart can reach, and its confirmation names
+ * all three verbs so Close, Restart and Force quit cannot be confused. The one
+ * row that is neither local nor a call of its own is the host's DSH
  * version: it is folded from the `$events`
  * opening frame the app already receives, and a host that names no version is said
  * to have named none. Facts that would need a host call to *print* — the host's own
@@ -162,6 +173,18 @@ fun AboutContent(
     onRestartConnection: (() -> Unit)? = null,
     /** What the restart is doing, or what it last did; see [ConnectionRestart]. */
     connectionRestart: ConnectionRestart = ConnectionRestart.Idle,
+    /**
+     * The reader's "Force quit": end this app's process. Null hides the action.
+     *
+     * Beside the restart because it is the same decision taken one step further,
+     * and the reader is already looking at the evidence that made them consider
+     * either. It is *not* an alternative label for the restart: the confirmation
+     * names all three verbs — Close keeps the connection, Restart connection
+     * rebuilds it in this process, Force quit ends the process — because the two
+     * controls sitting next to each other are exactly the pair someone will press
+     * without reading the sentence between them.
+     */
+    onForceQuit: (() -> Unit)? = null,
     /**
      * The LAN door's own address, and where an edit goes. Committed by the Save
      * action rather than per keystroke: a new LAN address re-resolves the endpoint
@@ -384,6 +407,38 @@ fun AboutContent(
             }
         }
 
+        // The escape hatch, one step past the restart, in the same section and
+        // behind a confirmation that says what it ends. It is offered whatever the
+        // connection's state: the whole point is that the app cannot be trusted to
+        // know when it is wedged below its own state.
+        val quit = onForceQuit
+        if (quit != null) {
+            var confirmingQuit by rememberSaveable { mutableStateOf(false) }
+            Column(Modifier.padding(horizontal = DshSpacing.xxl)) {
+                Spacer(Modifier.height(DshSpacing.md))
+                Text(
+                    text = FORCE_QUIT_ACTION,
+                    style = DshType.bodyMedium,
+                    color = colors.error,
+                    modifier = Modifier
+                        .testTag(FORCE_QUIT_TAG)
+                        .clickableNoRipple { confirmingQuit = true },
+                )
+            }
+            SectionNote(FORCE_QUIT_NOTE)
+            if (confirmingQuit) {
+                ForceQuitDialog(
+                    onDismiss = { confirmingQuit = false },
+                    onConfirm = {
+                        // Closed first so the dialog is not left drawn over the
+                        // process while it dies; the callback is the kill.
+                        confirmingQuit = false
+                        quit()
+                    },
+                )
+            }
+        }
+
         // What this host is pinned to, or what it presented when it was refused. Bound
         // to locals because a nullable parameter does not smart-cast inside a lambda.
         val check = onCheckCertificate
@@ -454,6 +509,52 @@ fun AboutContent(
             Text("Sign out and forget credentials", style = DshType.labelLarge, color = colors.error)
         }
     }
+}
+
+/**
+ * The Force quit confirmation.
+ *
+ * Public so `AboutForceQuitTest` can drive it directly: on the real page the
+ * action sits below the JVM harness's 470 dp display, where `performClick`
+ * injects a touch that lands on nothing. The dialog is where the three verbs are
+ * distinguished, so it is the part worth testing rather than the tap that opens
+ * it.
+ *
+ * The confirm button says **Force quit the app** rather than repeating the
+ * action's label: the first tap is the question, the second is the decision, and
+ * two identical words make the second one look like a repeat of the first.
+ */
+@Composable
+fun ForceQuitDialog(
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val colors = DshTheme.colors
+    AlertDialog(
+        // Back, a tap outside, or Keep it running: all three leave the app alive.
+        onDismissRequest = onDismiss,
+        containerColor = colors.bgBase,
+        title = {
+            Text(FORCE_QUIT_TITLE, color = colors.labelPrimary, style = DshType.titleMedium)
+        },
+        text = {
+            Text(
+                text = FORCE_QUIT_BODY,
+                style = DshType.bodyMedium,
+                color = colors.labelSecondary,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(FORCE_QUIT_CONFIRM, color = colors.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(FORCE_QUIT_CANCEL, color = colors.labelSecondary)
+            }
+        },
+    )
 }
 
 /** Where the coffee lives. One constant, so it is one edit to move it. */
@@ -547,6 +648,14 @@ const val HOST_VERSION_VALUE_TAG = "about-host-dsh-version"
  * from the line describing it.
  */
 const val RESTART_CONNECTION_TAG = "about-restart-connection"
+
+/**
+ * The Force quit action's seat, for `AboutForceQuitTest`.
+ *
+ * The label also appears in the confirmation's own copy, so matching by text
+ * alone could not tell the control from the sentence describing it.
+ */
+const val FORCE_QUIT_TAG = "about-force-quit"
 
 /**
  * What the About page says when the LAN door is being avoided, one sentence per

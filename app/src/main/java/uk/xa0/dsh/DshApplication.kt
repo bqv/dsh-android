@@ -1,8 +1,10 @@
 package uk.xa0.dsh
 
 import android.app.Application
+import android.os.Process
 import uk.xa0.dsh.data.ConfigStore
 import uk.xa0.dsh.diag.ScrollDiag
+import uk.xa0.dsh.model.runForceQuit
 import uk.xa0.dsh.net.DshClient
 import uk.xa0.dsh.widget.WidgetPublisher
 
@@ -22,8 +24,13 @@ class DshApplication : Application() {
      * Approvals, questions and their notifications. Process-scoped on purpose: the
      * connection service keeps it alive with no Activity, so an agent that wants a
      * human still reaches the phone after the UI is gone.
+     *
+     * Held through the delegate so [forceQuit] can withdraw this app's
+     * notifications *without constructing the centre* on a process that never
+     * needed one — creating it only to stop it would be a strange last act.
      */
-    val attention by lazy { AttentionCenter(this) }
+    private val attentionDelegate = lazy { AttentionCenter(this) }
+    val attention: AttentionCenter by attentionDelegate
 
     /**
      * The homescreen widget's snapshot and its one writer.
@@ -54,5 +61,28 @@ class DshApplication : Application() {
         // Latent scroll diagnostics: invisible, additive, and off the main
         // thread. See uk.xa0.dsh.diag.ScrollDiag for how to read them back.
         ScrollDiag.attach(filesDir)
+    }
+
+    /**
+     * End this app's process, deliberately — the About page's **Force quit**.
+     *
+     * This is the honest answer to a wedge below the app's own state, which a
+     * transport restart cannot reach by construction: a pooled or native socket
+     * the process still believes in, a resolver answer held by the platform, a
+     * thread stuck in a connect. Nothing here pretends to repair anything; it
+     * stops the app and leaves the next launch to start from nothing.
+     *
+     * The order lives in [runForceQuit] and is tested there: stop the sticky
+     * service (so the system does not immediately bring it back), withdraw this
+     * app's notifications, then kill. The view model flushes the composer's
+     * drafts before calling this, because `SharedPreferences.apply` is
+     * asynchronous and a kill can otherwise outrun the last keystroke's write.
+     */
+    fun forceQuit() {
+        runForceQuit(
+            stopService = { DshConnectionService.stop(this) },
+            withdrawNotifications = { if (attentionDelegate.isInitialized()) attention.stop() },
+            killProcess = { Process.killProcess(Process.myPid()) },
+        )
     }
 }
