@@ -220,6 +220,16 @@ fun SessionsDrawer(
     currentId: String?,
     drawerOpen: Boolean,
     loading: Boolean,
+    /**
+     * Why the last roster pull failed, in the app's own words, or null when the
+     * list is current.
+     *
+     * Drawn above the list rather than left to the log: a failed pull keeps the
+     * previous rows (a refresh failing is not evidence that the sessions are
+     * gone), and a drawer showing yesterday's sessions with nothing said is worse
+     * than an error. See [uk.xa0.dsh.model.sessionListErrorNote].
+     */
+    sessionsError: String? = null,
     onSelect: (String) -> Unit,
     onNew: () -> Unit,
     /**
@@ -803,6 +813,25 @@ fun SessionsDrawer(
                     ),
                 )
             }
+        }
+
+        // A failed pull, said where the sessions are rather than in the log. The
+        // rows above stay because a refresh failing is not evidence that anything
+        // is gone; what changes is that the drawer now says it is looking at an
+        // older answer. `loading` is deliberately not consulted: a pull in flight
+        // does not make the held list current, and a stale line that disappeared
+        // on a retry's first frame would be read as a successful refresh.
+        val stale = sessionsError
+        if (stale != null) {
+            Text(
+                text = stale,
+                style = DshType.micro,
+                color = colors.warn,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = DshSpacing.sm)
+                    .testTag(SESSIONS_STALE_TAG),
+            )
         }
 
         Spacer(Modifier.height(DshSpacing.sm))
@@ -1694,6 +1723,12 @@ private fun MiniChoice(label: String, selected: Boolean, onClick: () -> Unit) {
         )
     }
 }
+
+/**
+ * The stale-roster line's seat, for `SessionsDrawerStaleTest`: the sentence
+ * names the reason, which varies, so the tag is what identifies the node.
+ */
+const val SESSIONS_STALE_TAG = "drawer-sessions-stale"
 
 private const val UNGROUPED = "__ungrouped__"
 private const val FLAT = "__flat__"

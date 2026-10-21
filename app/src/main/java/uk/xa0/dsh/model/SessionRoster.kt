@@ -1,5 +1,7 @@
 package uk.xa0.dsh.model
 
+import org.json.JSONArray
+import org.json.JSONObject
 import uk.xa0.dsh.SessionItem
 
 /**
@@ -111,3 +113,38 @@ class MembershipHold {
     fun isEmpty(): Boolean = held.isEmpty()
 }
 
+
+/**
+ * The roster array out of a `session/list` answer, or a refusal to pretend.
+ *
+ * An answer with **no `items` key** is not an empty roster, and treating it as one
+ * is how the drawer could show nothing with nothing said: `optJSONArray` answers
+ * null for a missing key, a key of the wrong type, and a host that answered some
+ * other shape entirely, and every one of those became a confident empty list. The
+ * app then replaced a perfectly good roster with it and kept it until the next
+ * pull — the exact "empty drawer, no explanation" shape.
+ *
+ * The protocol's own empty roster is `"items": []`, which is an array and is
+ * accepted: a host with no sessions is allowed to say so. Anything else raises
+ * [SessionListShapeException], which the pull's caller reports as a failure and
+ * which leaves the previous list on screen *labelled as old* rather than gone.
+ */
+class SessionListShapeException(message: String) : Exception(message)
+
+fun sessionListItems(value: JSONObject): JSONArray =
+    value.optJSONArray("items") ?: throw SessionListShapeException(
+        "the host's session list had no items array",
+    )
+
+/**
+ * What the drawer says when the last pull failed.
+ *
+ * [reason] is the app's own wording for the failure, so this never has to guess
+ * what went wrong. The second sentence is the load-bearing half: the list is still
+ * drawn, and a reader is told it is the *previous* list rather than being left to
+ * read staleness as fact. Keeping the list is deliberate — an error is easier to
+ * act on next to the sessions it is about than over a blank panel — but a list
+ * with no indication that it is old is worse than an error.
+ */
+fun sessionListErrorNote(reason: String): String =
+    "Could not refresh the session list: $reason. The list below is the last one that loaded."

@@ -114,6 +114,8 @@ import uk.xa0.dsh.model.SessionTarget
 import uk.xa0.dsh.model.SessionTargetCandidate
 import uk.xa0.dsh.model.SessionTargetPlan
 import uk.xa0.dsh.model.SessionTargets
+import uk.xa0.dsh.model.sessionListErrorNote
+import uk.xa0.dsh.model.sessionListItems
 import uk.xa0.dsh.model.SUBAGENT_ATTACHMENT_INVALID
 import uk.xa0.dsh.model.SUBAGENT_ATTACHMENT_REFUSAL
 import uk.xa0.dsh.model.SUBAGENT_FILE_UNSUPPORTED
@@ -709,6 +711,18 @@ data class UiState(
     val errorNeedsSignIn: Boolean = false,
     val sessions: List<SessionItem> = emptyList(),
     val sessionsLoading: Boolean = false,
+    /**
+     * Why the last roster pull failed, in the app's own words, or null when the
+     * list on screen is the latest one the host gave.
+     *
+     * The list is deliberately *kept* when a pull fails: an error beside the
+     * sessions it is about is easier to act on than a blank panel, and a failed
+     * refresh is not evidence that the sessions are gone. But a list with no
+     * indication that it is old is worse than an error, so this is drawn in the
+     * drawer rather than only logged — a reader looking at yesterday's sessions
+     * must be told that is what they are looking at. See [sessionListErrorNote].
+     */
+    val sessionsError: String? = null,
     /**
      * The host's Workspace registry, in the registry's own order.
      *
@@ -3040,8 +3054,35 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private var liveProjections: JSONObject? = null
     private var lastEventAt: Long = 0L
     private var tick: Long = 0L
+    /** Guards the debounce handle: two triggers must not launch two pulls. */
     private val refreshLock = Any()
-    private var pendingRefresh = false
+
+    /**
+     * The trailing-edge debounce behind the live roster refreshes, or null.
+     *
+     * A handle rather than a boolean latch, deliberately. It used to be a
+     * `pendingRefresh` flag set before the debounce coroutine was launched and
+     * cleared after its delay: a coroutine cancelled inside that window left the
+     * flag set for the life of the view model, and from then on **every** live
+     * roster trigger returned early, so the drawer never refreshed again while
+     * the connection looked perfectly healthy. A finished or cancelled job is not
+     * active, so this cannot wedge.
+     */
+    private var rosterDebounce: Job? = null
+
+    /**
+     * True when a roster pull was missed and the next socket open must make it.
+     *
+     * The one case that needs this is a resume while the socket is down: the
+     * resume path deliberately does not dial (the supervisor owns the backoff),
+     * but it also used to return before the roster pull, and nothing pulled it
+     * when the socket came back — the streams replay, the roster does not. Set
+     * here (and by a failed pull), consumed exactly once when the mux is next
+     * observed OPEN, so one reconnect costs one `session/list`, not one per
+     * second.
+     */
+    private var rosterRefreshOnOpen = false
+
     /** The content-search call in flight (or waiting out its debounce). */
     private var sessionSearchJob: Job? = null
     /** The query [sessionSearchJob] is answering, so a stale page can be dropped. */
@@ -3224,6 +3265,25 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                             // that rather than keeping a previous host's number on screen.
                             hostVersion = if (open) _ui.value.hostVersion else HostVersion.Unknown,
                         )
+                    }
+                    // A socket that is down after a roster landed is the one moment
+                    // the app knows it may be missing world: arm the pull now and
+                    // make it on the next open, once. This is what heals the resume
+                    // path's deliberate "leave it to the backoff" return and any
+                    // other reconnect the app did not initiate — the streams replay
+                    // themselves, but `session/list` is a pull and nothing else
+                    // asks for it.
+                    if (!open && rosterLanded) rosterRefreshOnOpen = true
+                    // A connect in flight makes its own pull; consuming the flag
+                    // here as well would ask the host for the same 1,900-row list
+                    // twice, seconds apart. `startupStep` is non-null for exactly
+                    // as long as a dial owns the roster, so this leaves the flag
+                    // for the next open rather than dropping it.
+                    val dialling = _ui.value.startupStep != null || _ui.value.busy
+                    if (open && rosterRefreshOnOpen && !dialling) {
+                        rosterRefreshOnOpen = false
+                        Log.d(SIDEBAR_TAG, "socket reopened: re-pulling the roster it could not ask for")
+                        refreshSessions()
                     }
                     // The widget's reading of what is running is renewed from here for as long
                     // as this process can see the socket. A widget on a phone whose app has
@@ -3466,9 +3526,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             followJob?.cancel()
             followJob = null
             reopenFollowIfStopped()
-            runCatching { fetchSessions() }.onSuccess { list ->
-                _ui.value = _ui.value.copy(sessions = mergeRoster(list))
-            }
+            refreshRoster("route move")
         }
     }
 
@@ -4066,9 +4124,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             ensureWorkspaceStream()
             ensureControlStream()
             reopenFollowIfStopped()
-            runCatching { fetchSessions() }.onSuccess { list ->
-                _ui.value = _ui.value.copy(sessions = mergeRoster(list))
-            }
+            refreshRoster("auth heal")
         }
     }
 
@@ -4185,7 +4241,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // streams are re-opened there without waiting for it, exactly as
                 // the live route hook does.
                 if (!open && !moved) {
-                    Log.d(TAG, "resume: socket is down; leaving it to the backoff")
+                    // The socket is down, so the pull cannot succeed yet — but it
+                    // must not be *forgotten*. Returning here without arming this
+                    // was the app's stale-roster wedge: the supervisor reconnected
+                    // and the streams replayed, but nothing re-pulled
+                    // `session/list`, so a session created while the phone was in
+                    // a pocket never appeared and the drawer stayed as it was.
+                    rosterRefreshOnOpen = true
+                    Log.d(TAG, "resume: socket is down; roster will be re-pulled when it reopens")
                     return@launch
                 }
                 // Resuming *onto* a session is opening it: a notification that landed
@@ -4197,13 +4260,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 // collector is active and dead at the same time, and only a fresh
                 // opening frame carries the baseline (archived ids included).
                 reopenStreamsForResume()
-                runCatching { fetchSessions() }
-                    .onFailure { if (it is DshAuthException) onAuthFailure("session/list", it) }
-                    .onSuccess { list ->
-                        _ui.value = _ui.value.copy(sessions = mergeRoster(list))
-                        warnOnMissingMembers(list)
-                        publishRosterRunning()
-                    }
+                refreshRoster("resume")
                 // Identity, not activity: a resume repaints the labels and modes the
                 // lineage rows are named with, which the follow snapshot re-delivers
                 // (`manager.ts:796-798`). Running state came from the pull above.
@@ -4294,7 +4351,16 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      *  * [uk.xa0.dsh.net.DshClient.resetTransport] shuts the multiplexer down and forgets it, so
      *    every logical stream on it ends: `$events`, `session/control`,
      *    `workspace/follow`, `session/follow`, the job roster and the terminal
-     *    attachment;
+     *    attachment. The socket is cancelled rather than politely closed, and the
+     *    mux's own coroutines go with it;
+     *  * that same call evicts the OkHttp connection pool shared by all five
+     *    clients and cancels the dispatcher's running and queued calls, which is
+     *    the state that lives *below* the app's own socket and survives an
+     *    app-level teardown: a stale pooled connection to an address the host has
+     *    left, or a hung call holding its connection and its dispatcher slot;
+     *  * it also cancels this client's own route-refresh coroutines, because a
+     *    resolution already in flight is an answer about the retired wire, and
+     *    replaces the scope so a later trigger starts clean;
      *  * the resolver's door holds (a transport hold and a wrong-answer verdict),
      *    its cached winner, its TTL and the last probed answer;
      *  * this view model's mux wiring — the four coroutines
@@ -4303,12 +4369,18 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
      *  * the route-failure cooldown, so a call that fails immediately is not told
      *    to wait for a window the old transport opened.
      *
+     * The reset's own counts are one logcat line under the client's route tag
+     * (`DshRoute`), so a restart that cleared nothing can be told from one that
+     * cleared a stale pool without guessing — see
+     * [uk.xa0.dsh.net.TransportReset].
+     *
      * What it deliberately keeps: the configuration, the cookie jar
      * ([uk.xa0.dsh.net.PersistentCookieJar], on disk), the per-session drafts
-     * ([uk.xa0.dsh.data.DraftStore]), the trust anchors, and the attention centre's pending
-     * approvals and questions — [AttentionCenter.reattach] re-points the centre at
-     * the new socket without clearing them, and the host's fresh `$events`
-     * generation re-announces whatever it still holds.
+     * ([uk.xa0.dsh.data.DraftStore]), the trust anchors and their pins (a trust
+     * decision is the user's, not the transport's), and the attention centre's
+     * pending approvals and questions — [AttentionCenter.reattach] re-points the
+     * centre at the new socket without clearing them, and the host's fresh
+     * `$events` generation re-announces whatever it still holds.
      *
      * The outcome is published in [UiState.connectionRestart], and it is never
      * silent: [ConnectionRestart.Running] while the doors are probed,
@@ -4323,7 +4395,21 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             )
             return
         }
-        _ui.value = _ui.value.copy(connectionRestart = ConnectionRestart.Running)
+        _ui.value = _ui.value.copy(
+            connectionRestart = ConnectionRestart.Running,
+            // The drawer's spinner is app state rather than transport state, but a
+            // spinner left on by a cancelled pull would make the fresh one look
+            // like the same stuck refresh. The stale line is deliberately *not*
+            // cleared here: until the fresh pull lands, the rows really are the old
+            // ones, and the sentence saying so is still true. The pull clears it on
+            // success and replaces it on failure.
+            sessionsLoading = false,
+        )
+        synchronized(refreshLock) {
+            rosterDebounce?.cancel()
+            rosterDebounce = null
+        }
+        rosterRefreshOnOpen = false
         viewModelScope.launch {
             Log.d(TAG, "restart: tearing the connection down")
             // The seat a reader is on, and what they had staged in it. The connect
@@ -4501,16 +4587,40 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         _ui.value = _ui.value.copy(startupStep = StartupStep.READING_SESSIONS)
         val sessions = runCatching { fetchSessions() }
         if (sessions.isFailure) {
+            // Both halves: the connect failure keeps the banner and the backoff,
+            // and the roster half says the *drawer* is showing an old list rather
+            // than pretending it is current. The connect path used to be the one
+            // pull whose failure had a visible sentence — on the About page, far
+            // from the list it left stale.
+            sessions.onFailure { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                val reason = describe(error)
+                _ui.value = _ui.value.copy(sessionsError = sessionListErrorNote(reason))
+                Log.w(
+                    SIDEBAR_TAG,
+                    "session/list failed from connect: $reason; keeping " +
+                        "${_ui.value.sessions.size} row(s) and marking them stale",
+                )
+                // If the socket does come back, that is the next chance to ask.
+                rosterRefreshOnOpen = true
+            }
             onConnectFailure(sessions.exceptionOrNull(), wasReady)
             return false
         }
 
         connectRetries = 0
+        // This pull *is* the fresh roster: any deferred one is now done.
+        rosterRefreshOnOpen = false
         _ui.value = _ui.value.copy(
             phase = AppPhase.READY,
             busy = false,
             startupStep = null,
-            sessions = sessions.getOrThrow(),
+            sessionsLoading = false,
+            // The same fold every other pull uses, so the membership hold and the
+            // running book are consulted here too; this path used to assign the
+            // raw list, the one place a whole-world pull bypassed `mergeRoster`.
+            sessions = mergeRoster(sessions.getOrThrow()),
+            sessionsError = null,
         )
 
         ensureWorkspaceStream()
@@ -5804,7 +5914,11 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         // moment, which the answer may predate. See [RunningBook].
         val pull = runningBook.beginPull()
         val value = client.rpc("session/list", JSONObject().put("_request", JSONObject()))
-        val items = value.optJSONArray("items") ?: JSONArray()
+        // An answer without an `items` array is a *failure*, not an empty roster:
+        // treating it as empty replaced a good list with nothing and said nothing.
+        // See [sessionListItems]. The throw reaches the caller's runCatching, which
+        // keeps the previous rows and marks them stale.
+        val items = sessionListItems(value)
         // The scheduled-task marks, read beside the roster so the rows this pull builds
         // already carry them. One host-wide read, and a failure is not evidence that a
         // task ended — see [refreshScheduleCounts].
@@ -6075,21 +6189,65 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
         for (parent in watchedCatalogParents()) refreshSubagentCatalog(parent)
     }
 
+    /**
+     * The one place a roster pull's outcome is published.
+     *
+     * Every path that asks the host for the session list comes through here, so
+     * "what happens when the pull fails" has one answer instead of seven. Before
+     * this, only `refreshSidebar` told the reader anything and only an auth
+     * refusal was ever named: a 502, a timeout or an unreadable answer left the
+     * previous list on screen with no log line and no indication that it was old.
+     * A reader looking at yesterday's sessions had no way to know.
+     *
+     * The failure keeps [UiState.sessions] — a failed refresh is not evidence the
+     * sessions are gone — and records why in [UiState.sessionsError], which the
+     * drawer draws above the list. It also logs one bounded line under the
+     * sidebar tag, because the drawer's copy is gone the moment the next pull
+     * succeeds and "did it ever fail" is the first question worth answering.
+     *
+     * [source] names the caller, not the host: "resume" and "streams" failing
+     * point at different code, and the next report has to be able to say which.
+     */
+    private fun applyRoster(source: String, result: Result<List<SessionItem>>) {
+        result.onSuccess { list ->
+            rosterRefreshOnOpen = false
+            _ui.value = _ui.value.copy(
+                sessions = mergeRoster(list),
+                sessionsLoading = false,
+                sessionsError = null,
+            )
+            warnOnMissingMembers(list)
+            publishRosterRunning()
+        }.onFailure { error ->
+            // `runCatching` catches cancellation too; swallowing it would keep a
+            // cancelled pull's caller alive and report a failure that is not one.
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            val reason = describe(error)
+            _ui.value = _ui.value.copy(
+                sessionsLoading = false,
+                sessionsError = sessionListErrorNote(reason),
+            )
+            // The next socket open is a new opportunity: if the wire was the
+            // problem, the pull that a reconnect triggers is the one that heals.
+            rosterRefreshOnOpen = true
+            Log.w(
+                SIDEBAR_TAG,
+                "session/list failed from $source: $reason; keeping " +
+                    "${_ui.value.sessions.size} row(s) and marking them stale",
+            )
+            if (error is DshAuthException) onAuthFailure("session/list", error)
+        }
+    }
+
+    /** One roster pull, published through [applyRoster]. */
+    private suspend fun refreshRoster(source: String) {
+        applyRoster(source, runCatching { fetchSessions() })
+    }
+
     fun refreshSessions() {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(sessionsLoading = true)
-            val sessions = runCatching { fetchSessions() }
-            sessions.onSuccess { list ->
-                _ui.value = _ui.value.copy(
-                    sessions = mergeRoster(list),
-                    sessionsLoading = false,
-                )
-                warnOnMissingMembers(list)
-                publishRosterRunning()
-            }.onFailure { error ->
-                _ui.value = _ui.value.copy(sessionsLoading = false)
-                if (error is DshAuthException) onAuthFailure("session/list", error)
-            }
+            refreshRoster("refresh")
         }
     }
 
@@ -6116,20 +6274,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             val sessions = runCatching { fetchSessions() }
             val elapsed = System.currentTimeMillis() - startedAt
             if (elapsed < REFRESH_MIN_SPIN_MS) delay(REFRESH_MIN_SPIN_MS - elapsed)
-            sessions.onSuccess { list ->
-                _ui.value = _ui.value.copy(
-                    sessions = mergeRoster(list),
-                    sessionsLoading = false,
-                )
-                warnOnMissingMembers(list)
-                publishRosterRunning()
-            }.onFailure { error ->
-                _ui.value = _ui.value.copy(sessionsLoading = false)
-                // The pull is a direct user action, so a genuine failure says so
-                // rather than leaving the tap with no consequence at all.
-                if (error is DshAuthException) onAuthFailure("session/list", error)
-                else showFailure(error, "session/list", "Could not refresh: ")
-            }
+            applyRoster("sidebar refresh", sessions)
         }
     }
 
@@ -6214,20 +6359,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Trailing-edge debounce so a step-heavy turn does not hammer `session/list`. */
     private fun refreshSessionsSoon() {
+        // A live job is this debounce's whole latch. A boolean set before the launch
+        // and cleared after its delay could be left set by a cancelled coroutine,
+        // and then every later trigger returned early for the life of the process —
+        // a drawer that never refreshed again while the connection looked healthy.
         synchronized(refreshLock) {
-            if (pendingRefresh) return
-            pendingRefresh = true
-        }
-        viewModelScope.launch {
-            delay(500)
-            synchronized(refreshLock) { pendingRefresh = false }
-            val sessions = runCatching { fetchSessions() }
-            sessions.onFailure { error ->
-                if (error is DshAuthException) onAuthFailure("session/list", error)
-            }.onSuccess { list ->
-                _ui.value = _ui.value.copy(sessions = mergeRoster(list))
-                warnOnMissingMembers(list)
-                publishRosterRunning()
+            if (rosterDebounce?.isActive == true) return
+            rosterDebounce = viewModelScope.launch {
+                delay(500)
+                refreshRoster("streams")
             }
         }
     }
