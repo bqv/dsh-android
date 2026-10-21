@@ -92,7 +92,7 @@ class DshClientResetTest {
         try {
             val reset = client.resetTransport()
 
-            assertTrue("the reset must cancel calls, not only evict their connections", call.isCanceled)
+            assertTrue("the reset must cancel calls, not only evict their connections", call.isCanceled())
             assertTrue("a cancelled call is part of what the line reports", reset.callsCancelled >= 1)
         } finally {
             release.countDown()
