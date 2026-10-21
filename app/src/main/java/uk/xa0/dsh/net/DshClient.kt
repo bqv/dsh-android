@@ -8,7 +8,9 @@ import android.net.NetworkCapabilities
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -27,6 +29,7 @@ import java.net.NetworkInterface
 import java.security.cert.X509Certificate
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /** Raised when the host rejects a request because the session is gone. */
 class DshAuthException(message: String = "Not authenticated") : Exception(message)
@@ -138,8 +141,29 @@ class DshClient(context: Context) {
      * Process-scoped, like the client itself: route refreshes are triggered by
      * the OS's connectivity callbacks and by failed calls, neither of which has
      * a coroutine of its own to run in.
+     *
+     * Replaced rather than only cancelled by [resetTransport]: a re-resolution
+     * already in flight when a person asks for a fresh dial is an answer about
+     * the wire the previous transport was on, and letting it land afterwards
+     * would write a winner and a "the route moved" verdict on top of the reset.
+     * See [resetTransport] for why the replacement is a new scope rather than a
+     * child job.
      */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
+    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * The transport generation, bumped whenever the transport is deliberately
+     * replaced.
+     *
+     * The unary interceptor compares the generation a call started under with the
+     * current one, so the cancellations [resetTransport] causes are not recorded
+     * as door failures: a restart that cancelled a call and then let that
+     * cancellation set a transport hold against the LAN door would make the fresh
+     * dial avoid the very door it was meant to re-ask. A failure of a transport
+     * that no longer exists says nothing about the doors.
+     */
+    private val transportGeneration = AtomicLong(0)
 
     val cookieJar = PersistentCookieJar(context)
 
@@ -248,10 +272,16 @@ class DshClient(context: Context) {
          */
         val unary = base.newBuilder()
             .addInterceptor { chain ->
+                val generation = transportGeneration.get()
                 try {
                     chain.proceed(chain.request())
                 } catch (e: IOException) {
-                    onRouteFailure(DoorFault.Transport)
+                    // A failure of a transport that has since been deliberately
+                    // replaced says nothing about the doors: [resetTransport]
+                    // cancels every call in flight, and recording those
+                    // cancellations would put a transport hold on the door the
+                    // restart is about to re-ask.
+                    if (generation == transportGeneration.get()) onRouteFailure(DoorFault.Transport)
                     throw e
                 }
             }
@@ -373,34 +403,103 @@ class DshClient(context: Context) {
     /**
      * Tear the transport down so the next attempt builds it again.
      *
-     * The deliberate, in-process counterpart to a force-stop: the configuration,
-     * the cookie jar, the trust anchors and every other piece of process state are
-     * untouched, and only what was learned about *this* connection is dropped.
+     * The deliberate, in-process counterpart to a force-stop. The configuration,
+     * the cookie jar, the trust anchors and every other piece of user state are
+     * untouched, and only what the process learned about *this* connection is
+     * dropped. The distinction is not cosmetic: a reset that logged someone out,
+     * forgot an accepted certificate or dropped a waiting approval would be a
+     * worse bug than the wedge this repairs.
      *
-     * Two things go. The multiplexer is shut down and forgotten, which ends every
-     * logical stream on it — the event stream's registrations, the followed
-     * session, the control and workspace streams, the terminal attachment — and
-     * stops its supervisor from re-dialling a socket this action has declared dead.
-     * And [EndpointResolver.restart] forgets the door holds, the cached winner and
-     * the last probed answer, because those are exactly the records that can wedge
-     * a route: a wrong-answer verdict survives every clock change, and a cached
-     * winner can be an answer about a wire that is gone.
+     * **Retired (transport state).** These are records about the wire, not about
+     * the person using it, and each is something a fresh dial must not inherit:
+     *
+     *  * the multiplexer is shut down and forgotten — every registration on it
+     *    (the event stream, the followed session, the control and workspace
+     *    streams, the job roster, the terminal attachment) ends, and
+     *    [RemoteMux.shutdown] cancels the socket outright rather than asking the
+     *    peer to close it: a host that never completes the close handshake is
+     *    exactly the wedge this action exists for. The mux's own coroutine scope
+     *    is cancelled with it, so its supervisor cannot redial a transport this
+     *    action has declared dead;
+     *  * [EndpointResolver.restart] forgets the door holds (both the transport
+     *    kind and the permanent wrong-answer verdict), the cached winner, the TTL
+     *    and the last probed answer — a wrong-answer verdict survives every clock
+     *    change, and a cached winner can be an answer about a wire that is gone;
+     *  * the five OkHttp clients' shared [okhttp3.ConnectionPool] and
+     *    [okhttp3.Dispatcher]. The clients themselves are deliberately reused:
+     *    OkHttp's client object holds only immutable configuration (timeouts, the
+     *    pinner, the trust manager), so a new instance would add nothing, while
+     *    the two things that *do* hold transport state are both reachable from
+     *    it. Every client shape in the family was derived with `newBuilder()`,
+     *    which copies the pool and dispatcher references, so all five share one
+     *    of each and one eviction and one cancellation cover them all. A stale
+     *    pooled connection to an address the host has since left is precisely
+     *    the state that survives an app-level socket teardown, and a hung call
+     *    keeps a dispatcher slot and its connection alive;
+     *  * this client's route-refresh scope, because a resolution already in
+     *    flight is an answer about the previous wire and would otherwise land
+     *    after the reset;
+     *  * the route-failure cooldown, which bounded probes for the previous
+     *    transport's calls; a connection that is one call old should not inherit
+     *    its reluctance.
+     *
+     * **Kept (user state).** The cookie jar (the sign-in), the configured
+     * addresses and credentials, the accepted certificates and their pins (a
+     * trust decision is the user's, and "forget it" is a separate, deliberate
+     * action on the About page), drafts, staged attachments and the attention
+     * centre's cards.
+     *
+     * **Not reachable from here.** The JVM/Android resolver's address cache is
+     * process-wide and has no public clear API, so a hostname whose address moved
+     * can be answered from that cache for its TTL even after this returns. The
+     * app keeps no DNS cache of its own and OkHttp is not configured with a
+     * response cache, so there is nothing else to drop; a force quit is the only
+     * guaranteed way to start with an empty resolver.
      *
      * It does **not** resolve on its own. The caller owns the fresh dial (the view
      * model's connect), which probes both doors and builds the multiplexer on the
-     * answer — resolving here as well would ask the same question twice.
-     *
-     * The route-failure cooldown goes too: it bounded probes for the calls the
-     * previous transport was making, and a connection that is one call old should
-     * not inherit its reluctance.
+     * answer — resolving here as well would ask the same question twice. The
+     * returned [TransportReset] is also written to logcat as one line under the
+     * route tag, so a later "the restart did not help" can be read rather than
+     * guessed at.
      */
-    fun resetTransport() {
-        synchronized(this) {
-            endpoint.restart()
+    fun resetTransport(): TransportReset {
+        val family = clients
+        // Under the same monitor [mux] uses, so a racing keep-alive caller cannot
+        // build a new multiplexer between the teardown and the pool eviction and
+        // then have its fresh socket cancelled by this reset's own housekeeping.
+        val reset = synchronized(this) {
+            // Bumped before a single call is cancelled; see [transportGeneration].
+            transportGeneration.incrementAndGet()
+            val doors = endpoint.restart()
             lastRouteFailureAt = 0L
+            val hadMux = mux != null
             mux?.shutdown()
             mux = null
+            val pool = family.base.connectionPool
+            val dispatcher = family.base.dispatcher
+            val pooled = pool.connectionCount()
+            val calls = dispatcher.runningCallsCount() + dispatcher.queuedCallsCount()
+            // Cancel before evicting: cancellation ends the calls that own
+            // in-flight connections, eviction closes what is idle. A connection
+            // whose call is merely evicted stays open until its owner lets go.
+            dispatcher.cancelAll()
+            pool.evictAll()
+            val stale = scope
+            val routeJobs = stale.coroutineContext[Job]?.children?.count { it.isActive } ?: 0
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            stale.cancel()
+            TransportReset(
+                muxClosed = hadMux,
+                doorFaultsForgotten = doors.faultsForgotten,
+                cachedWinnerForgotten = doors.winnerForgotten,
+                pooledConnections = pooled,
+                callsCancelled = calls,
+                routeJobsCancelled = routeJobs,
+            )
         }
+        Log.d(ROUTE_TAG, reset.summary())
+        return reset
     }
 
     /**

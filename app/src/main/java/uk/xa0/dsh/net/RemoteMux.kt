@@ -6,6 +6,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
@@ -329,14 +330,34 @@ class RemoteMux(
      * Closing the registrations completes their flows, so collectors unwind; the
      * `closed` flag stops the supervisor and any racing [ensureConnected] from
      * re-dialling a host this instance no longer belongs to.
+     *
+     * The socket is **cancelled**, not closed. `close()` sends a close frame and
+     * waits for the peer to answer it, and a host that never answers is exactly
+     * the wedge a deliberate teardown exists for: the underlying connection would
+     * sit in OkHttp's pool (and its call in the dispatcher) until the handshake
+     * timed out or forever. Cancellation shuts the socket down now, with no
+     * dependency on anything at the far end.
+     *
+     * The instance's coroutines go with it. The supervisor loop checks `closed`
+     * between delays, so left alone it can stay alive for its longest backoff; a
+     * stream pump is ended by its channel; and an [ensureConnected] caller already
+     * waiting on `openSignal` is woken here rather than sitting out its full 20 s
+     * timeout for a socket this call has just ended. Nothing on a retired mux has
+     * an outcome worth delivering, so the whole scope is cancelled.
      */
     fun shutdown() {
         closed = true
         registrations.values.forEach { it.channel.close() }
         registrations.clear()
-        runCatching { socket?.close(1000, "client closing") }
+        runCatching { socket?.cancel() }
         socket = null
         _state.value = MuxState.CLOSED
+        // Wake a dial that is waiting on the handshake; it re-reads `closed` and
+        // returns without opening another socket. The listener's own completion of
+        // this deferred is a no-op after the first.
+        openSignal?.complete(Unit)
+        openSignal = null
+        scope.cancel()
     }
 
     /**

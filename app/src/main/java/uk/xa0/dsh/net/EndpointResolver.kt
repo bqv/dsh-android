@@ -290,14 +290,20 @@ class EndpointResolver(
      *
      * [peek] therefore answers with the primary until a probe lands, which is the
      * honest "nothing has been resolved yet" state rather than a stale winner.
+     *
+     * Returns what it forgot so the transport reset that calls it can say so in
+     * one logcat line; see [DoorReset] and [TransportReset].
      */
-    fun restart() {
+    fun restart(): DoorReset {
+        val forgotten = faults.size
+        val hadWinner = winner != null
         faults.clear()
         winner = null
         winnerIsLan = false
         resolved = false
         resolvedAt = 0L
         lastProbed = null
+        return DoorReset(faultsForgotten = forgotten, winnerForgotten = hadWinner)
     }
 
     /**
