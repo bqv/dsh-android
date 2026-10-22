@@ -13,6 +13,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import uk.xa0.dsh.SessionItem
+import uk.xa0.dsh.model.DrawerGrouping
 import uk.xa0.dsh.model.WorkspaceListPhase
 import uk.xa0.dsh.scroll.HarnessApplication
 import uk.xa0.dsh.ui.search.SessionSearchCopy
@@ -28,7 +29,7 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * row above the list is the app's own derivation from `query`, and it has to move
  * from 1 back to 3.
  *
- * The drawer is driven flat (`groupByWorkspace = false`) with no Workspaces, which
+ * The drawer is driven flat (`grouping = DrawerGrouping.FLAT`) with no Workspaces, which
  * is the shortest path from the box to the count: the grouped list would interpose
  * section headers and the host registry's own two empty states.
  */
@@ -70,11 +71,11 @@ class SessionsDrawerSearchTest {
             onRefresh = {},
             onSettings = {},
             onAbout = {},
-            groupByWorkspace = false,
+            grouping = DrawerGrouping.FLAT,
             orderByUpdated = true,
             showArchived = false,
             collapsedSections = emptySet(),
-            onGroupByWorkspace = {},
+            onGrouping = {},
             onOrderByUpdated = {},
             onShowArchived = {},
             onCollapsedSections = {},

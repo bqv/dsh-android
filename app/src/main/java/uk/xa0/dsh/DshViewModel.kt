@@ -30,6 +30,7 @@ import uk.xa0.dsh.data.DshConfig
 import uk.xa0.dsh.data.DraftStore
 import uk.xa0.dsh.data.ThemeMode
 import uk.xa0.dsh.model.AccountBalance
+import uk.xa0.dsh.model.DrawerGrouping
 import uk.xa0.dsh.model.ApprovalAnswer
 import uk.xa0.dsh.diag.ScrollDiag
 import uk.xa0.dsh.model.ChatEntry
@@ -902,8 +903,8 @@ data class UiState(
     val themeMode: String = ThemeMode.SYSTEM,
     /** What send does while running: `queue` (web default) or `steer`. */
     val busyEnter: String = BusyEnter.QUEUE,
-    /** Sidebar Group mode: Workspaces (`true`) or one flat list; persisted. */
-    val drawerGroupByWorkspace: Boolean = true,
+    /** Sidebar Group mode: sibling Workspaces, the Workspace Tree, or one flat list; persisted. */
+    val drawerGrouping: DrawerGrouping = DrawerGrouping.WORKSPACE,
     /** Sidebar Order mode: last updated (`true`) or manual order; persisted. */
     val drawerOrderByUpdated: Boolean = false,
     /** Sidebar Archived filter; persisted so it survives a restart like the other two. */
@@ -3106,7 +3107,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             agentPreset = config.agentPreset,
             terminalFontSp = config.terminalFontSp,
             busyEnter = config.busyEnter,
-            drawerGroupByWorkspace = config.drawerGroupByWorkspace,
+            drawerGrouping = config.drawerGrouping,
             drawerOrderByUpdated = config.drawerOrderByUpdated,
             drawerShowArchived = config.drawerShowArchived,
             drawerCollapsedSections = config.drawerCollapsedSections,
@@ -3382,7 +3383,7 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
             baseUrl = config.baseUrl,
             lanUrl = config.lanUrl,
             username = config.username,
-            drawerGroupByWorkspace = config.drawerGroupByWorkspace,
+            drawerGrouping = config.drawerGrouping,
             drawerOrderByUpdated = config.drawerOrderByUpdated,
             drawerCollapsedSections = config.drawerCollapsedSections,
             hostShellSessions = config.hostShellSessions,
@@ -3820,13 +3821,13 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * The sidebar's two view modes are client-local preferences, so they follow
-     * the same load/copy/save path as the theme rather than living in the
-     * composable's saved state — which reset them on every cold start.
+     * The sidebar's view modes are client-local preferences, so they follow the same
+     * load/copy/save path as the theme rather than living in the composable's saved
+     * state — which reset them on every cold start.
      */
-    fun setDrawerGroupByWorkspace(groupByWorkspace: Boolean) {
-        configStore.save(configStore.load().copy(drawerGroupByWorkspace = groupByWorkspace))
-        _ui.value = _ui.value.copy(drawerGroupByWorkspace = groupByWorkspace)
+    fun setDrawerGrouping(grouping: DrawerGrouping) {
+        configStore.save(configStore.load().copy(drawerGrouping = grouping))
+        _ui.value = _ui.value.copy(drawerGrouping = grouping)
     }
 
     fun setDrawerOrderByUpdated(orderByUpdated: Boolean) {

@@ -853,11 +853,11 @@ fun ChatScreen(vm: DshViewModel) {
                         scope.launch { drawerState.close() }
                     },
                     onRefresh = { vm.refreshSidebar() },
-                    groupByWorkspace = ui.drawerGroupByWorkspace,
+                    grouping = ui.drawerGrouping,
                     orderByUpdated = ui.drawerOrderByUpdated,
                     showArchived = ui.drawerShowArchived,
                     collapsedSections = ui.drawerCollapsedSections,
-                    onGroupByWorkspace = vm::setDrawerGroupByWorkspace,
+                    onGrouping = vm::setDrawerGrouping,
                     onOrderByUpdated = vm::setDrawerOrderByUpdated,
                     onShowArchived = vm::setDrawerShowArchived,
                     onCollapsedSections = vm::setDrawerCollapsedSections,

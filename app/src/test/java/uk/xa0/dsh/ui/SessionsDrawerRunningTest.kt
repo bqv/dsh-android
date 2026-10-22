@@ -13,6 +13,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
+import uk.xa0.dsh.model.DrawerGrouping
 import uk.xa0.dsh.model.WorkspaceCopy
 import uk.xa0.dsh.model.WorkspaceListPhase
 import uk.xa0.dsh.scroll.HarnessApplication
@@ -85,11 +86,11 @@ class SessionsDrawerRunningTest {
             onRefresh = {},
             onSettings = {},
             onAbout = {},
-            groupByWorkspace = true,
+            grouping = DrawerGrouping.WORKSPACE,
             orderByUpdated = false,
             showArchived = false,
             collapsedSections = collapsed,
-            onGroupByWorkspace = {},
+            onGrouping = {},
             onOrderByUpdated = {},
             onShowArchived = {},
             onCollapsedSections = {},
@@ -184,11 +185,11 @@ class SessionsDrawerRunningTest {
                     onRefresh = {},
                     onSettings = {},
                     onAbout = {},
-                    groupByWorkspace = true,
+                    grouping = DrawerGrouping.WORKSPACE,
                     orderByUpdated = false,
                     showArchived = false,
                     collapsedSections = setOf("ws1"),
-                    onGroupByWorkspace = {},
+                    onGrouping = {},
                     onOrderByUpdated = {},
                     onShowArchived = {},
                     onCollapsedSections = {},
@@ -224,11 +225,11 @@ class SessionsDrawerRunningTest {
                     onRefresh = {},
                     onSettings = {},
                     onAbout = {},
-                    groupByWorkspace = true,
+                    grouping = DrawerGrouping.WORKSPACE,
                     orderByUpdated = false,
                     showArchived = false,
                     collapsedSections = setOf("ws1"),
-                    onGroupByWorkspace = {},
+                    onGrouping = {},
                     onOrderByUpdated = {},
                     onShowArchived = {},
                     onCollapsedSections = {},

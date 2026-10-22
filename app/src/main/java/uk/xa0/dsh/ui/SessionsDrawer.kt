@@ -80,8 +80,11 @@ import androidx.compose.ui.unit.dp
 import uk.xa0.dsh.PendingKind
 import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
+import uk.xa0.dsh.model.DrawerGrouping
+import uk.xa0.dsh.model.WorkspaceTreeNode
 import uk.xa0.dsh.model.holdOrder
 import uk.xa0.dsh.model.scheduledTaskMarkLabel
+import uk.xa0.dsh.model.workspaceForest
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.WorkspaceCopy
 import uk.xa0.dsh.model.WorkspaceGroupState
@@ -179,6 +182,34 @@ private data class Section(
      * whose count is always the rows drawn. See `workspaceCountLabel`.
      */
     val countLabel: String? = null,
+    /**
+     * How many registered Workspaces this one is nested under, in the web's Workspace
+     * Tree; 0 in every other mode and for the groups that are not Workspaces.
+     *
+     * This is a count of *registered ancestors*, not of path segments, and it is what
+     * the header and its session rows indent by. The web indents only the contents
+     * (`--dsh-workspace-indent`), leaving the row's fill and hit target full width.
+     */
+    val depth: Int = 0,
+    /**
+     * The Workspaces registered beneath this one, in registry order.
+     *
+     * The web's `renderGroup` draws a group's children *before* the group's own
+     * sessions (`children: childRows` precedes the session rows in `lib/client.js`),
+     * so the drawer walks this list between the header and [rows]. Empty in the
+     * sibling-Workspace and flat modes, where every group is a root.
+     */
+    val children: List<Section> = emptyList(),
+    /**
+     * Whether the session on screen lives in a *descendant* Workspace — the web's
+     * `containsCurrentDescendant`, passed to an ancestor's header so its folder stays
+     * highlighted even when the descendant (or the ancestor itself) is folded.
+     *
+     * Kept separate from [containsCurrent] because the two answer different questions
+     * ("this directory holds the open session" versus "something below it does") and
+     * are combined only at the point that paints the glyph.
+     */
+    val containsCurrentDescendant: Boolean = false,
 )
 
 /** A session plus its nesting depth, so subagents indent under their parent. */
@@ -193,9 +224,12 @@ private data class TreeRow(val session: SessionItem, val depth: Int)
  * path, and sessions outside every workspace belong to a bucket the host calls
  * "Ungrouped" (see `ui-workspace/locales.ts`).
  *
- * The view options mirror the host's own: Group by WorkSpace/List and Order by
- * Manual/Last updated, with per-section paging so a 20-session workspace does not
- * bury the rest of the list.
+ * The view options mirror the host's own: Group by WorkSpace / Workspace Tree / List
+ * and Order by Manual/Last updated, with per-section paging so a 20-session
+ * workspace does not bury the rest of the list. **Workspace Tree nests Workspaces,
+ * not sessions** — each Workspace sits under its nearest *registered* ancestor
+ * directory and keeps its own sessions, exactly as the web's "Workspace Tree" does.
+ * See `model/WorkspaceTree.kt` for the source reading and the derivation.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -266,8 +300,11 @@ fun SessionsDrawer(
      * The persisted Group/Order modes. Passed in rather than held here: they are
      * client-local preferences, so the ViewModel owns them and a cold start
      * restores the user's last choice.
+     *
+     * [grouping] is the web's own three-way choice rather than a pair of booleans,
+     * because "flat" and "tree" are alternatives, not independent switches.
      */
-    groupByWorkspace: Boolean,
+    grouping: DrawerGrouping,
     orderByUpdated: Boolean,
     /**
      * Whether archived sessions are listed. Owned by the caller rather than this
@@ -284,7 +321,7 @@ fun SessionsDrawer(
      * navigation within one visit rather than a view the user chose to keep.
      */
     collapsedSections: Set<String>,
-    onGroupByWorkspace: (Boolean) -> Unit,
+    onGrouping: (DrawerGrouping) -> Unit,
     onOrderByUpdated: (Boolean) -> Unit,
     onShowArchived: (Boolean) -> Unit,
     onCollapsedSections: (Set<String>) -> Unit,
@@ -452,7 +489,7 @@ fun SessionsDrawer(
         workspaces,
         workspacesPhase,
         currentId,
-        groupByWorkspace,
+        grouping,
         orderByUpdated,
         showArchived,
         expandedSessions,
@@ -513,7 +550,7 @@ fun SessionsDrawer(
         // roster unchanged, and there is no automation section.
         val conversations = matched
 
-        if (!groupByWorkspace) {
+        if (!grouping.groupsByWorkspace) {
             val ordered = holdOrder(conversations, heldOrder)
             val sections = arrayListOf(
                 Section(
@@ -527,65 +564,104 @@ fun SessionsDrawer(
         }
 
         val claimed = HashSet<String>()
-        val result = ArrayList<Section>()
 
-        workspaces.forEach { workspace ->
+        /**
+         * One registered Workspace as a [Section], with its nested Workspaces built
+         * first so this header can see what they found.
+         *
+         * Every Workspace the registry reports is drawn, always: a Workspace whose
+         * members are all hidden by the Archived switch (or by the subagent rule) is
+         * still a directory that exists, and hiding it meant a persisted filter could
+         * erase it from the sidebar with nothing on screen to say why. That is a
+         * deliberate divergence from the web's `deriveGroups`, which drops a group
+         * with no visible members; see `model/WorkspaceGroups.kt` and
+         * `docs/PARITY.md`. It also means the web's re-parenting of a dropped
+         * Workspace's children to the nearest *shown* ancestor has no work to do here
+         * — every parent is shown.
+         *
+         * The three zero-row cases are not the same claim, and the sidebar must not
+         * draw them alike: "this directory accounts for no session" is a fact the
+         * registry supplied, "its sessions have not arrived" is not, and "its sessions
+         * are all filtered out" is a fact about this drawer rather than about the
+         * directory. [workspaceGroupState] keeps them apart and the group header plus
+         * its placeholder say which one it is.
+         *
+         * A tap keeps the one meaning a header has everywhere else — fold/unfold — so
+         * nothing here reveals the hidden members: on this client's own registry
+         * turning Archived on pours hundreds of rows into the list, and a folder glyph
+         * that sometimes folds and sometimes rewrites a global filter is two controls
+         * wearing one icon. The Archived switch beside the query box is the control for
+         * that, and it is already labelled.
+         */
+        fun buildWorkspace(node: WorkspaceTreeNode): Section {
+            val workspace = node.workspace
             val claimedIds = workspace.sessionIds
             var items = claimedIds.mapNotNull { byId[it] }
             // Manual order is the host's (`workspace.sessionIds`) and does not move
             // on its own, so only the newest-first view needs holding.
             if (orderByUpdated) items = holdOrder(items, heldOrder)
             claimed += claimedIds
-            // Every Workspace the registry reports is drawn, always: a Workspace whose
-            // members are all hidden by the Archived switch (or by the subagent rule) is
-            // still a directory that exists, and hiding it meant a persisted filter could
-            // erase it from the sidebar with nothing on screen to say why. That is a
-            // deliberate divergence from the web's `deriveGroups`, which drops a group
-            // with no visible members; see `model/WorkspaceGroups.kt` and
-            // `docs/PARITY.md`.
-            //
-            // The three zero-row cases are not the same claim, though, and the sidebar
-            // must not draw them alike: "this directory accounts for no session" is a fact
-            // the registry supplied, "its sessions have not arrived" is not, and "its
-            // sessions are all filtered out" is a fact about this drawer rather than about
-            // the directory. [workspaceGroupState] keeps them apart and the group header
-            // plus its placeholder say which one it is.
-            //
-            // A tap keeps the one meaning a header has everywhere else — fold/unfold — so
-            // nothing here reveals the hidden members: on this client's own registry
-            // turning Archived on pours hundreds of rows into the list, and a folder glyph
-            // that sometimes folds and sometimes rewrites a global filter is two controls
-            // wearing one icon. The Archived switch beside the query box is the control for
-            // that, and it is already labelled.
-            val state = workspaceGroupState(
-                memberIds = workspace.sessionIds,
-                visibleIds = items.map { it.id },
-                knownIds = known.keys,
-            )
-            result += Section(
+            val children = node.children.map { buildWorkspace(it) }
+            val ownRun = workspaceRunState(claimedIds, live)
+            // A folded ancestor hides the child Workspace whose blue would otherwise
+            // be the only sign of live work, so the header takes its subtree's answer.
+            // This is `liveWorkIds`'s existing argument one level further up: the same
+            // reason a running subagent already lights the folder it was delegated
+            // from. The *count* stays the group's own members, because that is what
+            // the number beside the header has always counted and what `workspaceCountLabel`
+            // reports; a subtree total would count one session under two headers.
+            val subtreeRunning = ownRun == WorkspaceRunState.Running ||
+                children.any { it.run == WorkspaceRunState.Running }
+            return Section(
                 key = workspace.id,
                 title = workspace.title,
                 rows = items.flatMap { disclose(it) },
                 createIn = workspace.id,
-                state = state,
-                containsCurrent = currentId != null && currentId in workspace.sessionIds,
+                state = workspaceGroupState(
+                    memberIds = claimedIds,
+                    visibleIds = items.map { it.id },
+                    knownIds = known.keys,
+                ),
+                containsCurrent = currentId != null && currentId in claimedIds,
+                // The web's `containsCurrentDescendant`: an ancestor's folder stays
+                // highlighted while a descendant holds the open session, even with
+                // the ancestor folded.
+                containsCurrentDescendant = children.any {
+                    it.containsCurrent || it.containsCurrentDescendant
+                },
                 // Read from the members the *section* accounts for. Unfiltered on
                 // purpose: a running member the Archived switch has hidden still makes
                 // this directory a place where work is happening. A member the roster never
                 // delivered is absent for this question — see `workspaceRunState`.
-                run = workspaceRunState(claimedIds, live),
+                run = if (subtreeRunning) WorkspaceRunState.Running else WorkspaceRunState.Idle,
                 // The one place incomplete membership is stated. Decided from the same
                 // unfiltered membership as the run state, and drawn whether the group is folded
                 // or open, so the reader never has to open a directory to learn that the client
                 // is not showing all of it.
-                countLabel = workspaceCountLabel(items.size, workspace.sessionIds, known.keys),
+                countLabel = workspaceCountLabel(items.size, claimedIds, known.keys),
+                depth = node.depth,
+                children = children,
             )
         }
+
+        // In the sibling mode every Workspace is its own root, in registry order; in
+        // tree mode the forest is the web's `parents` map walked from its roots. The
+        // two modes share the same Section, derivation, collapse set and rows — only
+        // the parent links differ, which is why this is one engine rather than two.
+        val roots = if (grouping.nestsWorkspaces) {
+            workspaceForest(workspaces)
+        } else {
+            workspaces.map { WorkspaceTreeNode(it, 0, emptyList()) }
+        }
+        val result = ArrayList<Section>(roots.size + 1)
+        roots.forEach { root -> result += buildWorkspace(root) }
 
         // Sessions outside every Workspace. The host labels this "Ungrouped" — a claim
         // that needs the registry, because until the baseline lands a session on this
         // screen may well belong to a Workspace this client has not been told about.
-        // It has no manual order of its own, so it is always newest-first.
+        // It has no manual order of its own, so it is always newest-first. In tree mode
+        // it is a root after the registered Workspaces, as the web's `groupByWorkspace`
+        // appends it; it is not nested, because no registered directory owns it.
         val rest = holdOrder(conversations.filterNot { it.id in claimed }, heldOrder)
         if (rest.isNotEmpty()) {
             result += Section(
@@ -719,7 +795,7 @@ fun SessionsDrawer(
         val newShape = RoundedCornerShape(DshRadius.card)
         // The button's own visibility gates the separator below it: in the common
         // case there is no button, so there is nothing to separate from the field.
-        val showNewButton = !groupByWorkspace || workspaces.isEmpty()
+        val showNewButton = !grouping.groupsByWorkspace || workspaces.isEmpty()
         if (showNewButton) {
         Row(
             Modifier
@@ -836,9 +912,33 @@ fun SessionsDrawer(
 
         Spacer(Modifier.height(DshSpacing.sm))
 
+        // The web's Group by menu, as three chips rather than three menu rows: the
+        // drawer is 300dp wide and this row has ~232dp for its choices after the
+        // label. "Workspace Tree" does not fit between its neighbours at the app's
+        // 11sp chip size (the two full labels already take most of the row), so the
+        // middle chip is "Tree" — the same abbreviation the app already makes for
+        // the web's "In one list" ("List"). Its full name is the chip's accessibility
+        // label, and the visible order matches the web's menu: WorkSpace, Tree, List.
         OptionRow("Group") {
-            MiniChoice("WorkSpace", groupByWorkspace) { onGroupByWorkspace(true) }
-            MiniChoice("List", !groupByWorkspace) { onGroupByWorkspace(false) }
+            MiniChoice(
+                label = "WorkSpace",
+                selected = grouping == DrawerGrouping.WORKSPACE,
+                testTag = GROUP_WORKSPACE_TAG,
+                onClick = { onGrouping(DrawerGrouping.WORKSPACE) },
+            )
+            MiniChoice(
+                label = "Tree",
+                selected = grouping == DrawerGrouping.TREE,
+                testTag = GROUP_TREE_TAG,
+                contentDescription = "Workspace Tree",
+                onClick = { onGrouping(DrawerGrouping.TREE) },
+            )
+            MiniChoice(
+                label = "List",
+                selected = grouping == DrawerGrouping.FLAT,
+                testTag = GROUP_LIST_TAG,
+                onClick = { onGrouping(DrawerGrouping.FLAT) },
+            )
         }
         OptionRow("Order") {
             MiniChoice("Manual", !orderByUpdated) { onOrderByUpdated(false) }
@@ -917,10 +1017,21 @@ fun SessionsDrawer(
             // (below) is the whole story and a second one would be noise. Drawn only in
             // the grouped view, and deliberately not tappable: there is no group to fold
             // yet.
-            if (groupByWorkspace && workspacesPhase == WorkspaceListPhase.Pending && sessions.isNotEmpty()) {
+            if (grouping.groupsByWorkspace && workspacesPhase == WorkspaceListPhase.Pending && sessions.isNotEmpty()) {
                 item(key = "workspaces-pending") { PendingWorkspaceRow() }
             }
-            sections.forEach { section ->
+            /**
+             * Draw one section: its header, then its nested Workspaces, then its own
+             * sessions — the web's `renderGroup` order. Recursive rather than a flat
+             * loop because a child Workspace's rows belong between the parent's
+             * header and the parent's own sessions.
+             *
+             * A folded section hides both its rows and its children, exactly as the
+             * web's `childRows` is empty while the group is collapsed. A group with
+             * no own rows states why *before* its children: "No sessions" placed
+             * after a nested child would read as a claim about the whole subtree.
+             */
+            fun LazyListScope.drawGroup(section: Section) {
                 val isCollapsed = section.key in collapsedSections
                 val isExpanded = section.key in expandedSections
                 val shown = when {
@@ -949,8 +1060,9 @@ fun SessionsDrawer(
                         count = count,
                         collapsed = isCollapsed,
                         icon = section.icon,
-                        containsCurrent = section.containsCurrent,
+                        containsCurrent = section.containsCurrent || section.containsCurrentDescendant,
                         run = section.run,
+                        depth = section.depth,
                         onClick = {
                             onCollapsedSections(
                                 if (isCollapsed) {
@@ -966,65 +1078,73 @@ fun SessionsDrawer(
                     )
                 }
 
-                if (!isCollapsed) {
-                    items(count = shown.size, key = { index -> shown[index].session.id }) { index ->
-                        val row = shown[index]
-                        SessionRow(
-                            session = row.session,
-                            depth = row.depth,
-                            selected = row.session.id == currentId,
-                            archived = row.session.id in archivedSessionIds,
-                            completedSessionIds = completedSessionIds,
-                            pending = pendingInteractions[row.session.id],
-                            rollup = rollups[row.session.id],
-                            expanded = row.session.id in expandedSessions,
-                            onToggleSubagents = {
-                                val expanding = row.session.id !in expandedSessions
-                                expandedSessions = if (expanding) {
-                                    expandedSessions + row.session.id
-                                } else {
-                                    expandedSessions - row.session.id
-                                }
-                                onSubagentCatalogOpen(row.session.id, expanding)
+                if (isCollapsed) return
+
+                // What a group with nothing in it means, in words. This is the row
+                // that keeps "this Workspace has no sessions", "its sessions are all
+                // hidden by the drawer's filters" and "its sessions have not been
+                // loaded" apart: those three states draw differently here and, while
+                // membership is unknown, in the header's count — and nowhere else on
+                // screen are they distinguishable at all.
+                section.state?.placeholder?.let { note ->
+                    item(key = "note-${section.key}") { GroupNoteRow(note) }
+                }
+
+                // Child Workspaces, before this group's own sessions (web `renderGroup`).
+                section.children.forEach { child -> this.drawGroup(child) }
+
+                items(count = shown.size, key = { index -> shown[index].session.id }) { index ->
+                    val row = shown[index]
+                    SessionRow(
+                        session = row.session,
+                        depth = row.depth,
+                        // Registered ancestry is drawn on the same row as subagent
+                        // depth; the web cascades one indent per level through both.
+                        workspaceDepth = section.depth,
+                        selected = row.session.id == currentId,
+                        archived = row.session.id in archivedSessionIds,
+                        completedSessionIds = completedSessionIds,
+                        pending = pendingInteractions[row.session.id],
+                        rollup = rollups[row.session.id],
+                        expanded = row.session.id in expandedSessions,
+                        onToggleSubagents = {
+                            val expanding = row.session.id !in expandedSessions
+                            expandedSessions = if (expanding) {
+                                expandedSessions + row.session.id
+                            } else {
+                                expandedSessions - row.session.id
+                            }
+                            onSubagentCatalogOpen(row.session.id, expanding)
+                        },
+                        onClick = { onSelect(row.session.id) },
+                        onRename = { renaming = row.session },
+                        onFork = { onFork(row.session.id) },
+                        onArchive = { onArchive(row.session.id) },
+                        onUnarchive = { onUnarchive(row.session.id) },
+                    )
+                }
+
+                if (hidden > 0 || isExpanded) {
+                    item(key = "more-${section.key}") {
+                        ShowMoreRow(
+                            label = if (isExpanded) {
+                                "Show less"
+                            } else {
+                                "Show $hidden more session${if (hidden == 1) "" else "s"}"
                             },
-                            onClick = { onSelect(row.session.id) },
-                            onRename = { renaming = row.session },
-                            onFork = { onFork(row.session.id) },
-                            onArchive = { onArchive(row.session.id) },
-                            onUnarchive = { onUnarchive(row.session.id) },
-                        )
-                    }
-
-                    // What a group with nothing in it means, in words. This is the row
-                    // that keeps "this Workspace has no sessions", "its sessions are all
-                    // hidden by the drawer's filters" and "its sessions have not been
-                    // loaded" apart: those three states draw differently here and, while
-                    // membership is unknown, in the header's count — and nowhere else on
-                    // screen are they distinguishable at all.
-                    section.state?.placeholder?.let { note ->
-                        item(key = "note-${section.key}") { GroupNoteRow(note) }
-                    }
-
-                    if (hidden > 0 || isExpanded) {
-                        item(key = "more-${section.key}") {
-                            ShowMoreRow(
-                                label = if (isExpanded) {
-                                    "Show less"
+                            onClick = {
+                                expandedSections = if (isExpanded) {
+                                    expandedSections - section.key
                                 } else {
-                                    "Show $hidden more session${if (hidden == 1) "" else "s"}"
-                                },
-                                onClick = {
-                                    expandedSections = if (isExpanded) {
-                                        expandedSections - section.key
-                                    } else {
-                                        expandedSections + section.key
-                                    }
-                                },
-                            )
-                        }
+                                    expandedSections + section.key
+                                }
+                            },
+                        )
                     }
                 }
             }
+
+            sections.forEach { section -> this.drawGroup(section) }
         }
 
         Box(
@@ -1235,6 +1355,13 @@ private fun LazyListScope.searchResults(
 private fun ProjectRow(
     title: String,
     /**
+     * How many registered Workspaces this one is nested under: the header indents
+     * its contents by 12dp per level, the web's `--dsh-workspace-indent` step. The
+     * indent sits inside the row's fill and tap target, so every level's row is the
+     * same width to hit and only its contents move.
+     */
+    depth: Int = 0,
+    /**
      * The count column, already decided: the sessions drawn under this header, or
      * "[shown] of [accounted]" when the roster has not delivered every member the registry
      * accounts. Never blank, which is the whole point: a folded group shows this without its
@@ -1271,7 +1398,7 @@ private fun ProjectRow(
             .height(34.dp)
             .clip(RoundedCornerShape(DshRadius.md))
             .clickableNoRipple(onClick = onClick)
-            .padding(end = DshSpacing.md)
+            .padding(start = (depth * 12).dp, end = DshSpacing.md)
             .semantics {
                 when (run) {
                     WorkspaceRunState.Running -> stateDescription = WorkspaceCopy.RUNNING
@@ -1419,6 +1546,12 @@ private fun PendingWorkspaceRow() {
 private fun SessionRow(
     session: SessionItem,
     depth: Int,
+    /**
+     * How many registered Workspaces the row's section is nested under. A session
+     * inherits its Workspace's indent (the web cascades `--dsh-workspace-indent` to
+     * the session rows), and a disclosed subagent adds its own step on top.
+     */
+    workspaceDepth: Int = 0,
     selected: Boolean,
     archived: Boolean,
     completedSessionIds: Set<String>,
@@ -1440,12 +1573,17 @@ private fun SessionRow(
         Modifier
             .fillMaxWidth()
             .height(32.dp)
-            // Subagents nest one indent step per level under their parent.
-            .padding(start = DshSpacing.lg + (depth * 14).dp)
             .clip(shape)
             .background(if (selected) colors.sidebarItemActive else colors.sidebarFill)
             .clickableNoRipple(onClick = onClick)
-            .padding(horizontal = DshSpacing.md),
+            // Subagents nest one step per level under their parent, and a Workspace's
+            // sessions inherit their registered ancestry's indent. The indent is inside
+            // the fill and the hit target (the web's rule: only the contents move), so
+            // a selected row's band still spans the drawer at every depth.
+            .padding(
+                start = DshSpacing.lg + DshSpacing.md + (depth * 14).dp + (workspaceDepth * 12).dp,
+                end = DshSpacing.md,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -1706,10 +1844,34 @@ private fun OptionRow(label: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun MiniChoice(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun MiniChoice(
+    label: String,
+    selected: Boolean,
+    /**
+     * A stable identity for tests. The three Group chips are one-character
+     * differences apart in a screenshot, and their labels are shortened for width,
+     * so the tag is what a test can address without depending on either.
+     */
+    testTag: String? = null,
+    /**
+     * The web's full name for a chip whose visible label had to be shortened;
+     * null when the visible text already says it.
+     */
+    contentDescription: String? = null,
+    onClick: () -> Unit,
+) {
     val colors = DshTheme.colors
+    val description = contentDescription
     Box(
         Modifier
+            .then(if (testTag == null) Modifier else Modifier.testTag(testTag))
+            .then(
+                if (description == null) {
+                    Modifier
+                } else {
+                    Modifier.semantics { this.contentDescription = description }
+                },
+            )
             .padding(end = DshSpacing.lg)
             .clip(RoundedCornerShape(DshRadius.sm))
             .background(if (selected) colors.accentTertiary else colors.sidebarFill)
@@ -1729,6 +1891,11 @@ private fun MiniChoice(label: String, selected: Boolean, onClick: () -> Unit) {
  * names the reason, which varies, so the tag is what identifies the node.
  */
 const val SESSIONS_STALE_TAG = "drawer-sessions-stale"
+
+/** The three Group chips; "Tree" is the web's "Workspace Tree" (see the row's comment). */
+const val GROUP_WORKSPACE_TAG = "drawer-group-workspace"
+const val GROUP_TREE_TAG = "drawer-group-tree"
+const val GROUP_LIST_TAG = "drawer-group-list"
 
 private const val UNGROUPED = "__ungrouped__"
 private const val FLAT = "__flat__"

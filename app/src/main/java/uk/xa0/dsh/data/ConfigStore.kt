@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import uk.xa0.dsh.model.DrawerGrouping
 import uk.xa0.dsh.net.AcceptedCert
 import uk.xa0.dsh.net.CertTrust
 import uk.xa0.dsh.term.TerminalCellSize
@@ -49,11 +50,12 @@ data class DshConfig(
      */
     val busyEnter: String = BusyEnter.QUEUE,
     /**
-     * Sidebar Group mode: Workspaces (`true`) or one flat list. A client-local
-     * preference like [busyEnter] — the host has no settings scope a phone can
-     * write, and the sidebar's shape is a property of this client anyway.
+     * Sidebar Group mode: sibling Workspaces, the Workspace Tree, or one flat list —
+     * the web's own three-way `Group by`. A client-local preference like [busyEnter]:
+     * the host has no settings scope a phone can write, and the sidebar's shape is a
+     * property of this client anyway. See [DrawerGrouping].
      */
-    val drawerGroupByWorkspace: Boolean = true,
+    val drawerGrouping: DrawerGrouping = DrawerGrouping.WORKSPACE,
     /** Sidebar Order mode: last updated (`true`) or the Workspace's manual order. */
     val drawerOrderByUpdated: Boolean = false,
     /**
@@ -182,7 +184,15 @@ class ConfigStore(context: Context) {
         themeMode = prefs.getString(KEY_THEME, ThemeMode.SYSTEM) ?: ThemeMode.SYSTEM,
         agentPreset = prefs.getString(KEY_PRESET, "").orEmpty(),
         busyEnter = prefs.getString(KEY_BUSY_ENTER, BusyEnter.QUEUE) ?: BusyEnter.QUEUE,
-        drawerGroupByWorkspace = prefs.getBoolean(KEY_DRAWER_GROUP, true),
+        // The three-way mode is stored under the web's own ids. The old boolean key
+        // is still read when the new one is absent, so an upgrade keeps the reader's
+        // last choice instead of jumping back to sibling Workspaces.
+        drawerGrouping = DrawerGrouping.fromStored(prefs.getString(KEY_DRAWER_GROUPING, null))
+            ?: if (prefs.getBoolean(KEY_DRAWER_GROUP, true)) {
+                DrawerGrouping.WORKSPACE
+            } else {
+                DrawerGrouping.FLAT
+            },
         drawerOrderByUpdated = prefs.getBoolean(KEY_DRAWER_ORDER, false),
         drawerShowArchived = prefs.getBoolean(KEY_DRAWER_ARCHIVED, false),
         // `getStringSet` hands back the set the prefs object is still using, so a
@@ -212,7 +222,10 @@ class ConfigStore(context: Context) {
             .putString(KEY_THEME, config.themeMode)
             .putString(KEY_PRESET, config.agentPreset)
             .putString(KEY_BUSY_ENTER, config.busyEnter)
-            .putBoolean(KEY_DRAWER_GROUP, config.drawerGroupByWorkspace)
+            .putString(KEY_DRAWER_GROUPING, config.drawerGrouping.stored)
+            // Keep the old key meaningful for a downgrade: a tree is still grouped,
+            // so an older build opens on sibling Workspaces rather than the flat list.
+            .putBoolean(KEY_DRAWER_GROUP, config.drawerGrouping.groupsByWorkspace)
             .putBoolean(KEY_DRAWER_ORDER, config.drawerOrderByUpdated)
             .putBoolean(KEY_DRAWER_ARCHIVED, config.drawerShowArchived)
             // The same aliasing hazard in reverse: `apply` may keep a reference to
@@ -242,6 +255,7 @@ class ConfigStore(context: Context) {
         const val KEY_PRESET = "preset"
         const val KEY_BUSY_ENTER = "busy_enter"
         const val KEY_DRAWER_GROUP = "drawer_group_by_workspace"
+        const val KEY_DRAWER_GROUPING = "drawer_grouping"
         const val KEY_DRAWER_ORDER = "drawer_order_by_updated"
         const val KEY_DRAWER_ARCHIVED = "drawer_show_archived"
         const val KEY_DRAWER_COLLAPSED = "drawer_collapsed_sections"

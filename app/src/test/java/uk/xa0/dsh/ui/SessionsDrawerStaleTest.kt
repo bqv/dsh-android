@@ -10,6 +10,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import uk.xa0.dsh.SessionItem
+import uk.xa0.dsh.model.DrawerGrouping
 import uk.xa0.dsh.model.WorkspaceListPhase
 import uk.xa0.dsh.model.sessionListErrorNote
 import uk.xa0.dsh.scroll.HarnessApplication
@@ -63,11 +64,11 @@ class SessionsDrawerStaleTest {
                     onRefresh = {},
                     onSettings = {},
                     onAbout = {},
-                    groupByWorkspace = false,
+                    grouping = DrawerGrouping.FLAT,
                     orderByUpdated = false,
                     showArchived = true,
                     collapsedSections = emptySet(),
-                    onGroupByWorkspace = {},
+                    onGrouping = {},
                     onOrderByUpdated = {},
                     onShowArchived = {},
                     onCollapsedSections = {},
