@@ -52,6 +52,7 @@ class SessionsDrawerTreeTest {
         cwd = cwd,
         updatedAt = 1_000L,
         running = running,
+        isSubagent = false,
     )
 
     private fun workspace(id: String, path: String, vararg sessionIds: String) = WorkspaceItem(
