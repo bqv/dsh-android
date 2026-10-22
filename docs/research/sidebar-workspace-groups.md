@@ -481,6 +481,116 @@ measurable in the JVM harness, so the tests assert the states and the strings th
 from; a wrong token in `ui/SessionsDrawer.kt` would pass every test here. The phone evidence is the
 log ring buffer read over `adb`, not a screenshot.
 
+## Workspace Tree: what the web actually has (2026-10-22)
+
+Request: "drawer should also support the webui's tree-mode". The first job was to
+find out what that mode *is*, because the app's premise is mirroring the web and a
+plausible tree that differs from it is worse than no tree.
+
+**It is a hierarchy of Workspaces, not of sessions.** It is not a `parentSessionId`
+lineage, not a tree of the `cwd` path, and not a subagent grouping. Read from the
+running host's bundles in
+`/usr/lib64/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/`:
+
+* `dsh-client-ui-workspace/lib/client.js` — the View options menu's Group by block
+  has three items in this order: `workspace` ("WorkSpace"), `workspace-tree`
+  ("Workspace Tree") and `flat` ("In one list"), each with its own icon. The
+  browser passes `nestWorkspaces: groupBy === "workspace-tree"` to its session
+  tree, so the two non-tree modes share one flat-group derivation.
+* `dsh-client-ui-workspace/lib/types/client/tree.d.ts` — `deriveGroups` returns
+  `GroupNode`s (one per Workspace, plus `UNGROUPED_KEY = ""`); the only hierarchy
+  helper is `owningParentFolder(path, parents)`, documented as "Find the nearest
+  registered ancestor, excluding the Workspace directory itself".
+* `dsh-client-ui-workspace/lib/client.js` — `owningParentFolder` normalises
+  separators for drive-qualified and UNC paths only, drops trailing slashes,
+  matches case-sensitively, and takes the longest strict prefix ending on `/`.
+  `SessionTree` builds `parents` from it, then `childrenByParent`, then renders
+  `renderGroup` recursively with `childRows` between the header and the group's
+  own session rows. The indent is a CSS variable:
+  `--dsh-workspace-indent: ${depth * 12}px`, consumed by `ProjectRow`'s
+  `padding-inline-start` *inside* the row's fill, and cascaded to session rows.
+* `dsh-client-ui-workspace/README.md`, "Workspace hierarchy" — the prose contract:
+  each Workspace keeps its own sessions and row actions; child Workspaces appear
+  before the parent's own sessions; ancestors start expanded unless a saved
+  collapsed state exists; a saved collapse also hides the current session;
+  ancestor folder icons stay highlighted when a descendant holds it; row fills and
+  hit targets span the same width at every level and only the contents indent;
+  search-result navigation expands every ancestor; grouping and expansion are
+  saved and switching modes preserves each Workspace's expansion preference;
+  hierarchy uses registered canonical paths only (no project scanning, no symlink
+  resolution), and nesting changes no working directory, log, or membership.
+  Deleting a parent leaves children registered and re-parented to the next
+  registered ancestor.
+* Archived filter: the web's three-way filter (`default`/`show`/`only`) can drop a
+  group with no visible members; the renderer re-parents a dropped group's
+  children to the nearest *shown* ancestor. This app has a two-way Archived switch
+  and deliberately draws every registered Workspace (see "Every Workspace draws,
+  always" above), so there is no dropped parent to re-parent.
+
+What each web node shows: the Workspace row is folder glyph (open/closed),
+chevron, title, and hover-only rename/delete plus new-session actions. There is
+**no member count** on a Workspace header in the web (`GroupNode.sessionCount`
+exists but the renderer never draws it). Session rows are the ordinary rows,
+indented by their Workspace's depth.
+
+### What the app built
+
+* `model/WorkspaceTree.kt` ports `owningParentFolder`, the parent map and the
+  forest, with the same path rules and the same registry order for roots and
+  siblings. `DrawerGrouping` is the web's three modes, persisted under the web's
+  own ids (`workspace`, `workspace-tree`, `flat`). The old boolean preference is
+  still read when the new key is absent, so an upgrade keeps the reader's choice.
+* The drawer's one `Section` derivation is reused; tree mode only adds parent
+  links. Children are drawn between the header and the group's own sessions,
+  with the same paging, collapse, count, placeholder, folder tint, run tint and
+  clock mark as before. The persisted `collapsedSections` set is shared by the
+  sibling and tree modes, which is the web's "switching modes preserves each
+  Workspace's expansion preference".
+* Indent: 12dp per registered level for both the header and its session rows,
+  applied inside the row's fill and tap target. The existing subagent indent
+  (14dp) is added on top of it.
+* The Group control is still one `MiniChoice` row. The web's three labels do not
+  all fit a 300dp drawer at 11sp, so the visible chips are `WorkSpace`, `Tree`,
+  `List`; "Tree" is the app's abbreviation of "Workspace Tree" (as "List" already
+  abbreviates "In one list") and its accessibility label is the full web name.
+  Order is the web's: WorkSpace, Tree, List.
+* Decisions copied from the web: what nests (registered directories, by path);
+  which ancestor wins (nearest); children before own sessions; 12-step indent;
+  ancestors expanded by default (this app's existing default is every section
+  expanded, which already satisfies it); ancestor folders tinted for a descendant;
+  folding hides children; Ungrouped is a root after the registered Workspaces.
+* Decisions that are the app's own, and why:
+  * the header count stays a Workspace's own drawable sessions (the app has always
+    drawn one; a subtree total would count one session under two headers);
+  * the blue title extends to an ancestor whose descendant is running, because a
+    folded ancestor would otherwise hide the only live-work signal — the same
+    argument that already puts a running subagent's work on its parent's folder;
+  * every Workspace draws even when the archive filter hides all its members, so
+    a nested directory is never erased by a persisted filter;
+  * a zero-own-row group's note ("No sessions" and the two other absences) is
+    drawn *before* its children, so it qualifies this header's own membership
+    rather than reading as a claim about the whole subtree.
+* Search is unchanged: a non-blank query replaces the browsing mode with one flat
+  merged result list in every mode, exactly as the web does.
+* Sessions in no Workspace stay in the Ungrouped bucket, drawn after the
+  registered roots, so the tree never silently drops them.
+
+Tests: `WorkspaceTreeTest` pins the path rules, the parent map, the forest shape
+and depth, and the stored mode ids. `SessionsDrawerTreeTest` pins the three chips,
+the nesting through layout bounds, the children-before-own-sessions order,
+folding, the Ungrouped bucket, an empty parent with a nested child, the archived
+filter leaving the tree standing, and the ancestor's blue reaching through a
+folded parent. The JVM harness cannot measure text or colour, so the 12dp step is
+asserted only as "the nested header is right of its parent" (a broken depth
+argument would fail; a wrong 10dp step would not), and the blue is asserted
+through the spoken `stateDescription`, not pixels.
+
+Unverified as of writing: nothing here was compiled or run — the orchestrating
+session runs the build and tests. No device was touched. The path rules were
+ported from the bundle's own function rather than exercised against a live
+registry (the live one may not contain a nested pair), and the a11y label of the
+middle chip was not read by TalkBack.
+
 ## Observed but out of scope
 
 The blank-"New Session" landing on `--es uk.xa0.dsh.session <id>` is fixed:

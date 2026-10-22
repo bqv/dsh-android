@@ -78,7 +78,30 @@ of where the app stands against them.
       `ui/SessionsDrawer.kt`, `SessionsDrawerRunningTest`); see
       `docs/research/sidebar-workspace-groups.md`
 - [x] **Ungrouped** bucket for sessions outside every workspace
-- [x] Group by: `WorkSpace` / `List`; Order by: `Manual` / `Updated` (persisted in `ConfigStore`)
+- [x] **Workspace Tree**, the web's third Group mode (its `groupBy.workspaceTree`,
+      labelled "Workspace Tree"). Each registered Workspace nests under its nearest
+      **registered ancestor directory** — the web's `owningParentFolder` over canonical
+      paths, case-sensitive, with no project scanning or symlink resolution — and keeps
+      its own sessions. Child Workspaces draw before the parent's own sessions; only the
+      contents indent (12dp per level, the web's `--dsh-workspace-indent`), so every
+      level's row keeps the same fill and tap width. A folded ancestor hides its nested
+      Workspaces, ancestors' folders stay tinted when a descendant holds the open
+      session (the web's `containsCurrentDescendant`), and an ancestor's title reads
+      blue when live work is anywhere in its subtree — the same argument that already
+      lets a running subagent light its parent, applied one level further up. A
+      Workspace's count stays its **own** drawable sessions, never a subtree total, so
+      one session cannot be counted under two headers. `Group` and the persisted
+      collapse set are shared with the sibling mode, so switching modes keeps each
+      Workspace's expansion. (`model/WorkspaceTree.kt`, `model/WorkspaceGroups.kt`,
+      `WorkspaceTreeTest`, `SessionsDrawerTreeTest`; source reading in
+      `docs/research/sidebar-workspace-groups.md`)
+- [x] Group by: `WorkSpace` / `Tree` / `List`; Order by: `Manual` / `Updated` (persisted
+      in `ConfigStore`, migrated from the old boolean key). The chips are the web's
+      three choices; the middle one is shortened from "Workspace Tree" to fit three
+      chips in the 300dp drawer, and carries the full name as its accessibility label —
+      the same abbreviation the app already makes for the web's "In one list". Search
+      replaces the browsing mode with one flat result list in every mode, as the web's
+      browser does.
 - [x] Per-section collapse + "Show N more sessions" / "Show less"
 - [x] Archived filter, and Restore on an archived row
 - [x] Subagents: never top-level rows (the web's `sessionVisible()` excludes them).
@@ -496,7 +519,15 @@ host settings write stays a value with a disabled control.
   hide; the web's `deriveGroups` drops a group with no visible members, which let a
   persisted Archived filter erase a directory from the sidebar. The group states which
   absence it is instead, and its header tap still only folds
-  (`model/WorkspaceGroups.kt`, `ui/SessionsDrawer.kt`).
+  (`model/WorkspaceGroups.kt`, `ui/SessionsDrawer.kt`). In the Workspace Tree this also
+  means the web's re-parenting of a dropped group's children to the nearest *shown*
+  ancestor never fires here: every registered parent is shown.
+- **The Workspace Tree's aggregate signals are the app's own.** The web renders no
+  count on a Workspace header at all, and its folder tint comes only from
+  `containsCurrent`/`containsCurrentDescendant`; the app keeps its per-Workspace count
+  (own sessions, with "[shown] of [accounted]" when the roster is short) and extends
+  the blue title to a running descendant. Both are the existing Android rules applied
+  to the existing sections, not a second presentation invented for the tree.
 
 ## Host traps that shape the client
 
