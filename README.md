@@ -536,10 +536,12 @@ is left alone.
   a model the session is not going to run. The chip reads the session's own `next`
   whenever it has one, and the new-session screen re-reads the catalog on entry because
   any other session or client can move that default while it is open.
-- One host-side limitation the app cannot fix: a waterfall is fanned out to
-  every registered `$events` client and settles only once each has answered, so
-  a Skip or an approval is decisive only while this app is the sole event client
-  (an open browser tab keeps it pending).
+- One host-side rule the app has to answer in the right vocabulary: a waterfall is
+  fanned out to every registered `$events` client, but the **first** `result` settles
+  it for all of them — only a `next` (a client declining, or handing the request back)
+  waits for the other clients. An answer, a skip and an approval are therefore
+  decisive from this app alone; the attention cap's hand-back is not, and an open
+  browser tab keeps the request pending.
 - The homescreen widget reports what the app knows, and the app only knows things
   while it has a socket. An approval that arrives after the process is gone is never
   on the card — it cannot be, because the host has already failed the waterfall by

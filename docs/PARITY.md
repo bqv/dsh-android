@@ -545,9 +545,11 @@ host settings write stays a value with a disabled control.
 - **Argument names are exact.** The gateway rejects both extra and missing keys with
   `gateway/arguments-invalid`, so `agent` where the host declares `agentId` kills the call
   loudly rather than silently.
-- **A waterfall is fanned to every registered `$events` client and settles only when each has
-  answered.** Registering once (which the app does) is necessary but not sufficient: a web tab
-  or a second device keeps it open, so Skip is only decisive when this app is the sole client.
+- **A waterfall is fanned to every registered `$events` client, but only a `next` waits for
+  each of them.** The first `result` settles it for all clients (`api-gateway`'s
+  `receiveRemoteEventResult`), so an answer, a skip or an approval is decisive from this app
+  alone; a web tab or a second device keeps a *hand-back* open, which is what the attention
+  timeouts send.
 - **`clientTimeZone` is only sent when it is `UTC` or an Area/Location name.** A device pinned
   to a fixed offset made the host reject the whole prompt with `session/invalid-time-zone`.
 - **`session/page` is the only back-pagination route**: `session/follow` opens with a bounded

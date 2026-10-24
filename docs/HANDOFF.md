@@ -191,12 +191,15 @@ editing the live copy. There is no install step to forget.
    `agentId` kills the call loudly. An endpoint that does not exist is the one
    case that fails quietly.
 6. **One `$events` registration.** The host fans a waterfall to every registered
-   event client and settles it only once each has answered, so a second
-   registration makes "Skip" and both attention timeouts unable to settle. The
-   single registration is owned by `AttentionCenter`, which relays
-   `api-session/status` to the ViewModel. Registering once is necessary but not
-   sufficient: a web tab or a second device keeps the waterfall open, so Skip is
-   only decisive when this app is the sole `$events` client.
+   event client, but the first `result` settles it for all of them; only a `next`
+   waits for the remaining clients (`api-gateway`'s `receiveRemoteEventResult`).
+   A second registration therefore makes the *hand-backs* — both attention
+   timeouts — unable to settle while another client holds the request, and it
+   makes two cards that can both answer one waterfall. The single registration is
+   owned by `AttentionCenter`, which relays `api-session/status` to the ViewModel.
+   Registering once is necessary but not sufficient for a hand-back: a web tab or a
+   second device keeps the request open. An answer, a skip or an approval is
+   decisive from this app alone, because all three are `result` outcomes.
 7. **`clientTimeZone` is only sent when it is `UTC` or an Area/Location name.** A
    device pinned to a fixed offset made the host reject the whole prompt with
    `session/invalid-time-zone`.
@@ -708,13 +711,17 @@ one.
   authorisation, and none was made. The 1.5 s and 3 s windows are chosen, not measured
   on a real link. A live check belongs on a throwaway session that approves nothing the
   user is running.
-- **The question path is still optimistic.** `answerQuestions` / `skipQuestions` clear
-  the question card and its notification on submit and never inspect the reply — the
-  same defect this change fixes for approvals, left in place because the fix needs its
-  own card states. The mux now hands that path the same send sink, so the work is a
-  second `ApprovalGate`-shaped machine rather than a second protocol change. It does not
-  get the roster either: a settled question now lingers exactly as a settled approval
-  used to.
+- **The question path is half optimistic.** `answerQuestions` still clears the card
+  and its notification on submit and never inspects the reply — the same defect this
+  change fixes for approvals, left in place because answers work and the fix needs its
+  own card states. `skipQuestions` no longer does: a skip is the one question outcome
+  the host can refuse outright, so its card stays up until the post is accepted, a
+  refusal is logged and drawn on the card (`PendingQuestionSet.notice`, with the wait
+  re-armed so Skip can be tried again), and only an accepted `result` takes the card
+  and its notification down. It still does not get the roster: a question the host
+  settled while the socket was down is not reconciled on a new generation, so its card
+  waits for a tap (which the host answers `ok` as a no-op) rather than going by itself.
+  A full `ApprovalGate`-shaped machine for answers is still the remaining work.
 - **The terminal readout is proven on the host and unproven on the phone.** The
   protocol was measured against both live routers with a websocket client
   (`~/tmp/routerprobe/readout.mjs`), the numbers are in the section above, and the app
