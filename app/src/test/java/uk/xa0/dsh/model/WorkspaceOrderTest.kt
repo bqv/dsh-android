@@ -81,10 +81,8 @@ class WorkspaceOrderTest {
 
     @Test
     fun `a last sibling's move down keeps the registry displacement to one step`() {
-        // `b` is the last child, followed in the flat registry by `r` and `tail`. The
-        // move must name the workspace after `b`'s next sibling — or append when that
-        // sibling is already last — never jump the moved row past unrelated roots
-        // further than the sibling swap requires.
+        // The last child of `p` has no down move at all: `b` is already where one
+        // would put it.
         val lastSibling = listOf(
             workspace("p", "/work/p"),
             workspace("a", "/work/p/a"),
@@ -92,6 +90,8 @@ class WorkspaceOrderTest {
         )
         assertNull(workspaceMoves(lastSibling, true, "b", WorkspaceMoveDirection.Down))
 
+        // With a root after the siblings, `a`'s down move names that root — the row
+        // after `b` — so `a` lands immediately after its sibling and nowhere else.
         val followed = listOf(
             workspace("p", "/work/p"),
             workspace("a", "/work/p/a"),

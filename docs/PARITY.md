@@ -585,7 +585,8 @@ Ordered by value, not by size:
 3. **Markdown gaps** — inline images, `@file` mention chips, citations, tags, mermaid/math.
 4. **Interrupted assistant tail tag** — a frozen partial block with `interrupted: true` has no
    tag; only the `turn/end` notices mark a cut-off turn.
-5. **Sidebar bottom fade + drag-to-reorder.**
+5. **Session drag-to-reorder + the sidebar's bottom fade.** Workspace reordering is
+   not in this list any more: it is the explicit Move up/Move down pair above.
 6. **Workspace rename/delete**, and the header seats the web has and the app does not:
    terminal recovery, schedule catalog, open-in-app.
 7. **`settings/*` / skills** — blocked on the host's `memory` scope, not on the UI.
