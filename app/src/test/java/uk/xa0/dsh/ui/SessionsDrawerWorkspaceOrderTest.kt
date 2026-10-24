@@ -27,12 +27,12 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * The Workspace header's reorder path without a menu.
  *
  * Touch reorders by dragging the header, which a Robolectric JVM cannot perform (the
- * long-press timing, the measured midpoints and the pointer capture are all device
- * behaviour). What this pins is the path that must survive beside it: the header's
- * custom accessibility actions, which are what TalkBack offers because it cannot
- * drag. It also pins that no visual menu is left, that the actions name the same
- * anchors `model/WorkspaceOrder.kt` derives, that an only child gets no actions, and
- * that the header still folds on a tap.
+ * long-press timing, the measured header midpoints, the frame clock and the pointer
+ * stream are all device behaviour). What this pins is the path that must survive
+ * beside it: the header's custom accessibility actions, which are what TalkBack
+ * offers because it cannot drag. It also pins that no visual menu is left, that the
+ * actions name the same anchors `model/WorkspaceOrder.kt` derives, that an only child
+ * gets no actions, and that the header still folds on a tap.
  *
  * The pure drag arithmetic (sibling scoping, the drop slot, the anchor) is
  * `model/WorkspaceDragTest`. What neither test can prove is that a real drag starts,
