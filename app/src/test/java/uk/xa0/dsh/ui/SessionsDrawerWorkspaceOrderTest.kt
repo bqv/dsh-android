@@ -38,7 +38,10 @@ import uk.xa0.dsh.ui.theme.DshTheme
  * host accepts or refuses a particular move.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], application = HarnessApplication::class)
+// A phone-sized surface, not the harness's 320x470 default: the drawer's chrome
+// already uses most of 470dp, and `performClick` injects a real touch that a control
+// below the fold would never receive. The popup also needs room to open downward.
+@Config(sdk = [34], application = HarnessApplication::class, qualifiers = "w411dp-h891dp")
 class SessionsDrawerWorkspaceOrderTest {
 
     @get:Rule

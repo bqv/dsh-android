@@ -11,8 +11,8 @@ import uk.xa0.dsh.WorkspaceItem
  *
  * The list these pin is the **registry** order — the one `workspace/insertBefore`
  * stores — not the `sessionIds` order inside one Workspace. Tree mode derives its
- * nesting from paths, so a move is sibling-scoped there; these tests pin that a child
- * can never be sent across its parent, because the anchor is always another child.
+ * nesting from paths, so a move is sibling-scoped there: it can change the order of
+ * children under one registered parent, but not which parent a child nests under.
  *
  * What a JVM cannot prove: that the host accepts a move, or that the drawer's
  * `remember` block passes the anchor this file computes. The pure rules and the
@@ -48,8 +48,8 @@ class WorkspaceOrderTest {
     @Test
     fun `tree mode scopes the pair to siblings, so a child cannot leave its parent`() {
         // Two roots and two children of `outer`. The registry order interleaves them,
-        // which is what makes the sibling scoping visible: `child1`'s move down must
-        // name its sibling, not the root that happens to follow it in the flat list.
+        // which is what makes the sibling scoping visible: `child2`'s move up must
+        // pass its sibling `child1`, not the unrelated root that sits between them.
         val list = listOf(
             workspace("outer", "/work"),
             workspace("child1", "/work/one"),
