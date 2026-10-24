@@ -609,7 +609,6 @@ The cold-start "Loading sessions…" wait is host latency: the live probe showed
 `fetchSessions` is two linear passes plus one subagent-catalog index, so it is not
 the quadratic cost.
 
-
 ## Workspace reordering (2026-10-24)
 
 The request was "i want to be able to reorder workspaces" — the Workspaces' own
@@ -641,7 +640,7 @@ The array is durable domain state (`workspaceIds` is "the authoritative display
 order", `dsh-workspace/lib/types/spec.d.ts:24-31`), so the order is the host's and
 two devices agree. Every commit publishes an `order` increment on `workspace/follow`
 (`dsh-api-workspace-controller/lib/index.js:99-113`), which the drawer already
-consumed.
+consumes.
 
 **Web.** `dsh-client-ui-workspace` does reorder Workspaces, but only by HTML5 drag:
 rows are `draggable` (`lib/client.js:1291-1297`), the group is a drop target
