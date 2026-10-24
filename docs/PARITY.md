@@ -135,11 +135,14 @@ of where the app stands against them.
       hidden-file toggle, new-folder flow, truncation notice. Opening registers it via
       `workspace/create` and adopts the created `workspaceId`
       (`DshViewModel.addWorkspace`, `ui/components/WorkspaceBrowser.kt`)
-- [x] Workspace reordering — `workspace/insertBefore` from each Workspace row's menu
-      ("Move up"/"Move down"), sibling-scoped in Tree mode. An explicit pair, not a
-      drag: the web's HTML5 drag does not exist on touch and the row's tap already
-      folds its section (`DshViewModel.moveWorkspace`, `model/WorkspaceOrder.kt`)
-- [ ] Bottom fade + drag-to-reorder (sessions; the Workspaces use the menu pair above)
+- [x] Workspace reordering — `workspace/insertBefore` by dragging a Workspace
+      header (long press, sibling-scoped in Tree mode), with the same pair attached
+      to the header as "Move up"/"Move down" custom accessibility actions for a
+      screen reader. No menu is drawn: the web's HTML5 drag does not exist on touch,
+      but a header drag fits the row that already folds on tap. A refused move snaps
+      back with a visible reason (`DshViewModel.moveWorkspace`,
+      `model/WorkspaceOrder.kt`, `model/WorkspaceDrag.kt`, `ui/WorkspaceDragGesture.kt`)
+- [ ] Bottom fade + drag-to-reorder (sessions; the Workspaces' header drag is above)
 - [ ] Row hover card — desktop-only in the web; on touch the row menu is the equivalent
 
 ## Conversation header
@@ -586,7 +589,7 @@ Ordered by value, not by size:
 4. **Interrupted assistant tail tag** — a frozen partial block with `interrupted: true` has no
    tag; only the `turn/end` notices mark a cut-off turn.
 5. **Session drag-to-reorder + the sidebar's bottom fade.** Workspace reordering is
-   not in this list any more: it is the explicit Move up/Move down pair above.
+   not in this list any more: it is the header drag (with semantic move actions) above.
 6. **Workspace rename/delete**, and the header seats the web has and the app does not:
    terminal recovery, schedule catalog, open-in-app.
 7. **`settings/*` / skills** — blocked on the host's `memory` scope, not on the UI.

@@ -662,19 +662,35 @@ on screen says why the row moved back. `docs/research/chrome-ui.md:1307` already
 records that HTML5 drag is a dead end on touch ("Touch generates no HTML5 drag
 events"), and `docs/PARITY.md` lists it as such.
 
-**What the app does.** Each Workspace header carries a `⋮` menu labelled the web's
-own "Workspace actions for {name}", with "Move up"/"Move down". This is the deliberate
-divergence: the row's tap already folds its section, the drawer is 300dp wide, and a
-drag over sticky headers with nested sections would have to share the gesture with a
-fold, a `+` and a menu. Each tap sends the host's anchor form directly:
-`WorkspaceMove(workspaceId, beforeWorkspaceId)`, applied optimistically, reconciled
-with the reply's complete `workspaceIds`, and — on refusal — reverted to the last
-host-confirmed order with a visible reason (`workspaceMoveRefusal`). In Tree mode the
-pair is sibling-scoped: a child can pass only its siblings in the derived tree, its
-parent link is decided by its path and never changes, and an only child gets no menu.
-(Down names the registry row after the next sibling, or no anchor to append — a
-flat-order detail; the derived sibling order is the same either way.)
+**What the app does.** Reordering is a drag on the Workspace **header** (the fold row),
+not a menu. A long press arms it; movement past touch slop lifts the header and
+reorders its siblings live, so the order on screen is the order a release sends. The
+`+` is excluded by its measured bounds, a tap still folds, and the drag consumes its
+own release so it never folds. Only header midpoints are crossing candidates, so a
+session row is never a drop target. The lift is a scale, an elevation shadow and a
+raised fill on the row itself; a 2dp accent line is drawn at the slot boundary over
+the list, so the indicator never shifts the layout. Dragging into an edge band
+auto-scrolls the list from the frame clock (no timer), and leaving the list or
+pressing Back drops the preview with no request. On release the drawer names the
+sibling after the drop slot as `beforeWorkspaceId` (null appends) and calls the
+existing `moveWorkspace`: applied optimistically, reconciled with the reply's
+complete `workspaceIds`, and — on refusal — reverted to the last host-confirmed
+order with a visible reason (`workspaceMoveRefusal`).
+
+Tree mode is sibling-scoped because nesting comes from paths: a drag reorders only
+the children of one registered parent, its parent link never changes, and an only
+child gets no gesture. The anchor is the sibling that follows the slot, so a drop
+never names a Workspace outside that sibling list.
+
+**Accessibility.** There is no visible menu, but a screen reader cannot drag. Each
+header's semantics carry `CustomAccessibilityAction`s labelled "Move up" and "Move
+down" (only the sides that exist, exactly as the removed menu disabled the ends).
+They call the same `moveWorkspace` path with the anchors `workspaceMoves` derives.
+The visual `⋮` menu and its `Workspace actions for {name}` label are gone.
 
 Verified only by source reading and JVM tests: no live `workspace/insertBefore` was
 issued (a call mutates the live registry), no host was asked to refuse one, and no
-device was touched.
+device was touched. In particular **no real drag gesture was exercised** — the
+long-press timing, midpoint crossing, lift, insertion line, auto-scroll and cancel
+paths are reasoned about and partly covered by pure arithmetic tests, not measured on
+a handset.

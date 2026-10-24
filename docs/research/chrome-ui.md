@@ -1308,8 +1308,10 @@ Ordered by severity. For each: the selector/code, the action it hides, and the c
    `draggable`, `onDragStart`) and `:435-458` (session), plus the group drop target
    `WorkspaceBrowser.tsx:390-402`. No up/down buttons, no move menu, no keyboard. ViewOptionsMenu exposes
    `orderBy.manual` but offers no way to perform an order. Touch generates no HTML5 drag events, so manual
-   ordering is a **dead end**. The Android client gives Workspaces an explicit Move up/Move down pair in the
-   row's menu instead (`docs/research/sidebar-workspace-groups.md`, "Workspace reordering"); session reordering
+   ordering is a **dead end**. The Android client gives Workspaces a header drag instead: a long press on the
+   header lifts it, movement past touch slop reorders its siblings (never re-parents in Tree mode), and the
+   same pair is exposed as "Move up"/"Move down" custom accessibility actions for TalkBack
+   (`docs/research/sidebar-workspace-groups.md`, "Workspace reordering"); session reordering
    remains unported.
 3. **dockkit tab strip cannot be panned by touch** — `ui-dockkit/src/components/dockkit.module.css:173-184`:
    `.stripTabs { overflow-x:auto; scrollbar-width:none; touch-action:none; }`; the comment states

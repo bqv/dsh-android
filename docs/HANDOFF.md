@@ -751,8 +751,9 @@ one.
   interrupted assistant tail tag, session drag-reorder and the bottom fade, workspace
   rename/delete, the missing header seats, `settings/*`/skills, and the goal
   activation label. Workspace *reordering* is no longer on that list: it is wired to
-  `workspace/insertBefore` through each row's "Move up"/"Move down" pair, because the
-  web's drag is not a gesture a 300dp touch drawer can carry over a fold-on-tap row.
+  `workspace/insertBefore` by dragging a Workspace header, with the same pair attached
+  to the header as "Move up"/"Move down" custom accessibility actions for a screen
+  reader (which cannot drag). No visible reorder menu is drawn.
   (Image and SVG previews and the walk up from a subagent to its parent are both
   done — see the ledger.) The drawer's content search
   is **not** on that list any more: it is wired (`SessionsDrawer` calls
