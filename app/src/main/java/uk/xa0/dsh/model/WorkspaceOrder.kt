@@ -66,9 +66,10 @@ data class WorkspaceMove(
 /**
  * The two moves a Workspace row offers, either of which may be unavailable.
  *
- * A missing side is a fact about the list, not a disabled control that was merely not
- * wired: the first sibling cannot move up and the last cannot move down, and the host
- * would answer a no-op for either.
+ * A missing side is a fact about the list, not a control that was merely left unwired:
+ * the first sibling has no anchor that would take it further up, and the last is
+ * already where a down move would put it. Sending either to the host would be a
+ * request that changes nothing.
  */
 data class WorkspaceMoves(
     val up: WorkspaceMove?,
