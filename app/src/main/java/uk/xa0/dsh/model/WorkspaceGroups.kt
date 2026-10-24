@@ -64,10 +64,11 @@ import uk.xa0.dsh.SessionItem
  * by the stream's `order` frames — and an empty Workspace keeps its own place in it. The
  * activity recency that sorts the *session* roster is deliberately not reused here: a
  * Workspace's `updatedAt` moves whenever a session is adopted into it, so sorting groups
- * by it would reorder the sidebar under somebody who was only reading, and would make the
- * manual arrangement `workspace/insertBefore` exists to express unreachable. A Workspace
- * is a place, not a row with an activity. (`createdAt`/`updatedAt` do arrive on every
- * `WorkspaceView`; this client has no use for either.)
+ * by it would reorder the sidebar under somebody who was only reading, and would replace
+ * the manual arrangement `workspace/insertBefore` stores with a reading of activity. That
+ * arrangement is reachable from each row's menu — see `model/WorkspaceOrder.kt`. A
+ * Workspace is a place, not a row with an activity. (`createdAt`/`updatedAt` do arrive on
+ * every `WorkspaceView`; this client has no use for either.)
  *
  * Everything in this file is pure so the rules can be tested without a device — the
  * drawer's `remember` block cannot be reached from the JVM harness.
@@ -348,4 +349,24 @@ object WorkspaceCopy {
 
     /** The registry's own placeholder row, before any baseline has arrived. */
     const val WORKSPACES = "Workspaces"
+
+    /**
+     * The Workspace row's overflow menu, named the way the web names it
+     * (`actions.workspace.aria` = "Workspace actions for {name}").
+     *
+     * A phone has no hover, so the menu is always drawn on the row rather than
+     * revealed by a pointer — the same reason the row's `+` is always drawn.
+     */
+    fun actions(title: String): String = "Workspace actions for $title"
+
+    /**
+     * The two explicit move actions, replacing a drag the web's desktop sidebar
+     * offers and a 300dp touch drawer cannot carry: the row's tap already folds its
+     * section, and a drag over a sticky header with nested sections would have to
+     * steal that gesture.
+     */
+    const val MOVE_UP = "Move up"
+
+    /** The other half of the pair; see [MOVE_UP]. */
+    const val MOVE_DOWN = "Move down"
 }
