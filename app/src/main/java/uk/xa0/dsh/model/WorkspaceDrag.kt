@@ -98,8 +98,13 @@ fun applySiblingOrder(
  *
  * [centres] carries the midpoint of each *visible* sibling header, in whatever one
  * coordinate space the drawer measured them (window pixels, here). A header with no
- * entry is above or below the viewport, so it is simply not a crossing candidate;
- * the returned slot is still an index into [siblings] with the dragged id removed.
+ * entry is above or below the viewport. That is not the same as "no candidate":
+ * because sibling headers are laid out in order, an unmeasured sibling before the
+ * first measured one is above the viewport, and one after the last measured one is
+ * below it. So a finger below every measured midpoint lands just after the last
+ * measured sibling, **not** at the end of the whole sibling list — otherwise a tall
+ * expanded section, which can push every other header off screen, would leap to the
+ * end on its own.
  *
  * The comparison is strict: a finger exactly on a midpoint has not crossed it, so
  * a stationary finger cannot make the preview oscillate around the boundary.
@@ -109,7 +114,8 @@ fun applySiblingOrder(
  * @param pointerY the finger's position on the same axis as [centres].
  * @param centres sibling id to the y coordinate of its header's midpoint.
  * @return the insertion index among the siblings other than [draggedId], from 0
- *   (before the first) to one past the last.
+ *   (before the first) to one past the last measured sibling, or -1 when no
+ *   sibling header was measured and the slot cannot be known yet.
  */
 fun workspaceDropSlot(
     siblings: List<String>,
@@ -118,11 +124,13 @@ fun workspaceDropSlot(
     centres: Map<String, Float>,
 ): Int {
     val others = siblings.filterNot { it == draggedId }
+    var lastMeasured = -1
     others.forEachIndexed { index, id ->
         val centre = centres[id] ?: return@forEachIndexed
+        lastMeasured = index
         if (pointerY < centre) return index
     }
-    return others.size
+    return if (lastMeasured < 0) -1 else lastMeasured + 1
 }
 
 /**

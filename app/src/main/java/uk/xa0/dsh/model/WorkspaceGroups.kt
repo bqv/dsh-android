@@ -351,19 +351,12 @@ object WorkspaceCopy {
     const val WORKSPACES = "Workspaces"
 
     /**
-     * The Workspace row's overflow menu, named the way the web names it
-     * (`actions.workspace.aria` = "Workspace actions for {name}").
+     * The two moves a Workspace header offers a screen reader.
      *
-     * A phone has no hover, so the menu is always drawn on the row rather than
-     * revealed by a pointer — the same reason the row's `+` is always drawn.
-     */
-    fun actions(title: String): String = "Workspace actions for $title"
-
-    /**
-     * The two explicit move actions, replacing a drag the web's desktop sidebar
-     * offers and a 300dp touch drawer cannot carry: the row's tap already folds its
-     * section, and a drag over a sticky header with nested sections would have to
-     * steal that gesture.
+     * Touch reorders by dragging the header, which TalkBack cannot perform, so these
+     * are attached as the header's custom accessibility actions. They call the same
+     * `moveWorkspace` path the drag commits through, and a side that is unavailable
+     * (the first or last sibling) is left out rather than offered and refused.
      */
     const val MOVE_UP = "Move up"
 

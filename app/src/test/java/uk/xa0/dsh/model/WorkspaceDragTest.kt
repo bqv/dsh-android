@@ -73,9 +73,9 @@ class WorkspaceDragTest {
         val centres = mapOf("a" to 17f, "b" to 51f, "c" to 85f)
         val siblings = listOf("a", "b", "c")
 
-        // Below b's midpoint: the slot is still between a and b.
-        assertEquals(0, workspaceDropSlot(siblings, "b", 20f, centres))
-        // Past b's midpoint and before c's: b now sits after a.
+        // Between a's and c's midpoints: b keeps the seat it had.
+        assertEquals(1, workspaceDropSlot(siblings, "b", 20f, centres))
+        // Between a's and b's midpoints: c moves in front of b.
         assertEquals(1, workspaceDropSlot(siblings, "c", 40f, centres))
         // Past every midpoint: the end of the sibling list.
         assertEquals(2, workspaceDropSlot(siblings, "a", 120f, centres))
@@ -88,10 +88,9 @@ class WorkspaceDragTest {
         val centres = mapOf("a" to 17f, "b" to 51f, "c" to 85f)
 
         // c is dragged, so only a and b are candidates. At b's midpoint the finger
-        // has not crossed it: c stays after b, and the next sample past it moves c
-        // before b.
-        assertEquals(1, workspaceDropSlot(listOf("a", "b", "c"), "c", 51f, centres))
-        assertEquals(0, workspaceDropSlot(listOf("a", "b", "c"), "c", 50.9f, centres))
+        // has not crossed it, so c stays at the end; just above it moves before b.
+        assertEquals(2, workspaceDropSlot(listOf("a", "b", "c"), "c", 51f, centres))
+        assertEquals(1, workspaceDropSlot(listOf("a", "b", "c"), "c", 50.9f, centres))
     }
 
     @Test
@@ -101,6 +100,27 @@ class WorkspaceDragTest {
         assertEquals(
             1,
             workspaceDropSlot(listOf("a", "b", "c"), "c", 10f, mapOf("b" to 51f)),
+        )
+    }
+
+    @Test
+    fun `below the last measured header the slot stops at the next unmeasured sibling`() {
+        // a is dragged; b and c follow it. Only b is on screen, so c is below the
+        // viewport. A finger past b's midpoint names the slot between b and c; it
+        // must not leap past c just because c has not been composed.
+        assertEquals(
+            1,
+            workspaceDropSlot(listOf("a", "b", "c"), "a", 90f, mapOf("b" to 51f)),
+        )
+    }
+
+    @Test
+    fun `no measured sibling names no slot rather than the end`() {
+        // A tall dragged section can push every sibling header off screen. There is
+        // then no crossing to read, and the preview must stay where it is.
+        assertEquals(
+            -1,
+            workspaceDropSlot(listOf("a", "b", "c"), "a", 90f, emptyMap()),
         )
     }
 

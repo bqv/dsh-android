@@ -1,11 +1,10 @@
 package uk.xa0.dsh.ui
 
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -25,22 +24,24 @@ import uk.xa0.dsh.scroll.HarnessApplication
 import uk.xa0.dsh.ui.theme.DshTheme
 
 /**
- * The Workspace row's explicit reorder actions, wired end to end.
+ * The Workspace header's reorder path without a menu.
  *
- * The move itself is a host call (`workspace/insertBefore`) and cannot be made from
- * the JVM; what this pins is the part the drawer owns: which anchor a "Move down" tap
- * names, that the end of the list is offered as a disabled item rather than a move
- * that does nothing, that the refusal line is drawn, and — the regression that matters
- * most — that the row still folds on tap while carrying a menu.
+ * Touch reorders by dragging the header, which a Robolectric JVM cannot perform (the
+ * long-press timing, the measured midpoints and the pointer capture are all device
+ * behaviour). What this pins is the path that must survive beside it: the header's
+ * custom accessibility actions, which are what TalkBack offers because it cannot
+ * drag. It also pins that no visual menu is left, that the actions name the same
+ * anchors `model/WorkspaceOrder.kt` derives, that an only child gets no actions, and
+ * that the header still folds on a tap.
  *
- * The pure semantics (sibling scoping in Tree mode, the reply order, snap-back) are
- * pinned in `model/WorkspaceOrderTest`. What neither test can prove is that a running
- * host accepts or refuses a particular move.
+ * The pure drag arithmetic (sibling scoping, the drop slot, the anchor) is
+ * `model/WorkspaceDragTest`. What neither test can prove is that a real drag starts,
+ * auto-scrolls, or is accepted by a running host.
  */
 @RunWith(RobolectricTestRunner::class)
 // A phone-sized surface, not the harness's 320x470 default: the drawer's chrome
 // already uses most of 470dp, and `performClick` injects a real touch that a control
-// below the fold would never receive. The popup also needs room to open downward.
+// below the fold would never receive.
 @Config(sdk = [34], application = HarnessApplication::class, qualifiers = "w411dp-h891dp")
 class SessionsDrawerWorkspaceOrderTest {
 
@@ -89,10 +90,16 @@ class SessionsDrawerWorkspaceOrderTest {
         )
     }
 
+    /** The custom actions the header for [id] exposes to a screen reader, in order. */
+    private fun headerActions(id: String): List<CustomAccessibilityAction> =
+        rule.onNodeWithTag(WORKSPACE_HEADER_TAG_PREFIX + id)
+            .fetchSemanticsNode()
+            .config[SemanticsActions.CustomActions]
+
     private val three = listOf(workspace("a"), workspace("b"), workspace("c"))
 
     @Test
-    fun `the first Workspace offers Move up disabled and Move down names the anchor the host takes`() {
+    fun `the first Workspace offers only Move down, which names the anchor the host takes`() {
         var moved: Pair<String, String?>? = null
         rule.setContent {
             DshTheme {
@@ -101,28 +108,100 @@ class SessionsDrawerWorkspaceOrderTest {
         }
         rule.waitForIdle()
 
-        rule.onNodeWithContentDescription(WorkspaceCopy.actions("a"), useUnmergedTree = true).performClick()
-        rule.onNodeWithText(WorkspaceCopy.MOVE_UP).assertIsNotEnabled()
-        rule.onNodeWithText(WorkspaceCopy.MOVE_DOWN).assertIsEnabled().performClick()
-        rule.waitForIdle()
+        // The first sibling has no "up" seat, so it is absent rather than offered
+        // and refused; the same choice the old menu made by disabling the item.
+        val actions = headerActions("a")
+        assertEquals(listOf(WorkspaceCopy.MOVE_DOWN), actions.map { it.label })
+        assertTrue(actions.single().action())
 
         // Down is expressed as "before whatever followed the next Workspace", so the
-        // one tap swaps `a` with `b` and leaves `c` where it was.
+        // one action swaps `a` with `b` and leaves `c` where it was.
         assertEquals("a" to "c", moved)
     }
 
     @Test
-    fun `the registry's last Workspace cannot move down`() {
+    fun `the registry's last Workspace offers only Move up`() {
+        var moved: Pair<String, String?>? = null
         rule.setContent {
             DshTheme {
-                drawer(listOf(workspace("a"), workspace("b")))
+                drawer(three, onMoveWorkspace = { id, before -> moved = id to before })
             }
         }
         rule.waitForIdle()
 
-        rule.onNodeWithContentDescription(WorkspaceCopy.actions("b"), useUnmergedTree = true).performClick()
-        rule.onNodeWithText(WorkspaceCopy.MOVE_UP).assertIsEnabled()
-        rule.onNodeWithText(WorkspaceCopy.MOVE_DOWN).assertIsNotEnabled()
+        val actions = headerActions("c")
+        assertEquals(listOf(WorkspaceCopy.MOVE_UP), actions.map { it.label })
+        assertTrue(actions.single().action())
+        assertEquals("c" to "b", moved)
+    }
+
+    @Test
+    fun `there is no visible reorder menu left on a Workspace header`() {
+        rule.setContent {
+            DshTheme {
+                drawer(three)
+            }
+        }
+        rule.waitForIdle()
+
+        // The pair now exists only as semantics: a visual menu would have these as
+        // Text nodes, and there is no `⋮` target either.
+        assertTrue(
+            "a Workspace header must not draw a Move up/Move down menu",
+            rule.onAllNodesWithText(WorkspaceCopy.MOVE_UP).fetchSemanticsNodes().isEmpty() &&
+                rule.onAllNodesWithText(WorkspaceCopy.MOVE_DOWN).fetchSemanticsNodes().isEmpty(),
+        )
+    }
+
+    @Test
+    fun `an only child in Tree mode gets no reorder actions at all`() {
+        val nested = listOf(
+            workspace("outer", "/work"),
+            workspace("only", "/work/only"),
+        )
+        rule.setContent {
+            DshTheme {
+                drawer(nested, grouping = DrawerGrouping.TREE)
+            }
+        }
+        rule.waitForIdle()
+
+        // Path-derived nesting fixes `only` under `outer`, and it is the only child:
+        // there is no other seat for either the drag or the semantic pair.
+        assertTrue(headerActions("only").isEmpty())
+        assertTrue(headerActions("outer").isEmpty())
+    }
+
+    @Test
+    fun `the flat list's header has no Workspace reorder actions`() {
+        rule.setContent {
+            DshTheme {
+                drawer(three, grouping = DrawerGrouping.FLAT)
+            }
+        }
+        rule.waitForIdle()
+
+        // The flat list is not a Workspace, so it must never grow a Workspace action.
+        val flat = rule.onNodeWithText("Sessions").fetchSemanticsNode()
+        assertTrue(flat.config[SemanticsActions.CustomActions].isEmpty())
+    }
+
+    @Test
+    fun `a header carrying the drag handle and the actions still folds on tap`() {
+        var collapsed: Set<String>? = null
+        rule.setContent {
+            DshTheme {
+                drawer(three, onCollapsedSections = { collapsed = it })
+            }
+        }
+        rule.waitForIdle()
+
+        // A real touch at the header's centre: the drag detector only claims the
+        // gesture after long press plus touch slop, so a tap keeps its meaning.
+        rule.onNodeWithTag(WORKSPACE_HEADER_TAG_PREFIX + "a").performClick()
+        rule.waitForIdle()
+
+        assertEquals(setOf("a"), collapsed)
     }
 
     @Test
@@ -137,39 +216,5 @@ class SessionsDrawerWorkspaceOrderTest {
 
         rule.onNodeWithTag(WORKSPACE_ORDER_ERROR_TAG).assertExists()
         rule.onNodeWithText(note, useUnmergedTree = true).assertExists()
-    }
-
-    @Test
-    fun `a header carrying the menu still folds on tap`() {
-        var collapsed: Set<String>? = null
-        rule.setContent {
-            DshTheme {
-                drawer(three, onCollapsedSections = { collapsed = it })
-            }
-        }
-        rule.waitForIdle()
-
-        // The menu is one 28dp target on the same row: tapping the title must still
-        // reach the header's own click, not be swallowed by the new control.
-        rule.onNodeWithText("a", useUnmergedTree = true).performClick()
-        rule.waitForIdle()
-
-        assertEquals(setOf("a"), collapsed)
-    }
-
-    @Test
-    fun `no move menu is offered where there is no registry row behind the header`() {
-        rule.setContent {
-            DshTheme {
-                drawer(three, grouping = DrawerGrouping.FLAT)
-            }
-        }
-        rule.waitForIdle()
-
-        // The flat list is not a Workspace, so it must never grow a Workspace menu.
-        assertTrue(
-            "the flat list must not carry a Workspace reorder menu",
-            rule.onAllNodesWithText(WorkspaceCopy.MOVE_UP).fetchSemanticsNodes().isEmpty(),
-        )
     }
 }

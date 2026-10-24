@@ -1,6 +1,7 @@
 package uk.xa0.dsh.ui
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
@@ -55,12 +57,25 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
@@ -68,9 +83,11 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
@@ -82,9 +99,12 @@ import uk.xa0.dsh.SessionItem
 import uk.xa0.dsh.WorkspaceItem
 import uk.xa0.dsh.model.DrawerGrouping
 import uk.xa0.dsh.model.WorkspaceTreeNode
+import uk.xa0.dsh.model.applySiblingOrder
 import uk.xa0.dsh.model.holdOrder
 import uk.xa0.dsh.model.scheduledTaskMarkLabel
+import uk.xa0.dsh.model.workspaceDragMove
 import uk.xa0.dsh.model.workspaceForest
+import uk.xa0.dsh.model.workspaceSiblingOrder
 import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.WorkspaceCopy
 import uk.xa0.dsh.model.WorkspaceGroupState
@@ -151,10 +171,10 @@ private data class Section(
      * behind it.
      *
      * Workspaces are ordered by the host's registry, so this is not the `Order:
-     * Manual / Updated` pair (which orders the sessions inside one Workspace). The
-     * moves are explicit menu actions rather than a drag: the row's tap already folds
-     * its section, and on a 300dp drawer a drag would have to steal that gesture from
-     * a sticky header whose rows also contain a `+` and a menu. See
+     * Manual / Updated` pair (which orders the sessions inside one Workspace). Touch
+     * reorders by dragging the header, so these are what a screen reader is offered
+     * as the header's custom accessibility actions; a TalkBack user cannot make the
+     * gesture, and the visual menu that used to carry the pair is gone. See
      * `model/WorkspaceOrder.kt` for the semantics and Tree mode's sibling scoping.
      */
     val moves: WorkspaceMoves? = null,
@@ -375,8 +395,13 @@ fun SessionsDrawer(
     onSearch: (String) -> Unit = {},
     /**
      * Move one Workspace in the host's registry order; `beforeWorkspaceId == null`
-     * appends. The drawer decides *which* anchor an "up"/"down" tap means (sibling
-     * scoped in Tree mode), and the ViewModel owns the request and its reconciliation.
+     * appends.
+     *
+     * Two gestures reach it: a released header drag, whose anchor is the sibling
+     * after the drop slot, and the header's "Move up"/"Move down" custom
+     * accessibility actions, whose anchors are the ones [workspaceMoves] derives.
+     * Both are sibling-scoped in Tree mode. The ViewModel owns the request and its
+     * reconciliation.
      */
     onMoveWorkspace: (String, String?) -> Unit = { _, _ -> },
 ) {
@@ -394,6 +419,75 @@ fun SessionsDrawer(
     // previous run was being restored — so the drawer opened part-way down its
     // list for no visible reason.
     val listState = remember { LazyListState() }
+
+    // A drag of a Workspace header is a client-side gesture until it is released:
+    // the preview order below is what the drawer draws, and only the release asks
+    // the host to commit it. Null means no drag is in progress.
+    var workspaceDrag by remember { mutableStateOf<WorkspaceDragState?>(null) }
+    // Headers measure themselves in window coordinates so the drag can compare a
+    // finger with their midpoints. Deliberately plain maps: they are read from the
+    // gesture coroutine and the auto-scroll frame loop, never during composition,
+    // so a scroll must not invalidate the drawer.
+    val headerBounds = remember { HashMap<String, Rect>() }
+    val createBounds = remember { HashMap<String, Rect>() }
+    val listBounds = remember { mutableStateOf(Rect.Zero) }
+    // The gesture coroutine outlives a recomposition, so it reads the callback from
+    // the latest composition rather than from the one that created the modifier.
+    val moveWorkspaceNow by rememberUpdatedState(onMoveWorkspace)
+
+    // Back while dragging means "put it back", not "close the drawer". Registered
+    // only during a drag, so the drawer's ordinary Back behaviour is untouched.
+    BackHandler(enabled = workspaceDrag != null) { workspaceDrag = null }
+
+    // A registry push, a mode change or a closing drawer ends the gesture's meaning:
+    // the siblings it previewed against are no longer the list on screen. Clearing
+    // the preview restores the host's order with no request sent.
+    LaunchedEffect(workspaces, grouping, drawerOpen) {
+        workspaceDrag = null
+    }
+
+    // Auto-scroll while the finger sits in an edge band. This is frame-clock driven:
+    // the loop exists only while the finger is in a band and suspends on
+    // `withFrameNanos`, so the list moves once per drawn frame rather than on a
+    // timer, and nothing runs at all while the finger is away from both edges. The
+    // speed grows with how far into the band the finger has been pushed.
+    val dragSession = workspaceDrag
+    val density = LocalDensity.current
+    LaunchedEffect(dragSession, density) {
+        if (dragSession == null) return@LaunchedEffect
+        val edge = with(density) { WORKSPACE_DRAG_EDGE.toPx() }
+        val slowest = with(density) { WORKSPACE_DRAG_SCROLL_MIN.toPx() }
+        val fastest = with(density) { WORKSPACE_DRAG_SCROLL_MAX.toPx() }
+        snapshotFlow { dragSession.zone(listBounds.value, edge) }
+            .collectLatest { zone ->
+                if (zone == null) return@collectLatest
+                // `while (true)` here is a frame loop, not a poll: every iteration
+                // suspends on the frame clock and the scroll's layout pass, and
+                // `collectLatest` cancels the loop the moment the finger leaves the
+                // band or the drag ends.
+                while (true) {
+                    withFrameNanos { }
+                    val list = listBounds.value
+                    val speed = slowest + (fastest - slowest) *
+                        dragSession.penetration(list, edge, zone)
+                    listState.scrollBy(
+                        if (zone == WorkspaceDragZone.Top) -speed else speed,
+                    )
+                    // Newly revealed headers are new crossing candidates, and the
+                    // finger has not moved, so the drop is recomputed here.
+                    dragSession.updateDrop(headerBounds, list)
+                }
+            }
+    }
+
+    // The order drawn while a finger is down. Splicing the sibling preview back into
+    // the registry keeps every non-sibling in its seat, so Tree mode cannot preview
+    // a re-parent. The keys are the preview itself: a crossed header recomposes the
+    // sections into the order a release would commit.
+    val previewOrder = workspaceDrag?.previewSiblings
+    val displayWorkspaces = remember(workspaces, previewOrder) {
+        if (previewOrder == null) workspaces else applySiblingOrder(workspaces, previewOrder)
+    }
 
     val matched = remember(sessions, archivedSessionIds, query, showArchived) {
         sessions.filter { session ->
@@ -516,7 +610,7 @@ fun SessionsDrawer(
     val sections = remember(
         matched,
         sessions,
-        workspaces,
+        displayWorkspaces,
         workspacesPhase,
         currentId,
         grouping,
@@ -597,8 +691,10 @@ fun SessionsDrawer(
         // The Workspace registry's own order is moveable; this is the anchor each
         // row's "Move up"/"Move down" would name. In Tree mode it is sibling-scoped,
         // because nesting comes from paths and a child cannot be sent to another
-        // parent. See `model/WorkspaceOrder.kt`.
-        val movesById = workspaceMoves(workspaces, grouping.nestsWorkspaces)
+        // parent. See `model/WorkspaceOrder.kt`. While a drag is live the rows are
+        // in the preview order, so the header's semantic actions move against the
+        // list the reader can see.
+        val movesById = workspaceMoves(displayWorkspaces, grouping.nestsWorkspaces)
 
         /**
          * One registered Workspace as a [Section], with its nested Workspaces built
@@ -685,9 +781,9 @@ fun SessionsDrawer(
         // two modes share the same Section, derivation, collapse set and rows — only
         // the parent links differ, which is why this is one engine rather than two.
         val roots = if (grouping.nestsWorkspaces) {
-            workspaceForest(workspaces)
+            workspaceForest(displayWorkspaces)
         } else {
-            workspaces.map { WorkspaceTreeNode(it, 0, emptyList()) }
+            displayWorkspaces.map { WorkspaceTreeNode(it, 0, emptyList()) }
         }
         val result = ArrayList<Section>(roots.size + 1)
         roots.forEach { root -> result += buildWorkspace(root) }
@@ -1042,7 +1138,123 @@ fun SessionsDrawer(
             Modifier
                 .weight(1f)
                 .touchGate(drawerTouch)
-                .diagDrag("drawer") { listState.diagOffset() },
+                .diagDrag("drawer") { listState.diagOffset() }
+                // One gesture for the whole list, not one per header: a LazyColumn
+                // item is reusable but its composition can be replaced as the
+                // preview reorders the list under the finger, and a detector living
+                // in that item would be cancelled by the very move it is making.
+                // The list's own node is stable, and its pointer node is an ancestor
+                // of the scrollable, so the Initial pass lets a claimed drag win
+                // before the list can scroll.
+                .pointerInput(workspaces, grouping, drawerOpen) {
+                    if (!grouping.groupsByWorkspace) return@pointerInput
+                    val cancelSlop = WORKSPACE_DRAG_CANCEL_SLOP.toPx()
+                    // Filled by canStart from the header under the finger, so the
+                    // start, the moves and the release all name the same Workspace.
+                    var target: Pair<String, List<String>>? = null
+                    var session: WorkspaceDragState? = null
+                    fun windowOf(local: Offset): Offset = listBounds.value.topLeft + local
+                    detectWorkspaceDrag(
+                        threshold = viewConfiguration.touchSlop,
+                        canStart = { local ->
+                            val window = windowOf(local)
+                            // Only a header can start a drag: session rows, notes and
+                            // the pickers are not in this map, so they never match.
+                            val headerId = headerBounds.entries
+                                .firstOrNull { it.value.contains(window) }
+                                ?.key
+                            target = headerId?.let { id ->
+                                val siblings = workspaceSiblingOrder(
+                                    workspaces,
+                                    grouping.nestsWorkspaces,
+                                    id,
+                                )
+                                // An only child has no seat to take, and the `+` is
+                                // its own target on the same row.
+                                if (siblings.size > 1 &&
+                                    createBounds[id]?.contains(window) != true
+                                ) {
+                                    id to siblings
+                                } else {
+                                    null
+                                }
+                            }
+                            target != null
+                        },
+                        onStart = { local ->
+                            target?.let { (id, siblings) ->
+                                val started = WorkspaceDragState(id, siblings)
+                                started.movePointer(windowOf(local).y)
+                                started.updateDrop(headerBounds, listBounds.value)
+                                session = started
+                                workspaceDrag = started
+                            }
+                        },
+                        onMove = { local ->
+                            val current = session
+                            if (current == null) {
+                                true
+                            } else {
+                                val list = listBounds.value
+                                val window = windowOf(local)
+                                current.movePointer(window.y)
+                                if (list.width > 0f && list.height > 0f &&
+                                    isOutsideDragBounds(window, list, cancelSlop)
+                                ) {
+                                    false
+                                } else {
+                                    current.updateDrop(headerBounds, list)
+                                    true
+                                }
+                            }
+                        },
+                        onEnd = {
+                            // A Back press, a drawer close or a registry push has
+                            // already dropped this preview; its release must not send
+                            // the move it was showing.
+                            val current = session
+                            if (current != null && workspaceDrag === current) {
+                                workspaceDrag = null
+                                val move = workspaceDragMove(
+                                    workspaces,
+                                    grouping.nestsWorkspaces,
+                                    current.workspaceId,
+                                    current.previewSiblings,
+                                )
+                                if (move != null) {
+                                    moveWorkspaceNow(move.workspaceId, move.beforeWorkspaceId)
+                                }
+                            }
+                        },
+                        onCancel = {
+                            val current = session
+                            if (current != null && workspaceDrag === current) {
+                                workspaceDrag = null
+                            }
+                        },
+                    )
+                }
+                .onGloballyPositioned { listBounds.value = it.boundsInWindow() }
+                // The insertion line is painted over the list rather than inserted
+                // as an item, so showing where a drop lands never changes the layout
+                // the finger is reading (or the header it is holding). It tracks the
+                // lifted row's measured top, which is the boundary the live preview
+                // has moved it to, so it cannot drift from the row it belongs to.
+                .drawWithContent {
+                    drawContent()
+                    val active = workspaceDrag
+                    if (active != null) {
+                        val top = headerBounds[active.workspaceId]?.top
+                            ?.minus(listBounds.value.top)
+                        if (top != null && top >= 0f && top <= size.height) {
+                            drawRect(
+                                color = colors.accent,
+                                topLeft = Offset(0f, (top - 2.dp.toPx()).coerceAtLeast(0f)),
+                                size = Size(size.width, 2.dp.toPx()),
+                            )
+                        }
+                    }
+                },
             state = listState,
             contentPadding = PaddingValues(bottom = DshSpacing.md),
         ) {
@@ -1107,8 +1319,15 @@ fun SessionsDrawer(
                     // A pinned header has to be opaque: the row it floats over is
                     // still painted underneath it, so a transparent background
                     // collided the workspace name with the session title.
+                    //
+                    // The row measures its own window bounds for the drag (the list
+                    // owns the gesture and hit-tests these bounds on a long press)
+                    // and lifts itself while it is the Workspace being dragged.
+                    val lifted = workspaceDrag?.workspaceId == section.key
                     ProjectRow(
-                        modifier = Modifier.background(colors.sidebarFill),
+                        modifier = Modifier
+                            .background(colors.sidebarFill)
+                            .testTag(WORKSPACE_HEADER_TAG_PREFIX + section.key),
                         title = section.title,
                         count = count,
                         collapsed = isCollapsed,
@@ -1116,6 +1335,9 @@ fun SessionsDrawer(
                         containsCurrent = section.containsCurrent || section.containsCurrentDescendant,
                         run = section.run,
                         depth = section.depth,
+                        lifted = lifted,
+                        onPlaced = { headerBounds[section.key] = it },
+                        onCreatePlaced = { createBounds[section.key] = it },
                         onClick = {
                             onCollapsedSections(
                                 if (isCollapsed) {
@@ -1380,10 +1602,13 @@ private fun LazyListScope.searchResults(
  * chevron and create button are hover-revealed there, so the open/closed folder is
  * the resting affordance, and tapping anywhere on the row toggles the group.
  *
- * The `+` and the `⋮` are the two exceptions to "anywhere": each is its own 28dp
- * target with its own click, so a fold never lands on a create and a create never
- * folds the section. There is deliberately no drag target on this row — the reorder
- * pair lives in the `⋮` menu, because a drag would have to share the fold gesture.
+ * The `+` is the one exception to "anywhere": it is its own 28dp target with its own
+ * click, so a fold never lands on a create and a create never folds the section. The
+ * row is also the Workspace drag handle, but the gesture itself belongs to the list
+ * (a sustained drag cannot live in an item the preview is reordering): a short tap
+ * still folds, and a long press followed by movement past touch slop lifts the
+ * header instead. The `+` is excluded from the gesture by its measured bounds, so a
+ * long press there never starts a drag.
  *
  * The two facts a header carries are painted on two different elements, so they cannot be
  * confused for one another:
@@ -1444,13 +1669,22 @@ private fun ProjectRow(
     /**
      * The Workspace's own reorder pair, or null for a group with no registry row.
      *
-     * Both sides null means there is nothing to reorder (one Workspace, or an only
-     * child in Tree mode), and no menu is drawn: a pair of permanently greyed items
-     * would be a control that only ever says no.
+     * These are no longer drawn as a menu. Touch moves a Workspace by dragging its
+     * header; a screen reader cannot drag, so the same two moves are attached to the
+     * header as custom accessibility actions (see the semantics below). Both sides
+     * null means there is nothing to reorder (one Workspace, or an only child in
+     * Tree mode), and both actions are then absent rather than present and unable
+     * to do anything.
      */
     moves: WorkspaceMoves? = null,
     /** Applies one of [moves]; required whenever [moves] offers a side. */
     onMove: ((WorkspaceMove) -> Unit)? = null,
+    /** Whether a drag currently has this header lifted. */
+    lifted: Boolean = false,
+    /** Reports this row's window bounds, so the drag can find its midpoint. */
+    onPlaced: ((Rect) -> Unit)? = null,
+    /** Reports the `+` target's window bounds, so a long press there is not a drag. */
+    onCreatePlaced: ((Rect) -> Unit)? = null,
     /**
      * Whether the open session lives in this group. The web tints the folder of the
      * Workspace that contains the selection (`folderActive`,
@@ -1462,18 +1696,54 @@ private fun ProjectRow(
     run: WorkspaceRunState,
 ) {
     val colors = DshTheme.colors
+    // "Move up" / "Move down" without a menu. A custom action is what TalkBack's
+    // actions menu offers on the focused header, so the capability the removed
+    // overflow menu carried survives without a visual control — and it calls the
+    // same onMoveWorkspace path the drag commits through.
+    val applyMove = onMove
+    val moveActions = if (moves != null && applyMove != null) {
+        listOfNotNull(
+            moves.up?.let { move ->
+                CustomAccessibilityAction(WorkspaceCopy.MOVE_UP) { applyMove(move); true }
+            },
+            moves.down?.let { move ->
+                CustomAccessibilityAction(WorkspaceCopy.MOVE_DOWN) { applyMove(move); true }
+            },
+        )
+    } else {
+        emptyList()
+    }
     Row(
         modifier
             .fillMaxWidth()
             .height(34.dp)
+            // The lift is three small changes on the same row rather than a floating
+            // ghost: a scale, an elevation shadow, and a raised fill. The row stays
+            // where the list put it, so the drop target is the seat it now occupies
+            // and the insertion line is drawn against its neighbours.
+            .then(
+                if (lifted) {
+                    Modifier
+                        .graphicsLayer {
+                            scaleX = 1.03f
+                            scaleY = 1.03f
+                        }
+                        .shadow(8.dp, RoundedCornerShape(DshRadius.md))
+                } else {
+                    Modifier
+                },
+            )
             .clip(RoundedCornerShape(DshRadius.md))
+            .then(if (lifted) Modifier.background(colors.bgLayer2) else Modifier)
             .clickableNoRipple(onClick = onClick)
+            .onGloballyPositioned { onPlaced?.invoke(it.boundsInWindow()) }
             .padding(start = (depth * 12).dp, end = DshSpacing.md)
             .semantics {
                 when (run) {
                     WorkspaceRunState.Running -> stateDescription = WorkspaceCopy.RUNNING
                     WorkspaceRunState.Idle -> Unit
                 }
+                customActions = moveActions
             },
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1513,78 +1783,10 @@ private fun ProjectRow(
                 tint = colors.labelSecondary,
                 modifier = Modifier
                     .size(28.dp)
+                    .onGloballyPositioned { onCreatePlaced?.invoke(it.boundsInWindow()) }
                     .clip(CircleShape)
                     .clickableNoRipple(onClick = onCreate)
                     .padding(DshSpacing.xs),
-            )
-        }
-        // The registry's own order, moved by explicit actions rather than a drag.
-        // The row's tap already means "fold this section", and that gesture is worth
-        // more on a phone than a drag whose insertion preview would have to share the
-        // sticky header with a fold, a count, a "+" and a menu.
-        val moveMenu = moves?.takeIf { it.up != null || it.down != null }
-        if (moveMenu != null && onMove != null) {
-            Spacer(Modifier.width(DshSpacing.xxs))
-            WorkspaceRowMenu(title = title, moves = moveMenu, onMove = onMove)
-        }
-    }
-}
-
-/**
- * The Workspace header's overflow menu: "Move up" / "Move down" in the host's
- * registry order.
- *
- * The menu is always drawn, like the row's `+` and for the same reason: the web reveals
- * its row actions on hover, which a phone does not have. Its label is the web's own
- * (`actions.workspace.aria` = "Workspace actions for {name}").
- *
- * One item is disabled at each end of the Workspace's sibling list. The action is the
- * only reorder gesture on this client: a drag would have to steal the row's fold tap,
- * and the drawer's sticky headers and Tree nesting make a live insertion preview a
- * half-measure that fails exactly where the list is long.
- */
-@Composable
-private fun WorkspaceRowMenu(
-    title: String,
-    moves: WorkspaceMoves,
-    onMove: (WorkspaceMove) -> Unit,
-) {
-    val colors = DshTheme.colors
-    var open by remember { mutableStateOf(false) }
-    Box {
-        Icon(
-            Icons.Rounded.MoreVert,
-            // The description sits on the same node as the click, not on the glyph
-            // inside it: a screen reader and a test both need to find one control,
-            // and a description on a child would leave the tappable node unnamed.
-            contentDescription = null,
-            tint = colors.labelTertiary,
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .clickableNoRipple { open = true }
-                .semantics { contentDescription = WorkspaceCopy.actions(title) }
-                .padding(DshSpacing.xxs),
-        )
-        DropdownMenu(
-            expanded = open,
-            onDismissRequest = { open = false },
-        ) {
-            DropdownMenuItem(
-                text = { Text(WorkspaceCopy.MOVE_UP, style = DshType.bodyMedium, color = colors.labelPrimary) },
-                enabled = moves.up != null,
-                onClick = {
-                    open = false
-                    moves.up?.let(onMove)
-                },
-            )
-            DropdownMenuItem(
-                text = { Text(WorkspaceCopy.MOVE_DOWN, style = DshType.bodyMedium, color = colors.labelPrimary) },
-                enabled = moves.down != null,
-                onClick = {
-                    open = false
-                    moves.down?.let(onMove)
-                },
             )
         }
     }
@@ -2033,6 +2235,14 @@ const val SESSIONS_STALE_TAG = "drawer-sessions-stale"
 
 /** The refused-move line's seat, for `SessionsDrawerWorkspaceOrderTest`. */
 const val WORKSPACE_ORDER_ERROR_TAG = "drawer-workspace-order-error"
+
+/**
+ * One Workspace header's seat, for `SessionsDrawerWorkspaceOrderTest`.
+ *
+ * The suffix is the Workspace id, so the test can read exactly the custom
+ * accessibility actions the header offers without depending on its title.
+ */
+const val WORKSPACE_HEADER_TAG_PREFIX = "drawer-workspace-header-"
 
 /** The three Group chips; "Tree" is the web's "Workspace Tree" (see the row's comment). */
 const val GROUP_WORKSPACE_TAG = "drawer-group-workspace"
