@@ -609,3 +609,73 @@ The cold-start "Loading sessions…" wait is host latency: the live probe showed
 `fetchSessions` is two linear passes plus one subagent-catalog index, so it is not
 the quadratic cost.
 
+
+## Workspace reordering (2026-10-24)
+
+The request was "i want to be able to reorder workspaces" — the Workspaces' own
+order, not `Order: Manual / Updated` (which governs sessions inside one Workspace).
+The host does have a method, so this is a port with a deliberate interaction change,
+not a client-side rearrangement.
+
+**Host.** `workspace/insertBefore` (`WorkspaceInsertBeforeRequest {workspaceId,
+beforeWorkspaceId?}` → `WorkspaceOrderValue {workspaceIds}`) is declared in
+`dsh-api-workspace-controller/lib/types/types.d.ts:95-103`, implemented in
+`.../lib/types/commands.js:74-86`, and its implementation is
+`dsh-workspace/lib/index.js:477-497` (abridged — the elided lines build the new
+array and no-op a move that changes nothing):
+
+```js
+insertBefore(id, beforeId) {
+    return this.enqueueOperation(async () => {
+        const state = this.requireState();
+        if (!state.workspaceIds.includes(id)) throw new WorkspaceOrderInvalidError(id);
+        if (beforeId !== void 0 && !state.workspaceIds.includes(beforeId)) throw new WorkspaceOrderInvalidError(beforeId);
+        ...
+        await this.setState({ ...state, workspaceIds });
+        return workspaceIds;
+    });
+}
+```
+
+The array is durable domain state (`workspaceIds` is "the authoritative display
+order", `dsh-workspace/lib/types/spec.d.ts:24-31`), so the order is the host's and
+two devices agree. Every commit publishes an `order` increment on `workspace/follow`
+(`dsh-api-workspace-controller/lib/index.js:99-113`), which the drawer already
+consumed.
+
+**Web.** `dsh-client-ui-workspace` does reorder Workspaces, but only by HTML5 drag:
+rows are `draggable` (`lib/client.js:1291-1297`), the group is a drop target
+(`:2484-2507`), and the commit is
+
+```js
+const commitWorkspaceDrag = (activeDrag, over) => {
+    ...
+    insertWorkspaceBefore(activeDrag.workspaceId, anchor).catch((reason) => {
+        console.warn("workspace reorder rejected:", reason);
+    });
+};
+```
+
+(`lib/client.js:2407-2423`). The web's client model installs the local order
+optimistically and reinstalls `committedOrder` on failure
+(`.../lib/types/client/model.js:89-103`), but its UI only logs the refusal: nothing
+on screen says why the row moved back. `docs/research/chrome-ui.md:1307` already
+records that HTML5 drag is a dead end on touch ("Touch generates no HTML5 drag
+events"), and `docs/PARITY.md` lists it as such.
+
+**What the app does.** Each Workspace header carries a `⋮` menu labelled the web's
+own "Workspace actions for {name}", with "Move up"/"Move down". This is the deliberate
+divergence: the row's tap already folds its section, the drawer is 300dp wide, and a
+drag over sticky headers with nested sections would have to share the gesture with a
+fold, a `+` and a menu. Each tap sends the host's anchor form directly:
+`WorkspaceMove(workspaceId, beforeWorkspaceId)`, applied optimistically, reconciled
+with the reply's complete `workspaceIds`, and — on refusal — reverted to the last
+host-confirmed order with a visible reason (`workspaceMoveRefusal`). In Tree mode the
+pair is sibling-scoped: a child can pass only its siblings in the derived tree, its
+parent link is decided by its path and never changes, and an only child gets no menu.
+(Down names the registry row after the next sibling, or no anchor to append — a
+flat-order detail; the derived sibling order is the same either way.)
+
+Verified only by source reading and JVM tests: no live `workspace/insertBefore` was
+issued (a call mutates the live registry), no host was asked to refuse one, and no
+device was touched.

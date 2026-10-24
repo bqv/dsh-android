@@ -135,7 +135,11 @@ of where the app stands against them.
       hidden-file toggle, new-folder flow, truncation notice. Opening registers it via
       `workspace/create` and adopts the created `workspaceId`
       (`DshViewModel.addWorkspace`, `ui/components/WorkspaceBrowser.kt`)
-- [ ] Bottom fade + drag-to-reorder
+- [x] Workspace reordering — `workspace/insertBefore` from each Workspace row's menu
+      ("Move up"/"Move down"), sibling-scoped in Tree mode. An explicit pair, not a
+      drag: the web's HTML5 drag does not exist on touch and the row's tap already
+      folds its section (`DshViewModel.moveWorkspace`, `model/WorkspaceOrder.kt`)
+- [ ] Bottom fade + drag-to-reorder (sessions; the Workspaces use the menu pair above)
 - [ ] Row hover card — desktop-only in the web; on touch the row menu is the equivalent
 
 ## Conversation header
