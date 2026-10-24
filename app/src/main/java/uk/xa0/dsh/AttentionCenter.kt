@@ -742,13 +742,17 @@ class AttentionCenter(private val context: Context) {
             subjectIsSubagent = subjectIsSubagent,
         )
         var raised = false
+        // The wait this handler has parked last, so the exit below can release exactly
+        // that one and nothing a re-announcement put in its place.
+        var parked: CompletableDeferred<QuestionWaits.Outcome>? = null
         // A skip the host does not take goes round again instead of ending here: a
         // refused post never reaches the host's own settle, so the waterfall is still
         // pending, and the card belongs back on screen with the reason and a live wait
         // behind it. An answer and the cap still end the handler first time, as before.
-        while (true) {
-            val wait = CompletableDeferred<QuestionWaits.Outcome>()
-            try {
+        try {
+            while (true) {
+                val wait = CompletableDeferred<QuestionWaits.Outcome>()
+                parked = wait
                 // A re-announcement on a new generation replaces this waterfall's wait:
                 // the answer has to travel on the new generation's socket, so the fresh
                 // wait is the one that may send. The replaced wait is handed back now
@@ -756,6 +760,10 @@ class AttentionCenter(private val context: Context) {
                 // the old socket's handler can end instead of outliving the socket by up
                 // to the question timeout. See [QuestionWaits] for why the hand-back
                 // cannot be mistaken for an answer.
+                //
+                // A retry replaces the completed wait in place rather than releasing it
+                // first, so a tap can never fall into the gap between the two and find
+                // nothing to complete.
                 questionWaits.install(eventId, wait)
                 // The card is raised once. A retry only re-arms the wait behind the card
                 // the reader is already looking at, because that card was never taken
@@ -818,13 +826,13 @@ class AttentionCenter(private val context: Context) {
                 if (!questionSets.replace(key, set, refused)) return
                 set = refused
                 publishVisible()
-            } finally {
-                // A handler the socket's own shutdown cancelled never reached its send, so
-                // releasing here stops its slot outliving it: a later tap would otherwise
-                // complete a wait nobody is listening to, clear the card and send nothing.
-                // Compare-and-remove, so a re-announcement's fresh wait is left alone.
-                questionWaits.release(eventId, wait)
             }
+        } finally {
+            // A handler the socket's own shutdown cancelled never reached its send, so
+            // releasing here stops its slot outliving it: a later tap would otherwise
+            // complete a wait nobody is listening to, clear the card and send nothing.
+            // Compare-and-remove, so a re-announcement's fresh wait is left alone.
+            parked?.let { questionWaits.release(eventId, it) }
         }
     }
 
