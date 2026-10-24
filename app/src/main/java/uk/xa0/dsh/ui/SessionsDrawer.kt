@@ -89,10 +89,13 @@ import uk.xa0.dsh.model.SessionSearchHit
 import uk.xa0.dsh.model.WorkspaceCopy
 import uk.xa0.dsh.model.WorkspaceGroupState
 import uk.xa0.dsh.model.WorkspaceListPhase
+import uk.xa0.dsh.model.WorkspaceMove
+import uk.xa0.dsh.model.WorkspaceMoves
 import uk.xa0.dsh.model.WorkspaceRunState
 import uk.xa0.dsh.model.liveWorkIds
 import uk.xa0.dsh.model.placeholder
 import uk.xa0.dsh.model.ungroupedTitle
+import uk.xa0.dsh.model.workspaceMoves
 import uk.xa0.dsh.model.workspaceCountLabel
 import uk.xa0.dsh.model.workspaceGroupState
 import uk.xa0.dsh.model.workspaceRunState
@@ -143,6 +146,18 @@ private data class Section(
      * only when it can say where the session goes.
      */
     val createIn: String? = null,
+    /**
+     * The Workspace's own two reorder moves, or null for a group with no registry row
+     * behind it.
+     *
+     * Workspaces are ordered by the host's registry, so this is not the `Order:
+     * Manual / Updated` pair (which orders the sessions inside one Workspace). The
+     * moves are explicit menu actions rather than a drag: the row's tap already folds
+     * its section, and on a 300dp drawer a drag would have to steal that gesture from
+     * a sticky header whose rows also contain a `+` and a menu. See
+     * `model/WorkspaceOrder.kt` for the semantics and Tree mode's sibling scoping.
+     */
+    val moves: WorkspaceMoves? = null,
     /**
      * Why a Workspace group draws the rows it does, or null for the groups that are not
      * a Workspace (the flat list and the catch-all). Those two exist only when they have
@@ -264,6 +279,15 @@ fun SessionsDrawer(
      * than an error. See [uk.xa0.dsh.model.sessionListErrorNote].
      */
     sessionsError: String? = null,
+    /**
+     * Why the host refused the last Workspace move, or null when the order on screen
+     * is the host's own.
+     *
+     * The order has already snapped back when this is drawn; the sentence exists so
+     * the row that jumped home has an answer, rather than a move that silently did
+     * nothing. See `DshViewModel.moveWorkspace`.
+     */
+    workspaceOrderError: String? = null,
     onSelect: (String) -> Unit,
     onNew: () -> Unit,
     /**
@@ -349,6 +373,12 @@ fun SessionsDrawer(
     searchError: String? = null,
     searchHasMore: Boolean = false,
     onSearch: (String) -> Unit = {},
+    /**
+     * Move one Workspace in the host's registry order; `beforeWorkspaceId == null`
+     * appends. The drawer decides *which* anchor an "up"/"down" tap means (sibling
+     * scoped in Tree mode), and the ViewModel owns the request and its reconciliation.
+     */
+    onMoveWorkspace: (String, String?) -> Unit = { _, _ -> },
 ) {
     val colors = DshTheme.colors
     var query by rememberSaveable { mutableStateOf("") }
@@ -564,6 +594,11 @@ fun SessionsDrawer(
         }
 
         val claimed = HashSet<String>()
+        // The Workspace registry's own order is moveable; this is the anchor each
+        // row's "Move up"/"Move down" would name. In Tree mode it is sibling-scoped,
+        // because nesting comes from paths and a child cannot be sent to another
+        // parent. See `model/WorkspaceOrder.kt`.
+        val movesById = workspaceMoves(workspaces, grouping.nestsWorkspaces)
 
         /**
          * One registered Workspace as a [Section], with its nested Workspaces built
@@ -641,6 +676,7 @@ fun SessionsDrawer(
                 countLabel = workspaceCountLabel(items.size, claimedIds, known.keys),
                 depth = node.depth,
                 children = children,
+                moves = movesById[workspace.id],
             )
         }
 
@@ -910,6 +946,23 @@ fun SessionsDrawer(
             )
         }
 
+        // A refused move, said beside the list it snapped back into. The order was
+        // restored to the host's last confirmed one before this line was drawn, so
+        // there is no local arrangement left to mislead: the sentence only explains
+        // why the row the reader just moved is back where it was.
+        val moveRefused = workspaceOrderError
+        if (moveRefused != null) {
+            Text(
+                text = moveRefused,
+                style = DshType.micro,
+                color = colors.warn,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = DshSpacing.sm)
+                    .testTag(WORKSPACE_ORDER_ERROR_TAG),
+            )
+        }
+
         Spacer(Modifier.height(DshSpacing.sm))
 
         // The web's Group by menu, as three chips rather than three menu rows: the
@@ -1075,6 +1128,8 @@ fun SessionsDrawer(
                         onCreate = section.createIn?.let { workspaceId ->
                             { onNewInWorkspace(workspaceId) }
                         },
+                        moves = section.moves,
+                        onMove = { move -> onMoveWorkspace(move.workspaceId, move.beforeWorkspaceId) },
                     )
                 }
 
@@ -1325,6 +1380,11 @@ private fun LazyListScope.searchResults(
  * chevron and create button are hover-revealed there, so the open/closed folder is
  * the resting affordance, and tapping anywhere on the row toggles the group.
  *
+ * The `+` and the `⋮` are the two exceptions to "anywhere": each is its own 28dp
+ * target with its own click, so a fold never lands on a create and a create never
+ * folds the section. There is deliberately no drag target on this row — the reorder
+ * pair lives in the `⋮` menu, because a drag would have to share the fold gesture.
+ *
  * The two facts a header carries are painted on two different elements, so they cannot be
  * confused for one another:
  *
@@ -1381,6 +1441,16 @@ private fun ProjectRow(
     icon: ImageVector? = null,
     /** Null for the buckets with no Workspace behind them: the flat list and Ungrouped. */
     onCreate: (() -> Unit)? = null,
+    /**
+     * The Workspace's own reorder pair, or null for a group with no registry row.
+     *
+     * Both sides null means there is nothing to reorder (one Workspace, or an only
+     * child in Tree mode), and no menu is drawn: a pair of permanently greyed items
+     * would be a control that only ever says no.
+     */
+    moves: WorkspaceMoves? = null,
+    /** Applies one of [moves]; required whenever [moves] offers a side. */
+    onMove: ((WorkspaceMove) -> Unit)? = null,
     /**
      * Whether the open session lives in this group. The web tints the folder of the
      * Workspace that contains the selection (`folderActive`,
@@ -1446,6 +1516,75 @@ private fun ProjectRow(
                     .clip(CircleShape)
                     .clickableNoRipple(onClick = onCreate)
                     .padding(DshSpacing.xs),
+            )
+        }
+        // The registry's own order, moved by explicit actions rather than a drag.
+        // The row's tap already means "fold this section", and that gesture is worth
+        // more on a phone than a drag whose insertion preview would have to share the
+        // sticky header with a fold, a count, a "+" and a menu.
+        val moveMenu = moves?.takeIf { it.up != null || it.down != null }
+        if (moveMenu != null && onMove != null) {
+            Spacer(Modifier.width(DshSpacing.xxs))
+            WorkspaceRowMenu(title = title, moves = moveMenu, onMove = onMove)
+        }
+    }
+}
+
+/**
+ * The Workspace header's overflow menu: "Move up" / "Move down" in the host's
+ * registry order.
+ *
+ * The menu is always drawn, like the row's `+` and for the same reason: the web reveals
+ * its row actions on hover, which a phone does not have. Its label is the web's own
+ * (`actions.workspace.aria` = "Workspace actions for {name}").
+ *
+ * One item is disabled at each end of the Workspace's sibling list. The action is the
+ * only reorder gesture on this client: a drag would have to steal the row's fold tap,
+ * and the drawer's sticky headers and Tree nesting make a live insertion preview a
+ * half-measure that fails exactly where the list is long.
+ */
+@Composable
+private fun WorkspaceRowMenu(
+    title: String,
+    moves: WorkspaceMoves,
+    onMove: (WorkspaceMove) -> Unit,
+) {
+    val colors = DshTheme.colors
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Icon(
+            Icons.Rounded.MoreVert,
+            // The description sits on the same node as the click, not on the glyph
+            // inside it: a screen reader and a test both need to find one control,
+            // and a description on a child would leave the tappable node unnamed.
+            contentDescription = null,
+            tint = colors.labelTertiary,
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .clickableNoRipple { open = true }
+                .semantics { contentDescription = WorkspaceCopy.actions(title) }
+                .padding(DshSpacing.xxs),
+        )
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text(WorkspaceCopy.MOVE_UP, style = DshType.bodyMedium, color = colors.labelPrimary) },
+                enabled = moves.up != null,
+                onClick = {
+                    open = false
+                    moves.up?.let(onMove)
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(WorkspaceCopy.MOVE_DOWN, style = DshType.bodyMedium, color = colors.labelPrimary) },
+                enabled = moves.down != null,
+                onClick = {
+                    open = false
+                    moves.down?.let(onMove)
+                },
             )
         }
     }
@@ -1891,6 +2030,9 @@ private fun MiniChoice(
  * names the reason, which varies, so the tag is what identifies the node.
  */
 const val SESSIONS_STALE_TAG = "drawer-sessions-stale"
+
+/** The refused-move line's seat, for `SessionsDrawerWorkspaceOrderTest`. */
+const val WORKSPACE_ORDER_ERROR_TAG = "drawer-workspace-order-error"
 
 /** The three Group chips; "Tree" is the web's "Workspace Tree" (see the row's comment). */
 const val GROUP_WORKSPACE_TAG = "drawer-group-workspace"

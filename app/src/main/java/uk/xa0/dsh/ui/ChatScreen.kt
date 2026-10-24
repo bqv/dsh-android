@@ -833,6 +833,10 @@ fun ChatScreen(vm: DshViewModel) {
                     // the rows and says so, rather than leaving yesterday's
                     // sessions looking current.
                     sessionsError = ui.sessionsError,
+                    // The host refused the last Workspace move: the order has already
+                    // snapped back, so this is the reason the row returned.
+                    workspaceOrderError = ui.workspaceOrderError,
+                    onMoveWorkspace = vm::moveWorkspace,
                     onSelect = {
                         vm.openSession(it)
                         scope.launch { drawerState.close() }
