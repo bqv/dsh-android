@@ -127,6 +127,10 @@ import uk.xa0.dsh.model.TodoItem
 import uk.xa0.dsh.model.PreviewFormat
 import uk.xa0.dsh.model.WorkspaceFileLoader
 import uk.xa0.dsh.model.WorkspaceListPhase
+import uk.xa0.dsh.model.WorkspaceMove
+import uk.xa0.dsh.model.applyWorkspaceMove
+import uk.xa0.dsh.model.applyWorkspaceOrder
+import uk.xa0.dsh.model.workspaceMoveRefusal
 import uk.xa0.dsh.model.previewFormatOf
 import uk.xa0.dsh.model.TranscriptReducer
 import uk.xa0.dsh.model.arr
@@ -753,6 +757,17 @@ data class UiState(
      * to [WorkspaceListPhase.Pending].
      */
     val workspacesPhase: WorkspaceListPhase = WorkspaceListPhase.Pending,
+    /**
+     * Why the last Workspace move was refused, in the app's own words, or null when
+     * the order on screen is the host's own.
+     *
+     * A move is shown immediately and reconciled with `workspace/insertBefore`'s
+     * complete `workspaceIds` reply. When the host refuses, the order **snaps back**
+     * to the last order it confirmed, and this sentence says why — the alternative,
+     * keeping the local arrangement, would show a state the host does not hold. See
+     * [moveWorkspace].
+     */
+    val workspaceOrderError: String? = null,
     val archivedSessionIds: Set<String> = emptySet(),
     /**
      * Host content-search hits for the drawer's query (`session/search`), already
@@ -1276,6 +1291,20 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
     private var routerProbeJob: Job? = null
     private var controlJob: Job? = null
     private var workspacesJob: Job? = null
+    /**
+     * The Workspace order the host has confirmed, in registry order.
+     *
+     * Kept beside the stream rather than re-derived from [UiState.workspaces] because
+     * an optimistic move makes the two disagree until the reply lands. On a refusal
+     * this is what the drawer snaps back to, so the order always returns to one the
+     * host is known to hold. Updated by a baseline, by every `order` increment and by
+     * a successful `workspace/insertBefore` reply.
+     */
+    private var workspaceCommittedOrder: List<String> = emptyList()
+    /** Latest local move request; only its reply may install an order. */
+    private var workspaceOrderRequest = 0L
+    /** Increments on pushed orders, so a stale unary echo cannot outrank one. */
+    private var workspaceOrderFrame = 0L
     private var muxWired = false
     /**
      * Every coroutine [ensureMuxWiring] started, so a rewire can cancel exactly
@@ -5622,9 +5651,14 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                         // seeing a new one after a resume proves the stream really
                         // re-subscribed (and not just that a coroutine is "active").
                         Log.d(SIDEBAR_TAG, "workspace baseline: ${items.length()} workspaces, ${archived.size} archived")
+                        val rows = (0 until items.length())
+                            .mapNotNull { items.optJSONObject(it)?.let(::toWorkspace) }
+                        // A baseline is the complete host order, so it is the committed
+                        // one too; its generation retires an older move's echo.
+                        workspaceCommittedOrder = rows.map { it.id }
+                        workspaceOrderFrame++
                         _ui.value = _ui.value.copy(
-                            workspaces = (0 until items.length())
-                                .mapNotNull { items.optJSONObject(it)?.let(::toWorkspace) },
+                            workspaces = rows,
                             // The registry has now answered, whatever it answered:
                             // a baseline of zero items is a host with no Workspaces,
                             // which the sidebar may say — an *absent* baseline is not.
@@ -5648,9 +5682,15 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
 
                     "order" -> {
                         val order = value.arr("workspaceIds") ?: return@collect
-                        val rank = (0 until order.length()).associate { order.optString(it) to it }
+                        val workspaceIds = (0 until order.length())
+                            .map { order.optString(it) }
+                            .filter { it.isNotEmpty() }
+                        // A pushed order is the host's committed one, and its generation
+                        // means a unary echo that raced it installs nothing.
+                        workspaceCommittedOrder = workspaceIds
+                        workspaceOrderFrame++
                         _ui.value = _ui.value.copy(
-                            workspaces = _ui.value.workspaces.sortedBy { rank[it.id] ?: Int.MAX_VALUE },
+                            workspaces = applyWorkspaceOrder(_ui.value.workspaces, workspaceIds),
                         )
                     }
 
@@ -5772,6 +5812,92 @@ class DshViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     _directoryError.value = describe(error)
                 }
+            }
+        }
+    }
+
+    /**
+     * Move one Workspace within the host's registry order
+     * (`workspace/insertBefore`).
+     *
+     * This is the Workspaces' own order, which is a host fact: the registry stores
+     * one array and `workspace/follow` pushes an `order` increment whenever it
+     * changes, so a move made here is the same move another device sees. It is not
+     * the drawer's `Order: Manual / Updated` pair, which governs the sessions inside
+     * one Workspace.
+     *
+     * The move is shown immediately and then reconciled, in this order:
+     *
+     *  * optimistically, the row lands at [beforeWorkspaceId] (null appends, the
+     *    host's own reading of an absent anchor);
+     *  * a successful reply installs its complete `workspaceIds`, which is the order
+     *    the registry actually committed — not the one the app predicted;
+     *  * a refusal **snaps back** to [workspaceCommittedOrder] and records why in
+     *    [UiState.workspaceOrderError]. Keeping the local arrangement would show a
+     *    state the host does not hold, and the next baseline would undo it anyway.
+     *
+     * Only the newest request's reply may install an order, and a pushed `order`
+     * increment outranks a slower unary echo. That is the same generation rule the
+     * web's client model applies (`dsh-api-workspace-controller/lib/types/client/model.js`,
+     * `orderRequestGeneration` / `orderFrameGeneration`).
+     *
+     * @param workspaceId the Workspace to move.
+     * @param beforeWorkspaceId the anchor it lands in front of, or null to append.
+     */
+    fun moveWorkspace(workspaceId: String, beforeWorkspaceId: String?) {
+        val current = _ui.value.workspaces
+        if (current.none { it.id == workspaceId }) return
+        val optimistic = applyWorkspaceMove(current, WorkspaceMove(workspaceId, beforeWorkspaceId))
+        // A stale anchor (the stream moved on under the menu) changes nothing; there
+        // is nothing truthful to send and no reason to clear the order on screen.
+        if (optimistic == current) return
+        val request = ++workspaceOrderRequest
+        val frame = workspaceOrderFrame
+        _ui.value = _ui.value.copy(workspaces = optimistic, workspaceOrderError = null)
+        viewModelScope.launch {
+            try {
+                val args = JSONObject().put("workspaceId", workspaceId)
+                if (beforeWorkspaceId != null) args.put("beforeWorkspaceId", beforeWorkspaceId)
+                val value = client.rpc("workspace/insertBefore", JSONObject().put("request", args))
+                if (request != workspaceOrderRequest || frame != workspaceOrderFrame) return@launch
+                val array = value.arr("workspaceIds")
+                val workspaceIds = if (array == null) {
+                    emptyList()
+                } else {
+                    (0 until array.length()).map { array.optString(it) }.filter { it.isNotEmpty() }
+                }
+                if (workspaceIds.isEmpty()) {
+                    // A 2xx without the complete order cannot confirm the move; the
+                    // pushed `order` increment that follows a commit will settle the
+                    // list, and until then the optimistic order is the newest fact.
+                    Log.w(SIDEBAR_TAG, "workspace/insertBefore answered without workspaceIds")
+                    return@launch
+                }
+                workspaceCommittedOrder = workspaceIds
+                _ui.value = _ui.value.copy(
+                    workspaces = applyWorkspaceOrder(_ui.value.workspaces, workspaceIds),
+                    workspaceOrderError = null,
+                )
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: DshAuthException) {
+                // Signing out is not a reason to leave a local order behind either.
+                if (request == workspaceOrderRequest) {
+                    _ui.value = _ui.value.copy(
+                        workspaces = applyWorkspaceOrder(_ui.value.workspaces, workspaceCommittedOrder),
+                    )
+                }
+                onAuthFailure("workspace/insertBefore", error)
+            } catch (error: Throwable) {
+                // A newer move owns the screen now; its own reply will settle the
+                // order and say what happened.
+                if (request != workspaceOrderRequest) return@launch
+                val title = _ui.value.workspaces.firstOrNull { it.id == workspaceId }?.title
+                    ?: workspaceId
+                _ui.value = _ui.value.copy(
+                    workspaces = applyWorkspaceOrder(_ui.value.workspaces, workspaceCommittedOrder),
+                    workspaceOrderError = workspaceMoveRefusal(title, describe(error)),
+                )
             }
         }
     }
