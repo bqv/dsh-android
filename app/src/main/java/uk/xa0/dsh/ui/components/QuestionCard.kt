@@ -48,11 +48,19 @@ typealias QuestionAnswer = Triple<String, List<String>, String?>
  * This is the one place the client *must* answer: the host's `ask_user_question`
  * tool blocks until the waterfall resolves, so doing nothing is not a neutral
  * outcome — the host fails the call with `NO_PROVIDER` and the agent loses the
- * interaction. "Skip" therefore delegates deliberately rather than silently.
+ * interaction. "Skip" therefore sends a **result** in which every question selects
+ * nothing, which is the web's own encoding of a skipped set and what the host reads
+ * as "the user skipped this question". It is not a hand-back: `{kind:"next"}` asks
+ * the host to try another answerer, and with none it fails the call instead.
+ *
+ * A skip the host refuses keeps the card up with [PendingQuestionSet.notice] saying
+ * so, rather than clearing over it: the agent is still blocked, and a card that
+ * vanished would be the only place the reader could have learned that.
  *
  * A plan review (`intent.kind === 'plan-review'`) is the same card with the plan
  * shown as the detail and the approve label marked, exactly as the web presents
- * it; the answer encoding is identical either way.
+ * it; the answer encoding is identical either way, and an empty selection is how the
+ * host reads "keep planning".
  *
  * Divergence from the web: a multi-question request renders every question in one
  * scrollable card instead of one-at-a-time with prev/next. On a phone the whole
@@ -179,6 +187,17 @@ fun QuestionCard(
                     label = null,
                     singleLine = false,
                     minHeight = 44.dp,
+                )
+            }
+
+            // A skip the host did not take comes back here, on the card the reader is
+            // still looking at, so a refusal is never just a disappearing card.
+            set.notice?.let { notice ->
+                Spacer(Modifier.height(DshSpacing.lg))
+                Text(
+                    text = notice,
+                    style = DshType.micro,
+                    color = colors.error,
                 )
             }
 

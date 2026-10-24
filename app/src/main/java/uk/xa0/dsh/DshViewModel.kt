@@ -672,6 +672,16 @@ data class PendingQuestionSet(
     val questions: List<PendingQuestion>,
     /** Whether the asking session is a subagent, so the card can say "subagent". */
     val subjectIsSubagent: Boolean = false,
+    /**
+     * Why the last attempt to skip the set was not taken, in the app's own words, or
+     * null when there is nothing to report.
+     *
+     * A skip is the one outcome the host can refuse outright, and the card is the
+     * only place the reader would learn that the agent is still blocked: the set
+     * therefore stays on screen with this line rather than clearing over a refusal.
+     * Any later tap replaces the set, so the line goes with the attempt that failed.
+     */
+    val notice: String? = null,
 )
 
 /**
