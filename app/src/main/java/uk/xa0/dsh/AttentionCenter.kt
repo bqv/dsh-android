@@ -880,15 +880,22 @@ class AttentionCenter(private val context: Context) {
     }
 
     /**
-     * Delegates the request untouched, which surfaces the host's own refusal.
+     * The reader skipped the whole set: every question goes back with nothing selected.
      *
-     * A skip is a delivered outcome like an answer, not a hand-back: the host is told
-     * that this client will not decide, so it refuses the question in its own words
-     * instead of leaving the agent blocked on silence.
+     * A skip is a delivered **result**, exactly like an answer, not a hand-back to the
+     * host. The web's own encoding of a skipped set is an answer batch whose items
+     * select nothing (`dsh-client-ui-user-questions/lib/client.js`, `submitDrafts`),
+     * and the host documents that shape as a skipped answer (`dsh-tool-ask-user`:
+     * "A submitted skipped question is an answer item with empty selected and no
+     * custom"). Sending `{kind:"next"}` instead *declines* the question on the
+     * reader's behalf: the gateway reads it as "ask the next answerer"
+     * (`dsh-api-remotes/lib/index.js`, `forwardWaterfall`), and with no other answerer
+     * the host fails the request with `NO_PROVIDER` — which a timed wait turns into a
+     * full-timeout `pending` result. The agent was never told that anybody skipped it.
      */
     fun skipQuestions() {
         val current = _questions.value ?: return
-        if (!questionWaits.skip(current.eventId)) return
+        if (!questionWaits.skip(current.eventId, current.questions.map { it.id })) return
         removeQuestions(current.eventId)?.let {
             Attention.cancel(context, Attention.questionId(it.sessionId))
             publishVisible()
